@@ -1,30 +1,30 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
-from helpers import process_upload, validate_file
-import logging, uvicorn, threading
-from db import connect_to_mongo, disconnect_on_exit, parse_data
 
-# Set up logging
-# logging.basicConfig(level=logging.DEBUG)
+from .helpers import validate_file, process_upload
+import threading, logging
+from backend.config.root import connect_to_mongo, disconnect_on_exit, parse_data  # type: ignore
+
+router = APIRouter()
+
 logger = logging.getLogger(__name__)
 logger.propagate = False
 
-app = FastAPI()
 client, db = connect_to_mongo()
 
 
-@app.get("/")
+@router.get("/")
 def index():
     users = parse_data(db.users.find())
     return {"users": users}
 
 
-@app.get("/hello")
+@router.get("/hello")
 def hello_world():
     return {"data": "Hello, World!"}
 
 
-@app.post("/upload")
+@router.post("/upload")
 async def upload_file(file: UploadFile = File(...), email: str = Form(...)):
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
@@ -55,7 +55,7 @@ async def upload_file(file: UploadFile = File(...), email: str = Form(...)):
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
 
 
-@app.get("/download")
+@router.get("/download")
 def download():
     name = "Template.xlsx"
     try:
@@ -67,8 +67,3 @@ def download():
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=1000)
-    app.add_event_handler("shutdown", disconnect_on_exit(client))

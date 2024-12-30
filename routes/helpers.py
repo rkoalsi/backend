@@ -119,13 +119,11 @@ def get_access_token(tkn: str):
     else:
         print("missing token type")
         return
-    access_token = str(r.json()["access_token"])
+    access_token = str(r.json().get("access_token", ""))
     print(f"Got {tkn.capitalize()} Access Token: {access_token[-4:]}")
     return access_token
 
 
-access_token = get_access_token("books")
-headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 company_name = "Pettingzoo"
 
 
@@ -228,6 +226,8 @@ def extract_table_data(file_path, sheet_name):
 
 def get_purchase_orders(items):
     po = []
+    access_token = get_access_token("books")
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     p = requests.get(
         url=PURCHASE_URL.format(org_id=org_id, search_text=company_name, page=1),
         headers=headers,
@@ -291,6 +291,8 @@ def get_purchase_orders(items):
 
 
 def process_upload(input_file, email):
+    access_token = get_access_token("books")
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     # Extract table data from both sheets
     input_file.seek(0)
     input_file = io.BytesIO(input_file.read())

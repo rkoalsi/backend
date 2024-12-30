@@ -1,6 +1,9 @@
 import os, json
 from bson import json_util
 from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def connect_to_mongo():
