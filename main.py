@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 import uvicorn
 from .routes.api import router
 from .config.root import connect_to_mongo, disconnect_on_exit
@@ -25,6 +26,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(404)
+async def custom_404_handler(_, __):
+    return RedirectResponse("/")
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=1000)
     app.add_event_handler("shutdown", disconnect_on_exit(client))

@@ -10,7 +10,7 @@ client, db = connect_to_mongo()
 
 @router.get("/")
 def get_products():
-    products = parse_data(db.products.find().limit(10))
+    products = parse_data(db.products.find({"status": "active"}))
     return {"products": products}
 
 

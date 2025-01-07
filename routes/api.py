@@ -12,3 +12,8 @@ router.include_router(customers, prefix="/customers", tags=["Customer"])
 router.include_router(products, prefix="/products", tags=["Product"])
 router.include_router(zoho, prefix="/zoho", tags=["Zoho"])
 router.include_router(util, prefix="/util", tags=["Util"])
+
+
+@router.get("/")
+def hello_world():
+    return "Application is Running"
