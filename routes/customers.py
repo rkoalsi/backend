@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from backend.config.root import connect_to_mongo, disconnect_on_exit, parse_data  # type: ignore
 from .helpers import validate_file, process_upload, get_access_token
 import re
+from bson.objectid import ObjectId
 
 router = APIRouter()
 
@@ -92,6 +93,15 @@ def get_customers(name: str | None = None):
 
     customers = parse_data(db.customers.find(query))
     return {"customers": customers}
+
+
+@router.get("/{customer_id}")
+def get_customer(customer_id: str):
+    print(customer_id)
+    query = {"_id": ObjectId(customer_id)}
+    print(query)
+    customer = parse_data(db.customers.find_one(query))
+    return {"customer": customer}
 
 
 @router.get("/validate_gst")

@@ -1,5 +1,6 @@
 import os, json
 from bson import json_util
+from bson.objectid import ObjectId
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -37,3 +38,17 @@ def disconnect_on_exit(client):
 
 def parse_data(data):
     return json.loads(json_util.dumps(data))
+
+
+def serialize_mongo_document(document):
+    """
+    Recursively convert MongoDB ObjectId fields to strings in a document.
+    """
+    if isinstance(document, list):
+        return [serialize_mongo_document(item) for item in document]
+    elif isinstance(document, dict):
+        return {key: serialize_mongo_document(value) for key, value in document.items()}
+    elif isinstance(document, ObjectId):
+        return str(document)
+    else:
+        return document

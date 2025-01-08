@@ -3,7 +3,6 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import HTMLResponse
 from backend.config.root import connect_to_mongo, disconnect_on_exit, parse_data  # type: ignore
 from pydantic import BaseModel, EmailStr
-from bson.objectid import ObjectId
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
@@ -102,7 +101,7 @@ async def login_user(user: UserLogin):
     access_token = create_access_token(data={"data": user})
     return {
         "message": "Login successful",
-        "user_id": str(user["_id"]),
+        "user_id": user["_id"]["$oid"],
         "access_token": access_token,
     }
 
