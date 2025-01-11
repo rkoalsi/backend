@@ -18,9 +18,17 @@ def get_product(product_id: str, collection: Collection):
     return serialize_mongo_document(product)
 
 
-@router.get("/")
+@router.get("")
 def get_products():
-    products = parse_data(db.products.find({"status": "active"}))
+    products = [
+        serialize_mongo_document(
+            {
+                **doc,
+            }
+        )
+        for doc in db.products.find({"status": "active", "stock": {"$gt": 0}})
+    ]
+
     return {"products": products}
 
 

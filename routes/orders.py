@@ -117,49 +117,28 @@ def update_order(
             order_update["customer_name"] = customer.get("company_name")
             order_update["gst_type"] = customer.get("cf_in_ex")
 
-    # Handle product updates
+    # Handle product updates (replace the entire product list)
     if "products" in order_update:
         updated_products = []
-        existing_order = order_collection.find_one({"_id": ObjectId(order_id)})
-        existing_products = existing_order.get("products", []) if existing_order else []
-        # Build a map of existing products for quick lookup
-        existing_product_map = {
-            str(product["product_id"]): product for product in existing_products
-        }
-
         for product in order_update.get("products", []):
-            product_id = (
-                ObjectId(product["_id"]["$oid"])
-                if isinstance(product["_id"], dict) and "$oid" in product["_id"]
-                else ObjectId(product["product_id"])
+            product_id = ObjectId(product["product_id"])
+            updated_products.append(
+                {
+                    "product_id": product_id,
+                    "tax_percentage": (
+                        product.get("item_tax_preferences", [{}])[0].get(
+                            "tax_percentage", 0
+                        )
+                    ),
+                    "brand": product.get("brand", ""),
+                    "product_code": product.get("cf_sku_code", ""),
+                    "quantity": product.get("quantity", 1),
+                    "name": product.get("item_name", ""),
+                    "price": product.get("rate", 0),
+                }
             )
-
-            # If product exists, update its quantity
-            if str(product_id) in existing_product_map:
-                existing_product_map[str(product_id)]["quantity"] = product.get(
-                    "quantity", existing_product_map[str(product_id)].get("quantity", 1)
-                )
-            else:
-                # Add new product
-                updated_products.append(
-                    {
-                        "product_id": product_id,
-                        "price": product.get("rate"),
-                        "tax_percentage": (
-                            product.get("item_tax_preferences", [{}])[0].get(
-                                "tax_percentage", 0
-                            )
-                        ),
-                        "brand": product.get("brand", ""),
-                        "product_code": product.get("cf_sku_code", ""),
-                        "quantity": product.get("quantity", 1),
-                    }
-                )
-
-        # Combine updated quantities with new products
-        final_products = list(existing_product_map.values()) + updated_products
-
-        order_update["products"] = final_products
+        # Replace the product list in the update payload
+        order_update["products"] = updated_products
 
     # Perform the update in MongoDB
     order_collection.update_one({"_id": ObjectId(order_id)}, {"$set": order_update})
@@ -254,3 +233,20 @@ def delete_existing_order(order_id: str):
     """
     delete_order(order_id, orders_collection)
     return {"detail": "Order deleted successfully"}
+
+
+# Update an order
+@router.put("/clear/{order_id}")
+def clear_order_cart(order_id: str):
+    """
+    Update an existing order with raw dictionary data.
+    """
+    updated_order = clear_cart(order_id, orders_collection)
+    return updated_order
+
+
+def clear_cart(order_id: str, orders_collection: Collection):
+    order = orders_collection.update_one(
+        {"_id": ObjectId(order_id)}, {"$set": {"products": []}}
+    )
+    return order.did_upsert

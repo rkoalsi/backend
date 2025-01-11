@@ -18,14 +18,19 @@ origins = [
 
 app = FastAPI()
 client, db = connect_to_mongo()
-app.include_router(router)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(router)
+
+
+@app.options("/{path:path}")
+async def handle_options():
+    return {"message": "CORS preflight passed"}
 
 
 @app.exception_handler(404)
@@ -34,5 +39,5 @@ async def custom_404_handler(_, __):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=1000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
     app.add_event_handler("shutdown", disconnect_on_exit(client))
