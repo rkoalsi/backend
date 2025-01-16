@@ -1,9 +1,17 @@
 from pymongo.collection import Collection
 from datetime import datetime
 from typing import List
+from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo  # type: ignore
 from bson.objectid import ObjectId
+import requests, os, json, httpx
+from dotenv import load_dotenv
+
+load_dotenv()
+
+org_id = os.getenv("ORG_ID")
+ESTIMATE_URL = os.getenv("ESTIMATE_URL")
 
 
 def serialize_mongo_document(document):
@@ -34,7 +42,7 @@ def create_order(order: dict, collection: Collection) -> str:
     customer_id = order.get("customer_id", "")
     products = order.get("products", [])
     if customer_id:
-        order["customer_id"] = ObjectId(order.get("customer_id", ""))
+        order["customer_id"] = ObjectId(order.get("customer_id"))
 
     if len(products) > 0:
         order["products"] = [
@@ -82,7 +90,6 @@ def get_all_orders(created_by: str, collection: Collection):
     query = {}
     if created_by:
         query["created_by"] = ObjectId(created_by)
-    print(query)
     return [
         serialize_mongo_document(
             {
@@ -153,7 +160,7 @@ def delete_order(order_id: str, collection: Collection):
 
 
 # Create a new order
-@router.post("")
+@router.post("/")
 def create_new_order(order: dict):
     """
     Create a new order with raw dictionary data.
@@ -243,6 +250,299 @@ def clear_order_cart(order_id: str):
     """
     updated_order = clear_cart(order_id, orders_collection)
     return updated_order
+
+
+def validate_order(order_id: str, status: str):
+    order = db.orders.find_one({"_id": ObjectId(order_id)})
+
+    if not order:
+        raise HTTPException(status_code=400, detail="Order not found")
+    # Check if shipping address is missing or invalid
+    shipping_address = order.get("shipping_address", {}).get("address")
+    if not shipping_address:
+        raise HTTPException(status_code=400, detail="Shipping address is missing")
+
+    # Check if billing address is missing or invalid
+    billing_address = order.get("billing_address", {}).get("address")
+    if not billing_address:
+        raise HTTPException(status_code=400, detail="Billing address is missing")
+
+    # Check if place of supply is missing or invalid
+    place_of_supply = order.get("shipping_address", {}).get("state_code")
+    if not place_of_supply:
+        raise HTTPException(status_code=400, detail="Place of supply is missing")
+
+    # Check if products are missing or invalid
+    products = order.get("products", [])
+    if not products:
+        raise HTTPException(status_code=400, detail="Products are missing")
+
+    # Check if total amount is missing or invalid
+    total_amount = order.get("total_amount")
+    if total_amount is None:
+        raise HTTPException(status_code=400, detail="Total amount is missing")
+
+    return True
+
+
+# Finalise an order (Create Estimate)
+@router.post("/finalise")
+async def finalise(order_dict: dict):
+    """
+    finalise an existing order
+    """
+    order_id = order_dict.get("order_id")
+    status = str(order_dict.get("status")).lower()
+    try:
+        # Perform order validation
+        validate_order(order_id, status)
+    except HTTPException as e:
+        # Return validation error message if validation fails
+        return {"status": "error", "message": e.detail}
+    order = db.orders.find_one({"_id": ObjectId(order_id)})
+    estimate_created = order.get("estimate_created", False)
+    estimate_id = order.get("estimate_id", "")
+    shipping_address_id = order.get("shipping_address", {}).get("address_id", "")
+    billing_address_id = order.get("billing_address", {}).get("address_id", "")
+    customer = db.customers.find_one({"_id": ObjectId(order.get("customer_id"))})
+    place_of_supply = order.get("shipping_address", {}).get("state_code")
+    gst_type = order.get("gst_type", "")
+    products = order.get("products", [])
+    total_amount = order.get("total_amount")
+    line_items = []
+    for idx, product in enumerate(products):
+        item = db.products.find_one({"_id": ObjectId(product.get("product_id"))})
+        obj = {
+            "item_order": idx + 1,
+            "item_id": item.get("item_id"),
+            "rate": item.get("rate"),
+            "name": item.get("name"),
+            "description": "",
+            "quantity": product.get("quantity"),
+            "discount": customer.get("cf_margin", "40%"),
+            "tax_id": (
+                item.get("item_tax_preferences", [{}])[1].get("tax_id", 0)
+                if place_of_supply == "MH" or place_of_supply == ""
+                else item.get("item_tax_preferences", [{}])[0].get("tax_id", 0)
+            ),
+            "tags": [],
+            "tax_exemption_code": "",
+            "item_custom_fields": [
+                {"label": "Manufacturer Code", "value": item.get("cf_item_code")},
+                {"label": "SKU Code", "value": item.get("cf_sku_code")},
+            ],
+            "hsn_or_sac": item.get("hsn_or_sac"),
+            "gst_treatment_code": "",
+            "unit": "pcs",
+            "unit_conversion_id": "",
+        }
+        line_items.append(obj)
+
+    terms = """1. All disputes are subject to jurisdiction in Mumbai only. \n2. Payment terms: \n2.a. First 5 orders will be upfront payment.\n2.b. As business and regular orders come through option of 2-4 week Cheque / post-dated cheque (PDC) will be offered.\n2.c. For payments made via NEFT, IMPS, RTGS or cheque's directly deposited, Kindly send us the receipt on our WhatsApp no.+91 9930623544 / +91 9372236448 or info@barkbutler.in.\n2d. Incase of cheque bounce or payment default we will be allowed to take any goods available in your premises to cover our invoice amount, damages, interest rate on defaulted payments (mentioned below), lawyer fees (if involved) and expenses for transportation of goods from your premises to ours. If you, your team members or staff behave rudelyf we will involve the police if required. \n3. Customer will be informed before the PDC is deposited.\n4. On delivery of goods our courier partner will take the authority person's signature on the courier bill. This implies that the goods have been received and accepted by you and the Invoice sent in your package or via whatsapp is now your liability. We wont take a signed copy of the invoice as there will further charges and delay to send it back to us. \n5. Bills not cleared by the due date will attract 24% interest p.a.\n6. Our responsibility shall cease after the goods are handed over to the carrier.\n7. Returns & Replacements \n7.a. On receipt of the order, you have 5 days to lodge any complaint regarding missing/damaged items. 6.b. In case the retailer's customer receives a damaged product the item will be replaced.\n7.c In case the retailer’s customer damages/destroys the products within 3 days, the item will be replaced. Kindly note, returns are only applicable if the right-sized product (as mentioned on the packaging) is sold to the right sized dog. \n8. Items not sold within 8-12 weeks shall be sold via a discount scheme or replaced with better-suited items for that particular retail store.\n9. Logistics charges can be applicable for goods sold and returned.  \n10. A non-negotiable penalty of ₹1000 will be levied for dishonoured cheque"""
+    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token("books")}"}
+    message = ""
+    estimate_data = {}
+    if not estimate_created:
+        async with httpx.AsyncClient() as client:
+            y = await client.get(
+                url=ESTIMATE_URL.format(org_id=org_id)
+                + "&filter_by=Status.All&per_page=200&sort_column=estimate_number&sort_order=D",
+                headers=headers,
+            )
+            y.raise_for_status()
+            last_estimate_number = str(
+                y.json()["estimates"][0]["estimate_number"]
+            ).split("/")
+            new_estimate_number = f"{last_estimate_number[0]}/{last_estimate_number[1]}/{int(last_estimate_number[-1]) + 1}"
+            print(new_estimate_number)
+            # Prepare the request payload
+            payload = {
+                "estimate_number": new_estimate_number,
+                "location_id": "3220178000143298047",
+                "contact_persons": [],
+                "customer_id": customer.get("contact_id"),
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "expiry_date": "",
+                "notes": "Looking forward for your business.",
+                "terms": terms,
+                "line_items": line_items,
+                "custom_fields": [],
+                "is_inclusive_tax": True,
+                "is_discount_before_tax": "",
+                "discount": 0,
+                "discount_type": "item_level",
+                "adjustment": "",
+                "adjustment_description": "Adjustment",
+                "tax_exemption_code": "",
+                "tax_authority_name": "",
+                "pricebook_id": "",
+                # "template_id": "3220178000000075080",
+                "payment_options": {"payment_gateways": []},
+                "documents": [],
+                "mail_attachments": [],
+                "billing_address_id": billing_address_id,
+                "shipping_address_id": shipping_address_id,
+                "dispatch_from_address_id": "3220178000177830244",
+                "project_id": "",
+                "gst_treatment": customer.get("gst_treatment"),
+                "gst_no": customer.get("gst_no", ""),
+                "place_of_supply": place_of_supply,
+                "is_tcs_amount_in_percent": True,
+                "client_computation": {"total": total_amount},
+            }
+            print(json.dumps(payload, indent=4))
+            estimate_response = await client.post(
+                url=ESTIMATE_URL.format(org_id=org_id)
+                + "&ignore_auto_number_generation=true",
+                headers=headers,
+                json=payload,
+            )
+            estimate_response.raise_for_status()
+
+            estimate_data = estimate_response.json()["estimate"]
+            estimate_id = estimate_data.get("estimate_id")
+            estimate_number = estimate_data.get("estimate_number")
+            estimate_url = estimate_data.get("estimate_url")
+            db.estimates.insert_one(
+                {
+                    **estimate_data,
+                    "order_id": ObjectId(order_id),
+                }
+            )
+            db.orders.update_one(
+                {"_id": ObjectId(order_id)},
+                {
+                    "$set": {
+                        "status": "draft",
+                        "estimate_created": True,
+                        "estimate_id": estimate_id,
+                        "estimate_number": estimate_number,
+                        "estimate_url": estimate_url,
+                    }
+                },
+            )
+            message = f"Estimate has been created - {estimate_data['estimate_number']} with Status : {str(status).capitalize()}\n"
+
+            return {"status": "success", "message": message}
+    else:
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "location_id": "3220178000143298047",
+                "contact_persons": [],
+                "customer_id": customer.get("contact_id"),
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "expiry_date": "",
+                "notes": "Looking forward for your business.",
+                "terms": terms,
+                "line_items": line_items,
+                "custom_fields": [],
+                "is_inclusive_tax": False if gst_type == "Exclusive" else True,
+                "is_discount_before_tax": "",
+                "discount": 0,
+                "discount_type": "item_level",
+                "adjustment": "",
+                "adjustment_description": "Adjustment",
+                "tax_exemption_code": "",
+                "tax_authority_name": "",
+                "pricebook_id": "",
+                # "template_id": "3220178000000075080",
+                "payment_options": {"payment_gateways": []},
+                "documents": [],
+                "mail_attachments": [],
+                "billing_address_id": billing_address_id,
+                "shipping_address_id": shipping_address_id,
+                "dispatch_from_address_id": "3220178000177830244",
+                "project_id": "",
+                "gst_treatment": customer.get("gst_treatment"),
+                "gst_no": customer.get("gst_no", ""),
+                "place_of_supply": place_of_supply,
+                "is_tcs_amount_in_percent": True,
+                "client_computation": {"total": total_amount},
+            }
+
+            y = await client.put(
+                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}?organization_id={org_id}",
+                headers=headers,
+                json=payload,
+            )
+            y.raise_for_status()
+            estimate_data = y.json()["estimate"]
+            estimate_id = estimate_data.get("estimate_id")
+            estimate_number = estimate_data.get("estimate_number")
+            estimate_url = estimate_data.get("estimate_url")
+            message = f"Estimate has been updated - {estimate_number} with Status : {str(status).capitalize()}\n"
+            db.orders.update_one(
+                {"_id": ObjectId(order_id)},
+                {
+                    "$set": {
+                        "status": "sent",
+                        "estimate_created": True,
+                        "estimate_id": estimate_id,
+                        "estimate_number": estimate_number,
+                        "estimate_url": estimate_url,
+                    }
+                },
+            )
+    await email_estimate(
+        status,
+        order_id,
+        estimate_data["estimate_id"],
+        estimate_data["estimate_number"],
+        estimate_data["estimate_url"],
+        message,
+        headers,
+    )
+    return {"status": "success", "message": message}
+
+
+async def email_estimate(
+    status: str,
+    order_id: str,
+    estimate_id: str,
+    estimate_number: str,
+    estimate_url: str,
+    message: str,
+    headers: dict,
+):
+    async with httpx.AsyncClient() as client:
+        if status in {"accepted", "declined"}:
+            await client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/sent?organization_id={org_id}",
+                headers=headers,
+            )
+            status_response = await client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/{status}?organization_id={org_id}",
+                headers=headers,
+            )
+            status_response.raise_for_status()
+            message += status_response.json()["message"]
+            db.orders.update_one(
+                {"_id": ObjectId(order_id)},
+                {
+                    "$set": {
+                        "status": f"{status}",
+                        "estimate_created": True,
+                        "estimate_id": estimate_id,
+                        "estimate_number": estimate_number,
+                        "estimate_url": estimate_url,
+                    }
+                },
+            )
+        # if status == "accepted":
+        #     body = {
+        #         "send_from_org_email_id": True,
+        #         "to_mail_ids": ["rkoalsi2000@gmail.com"],
+        #         "cc_mail_ids": ["rushil@barkbutler.in", "rohit@barkbutler.in"],
+        #         "subject": f"Estimate {estimate_number} Accepted",
+        #         "body": f"Dear Customer,\n\nThe estimate {estimate_number} has been accepted.\n\nRegards,\nPupscribe Enterprises Pvt Ltd",
+        #     }
+        #     resp = await client.post(
+        #         url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/email?organization_id={org_id}",
+        #         headers=headers,
+        #         json=body,
+        #     )
+        #     resp.raise_for_status()
+        #     print(resp.json())
 
 
 def clear_cart(order_id: str, orders_collection: Collection):
