@@ -18,7 +18,7 @@ def handle_estimate(data: dict):
     if not exists:
         db.estimates.insert_one(
             {
-                **customer,
+                **estimate,
                 "created_at": datetime.datetime.now(),
             }
         )
@@ -30,14 +30,14 @@ def handle_estimate(data: dict):
 def handle_customer(data: dict):
     contact = data.get("contact")
     contact_id = contact.get("contact_id")
-    exists = db.customers.find_one(
-        {
-            "contact_id": contact_id,
-            "created_at": datetime.datetime.now(),
-        }
-    )
+    exists = db.customers.find_one({"contact_id": contact_id})
     if not exists:
-        db.customers.insert_one(customer)
+        db.customers.insert_one(
+            {
+                **customer,
+                "created_at": datetime.datetime.now(),
+            }
+        )
     else:
         print("Customer Exists", json.dumps(dict(exists), indent=4))
         print("New Customer Data", json.dumps(data, indent=4))
