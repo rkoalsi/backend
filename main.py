@@ -25,7 +25,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(router)
+app.include_router(router, prefix="/api")
+
+
+@app.get("/")
+def hello_world():
+    return "Application is Running"
 
 
 @app.options("/{path:path}")
