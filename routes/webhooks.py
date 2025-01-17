@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
-import os, requests
+import datetime
 
 load_dotenv()
 
@@ -16,13 +16,23 @@ def handle_estimate(data: dict):
     estimate_id = estimate.get("estimate_id")
     exists = db.estimates.find_one({"estimate_id": estimate_id})
     if not exists:
-        db.estimates.insert_one(customer)
+        db.estimates.insert_one(
+            {
+                **customer,
+                "created_at": datetime.datetime.now(),
+            }
+        )
 
 
 def handle_customer(data: dict):
     customer = data.get("customer")
     customer_id = customer.get("customer_id")
-    exists = db.customers.find_one({"contact_id": customer_id})
+    exists = db.customers.find_one(
+        {
+            "contact_id": customer_id,
+            "created_at": datetime.datetime.now(),
+        }
+    )
     if not exists:
         db.customers.insert_one(customer)
 
