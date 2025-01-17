@@ -6,8 +6,6 @@ import os, requests
 
 load_dotenv()
 
-org_id = os.getenv("ORG_ID")
-
 router = APIRouter()
 
 client, db = connect_to_mongo()
@@ -31,11 +29,13 @@ def handle_customer(data: dict):
 
 @router.post("/estimate")
 def estimate(data: dict):
+    print(data)
     handle_estimate(data)
     return "Estimate Webhook Received Successfully"
 
 
 @router.post("/customer")
 def customer(data: dict):
+    print(data)
     handle_customer(data)
     return "Customer Webhook Received Successfully"
