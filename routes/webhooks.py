@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from backend.config.root import connect_to_mongo  # type: ignore
+from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json
@@ -14,7 +14,9 @@ client, db = connect_to_mongo()
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
     estimate_id = estimate.get("estimate_id")
-    exists = db.estimates.find_one({"estimate_id": estimate_id})
+    exists = serialize_mongo_document(
+        db.estimates.find_one({"estimate_id": estimate_id})
+    )
     if not exists:
         db.estimates.insert_one(
             {
@@ -23,14 +25,14 @@ def handle_estimate(data: dict):
             }
         )
     else:
-        print("Estimate Exists", json.dumps(dict(exists), indent=4))
+        print("Estimate Exists", json.dumps((exists), indent=4))
         print("New Estimate Data", json.dumps(data, indent=4))
 
 
 def handle_customer(data: dict):
     contact = data.get("contact")
     contact_id = contact.get("contact_id")
-    exists = db.customers.find_one({"contact_id": contact_id})
+    exists = serialize_mongo_document(db.customers.find_one({"contact_id": contact_id}))
     if not exists:
         db.customers.insert_one(
             {
@@ -39,7 +41,7 @@ def handle_customer(data: dict):
             }
         )
     else:
-        print("Customer Exists", json.dumps(dict(exists), indent=4))
+        print("Customer Exists", json.dumps((exists), indent=4))
         print("New Customer Data", json.dumps(data, indent=4))
 
 
