@@ -102,7 +102,7 @@ STATE_CODES = {
 
 
 def validate_gst_number(gst_number: str):
-    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token("books")}"}
+    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     """
     Validate GST number, extract PAN, and determine state code.
 
@@ -142,9 +142,9 @@ def validate_gst_number(gst_number: str):
 
 
 def create_address_on_zoho(address, customer):
-    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token("books")}"}
+    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     x = requests.post(
-        f"https://www.zohoapis.com/books/v3/contacts/{customer.get("contact_id")}/address?organization_id={org_id}",
+        f"https://www.zohoapis.com/books/v3/contacts/{customer.get('contact_id')}/address?organization_id={org_id}",
         headers=headers,
         json=address,
     )
@@ -380,7 +380,7 @@ async def signature_upload(
 
 @router.post("")
 def create_customer(customer: dict):
-    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token("books")}"}
+    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     contact_name = customer.get("customer_name", "")
     contact_mobile = customer.get("customer_mobile", "")
     contact_email = customer.get("customer_email", "")
