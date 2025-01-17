@@ -29,6 +29,51 @@ def handle_estimate(data: dict):
         print("New Estimate Data", json.dumps(data, indent=4))
 
 
+UNWANTED_KEYS = [
+    "is_associated_to_branch",
+    "is_bcy_only_contact",
+    "is_credit_limit_migration_completed",
+    "language_code",
+    "language_code_formatted",
+    "is_client_review_asked",
+    "documents",
+    "is_crm_customer",
+    "is_linked_with_zohocrm",
+    "price_precision",
+    "exchange_rate",
+    "can_show_customer_ob",
+    "opening_balance_amount",
+    "outstanding_ob_receivable_amount",
+    "outstanding_ob_payable_amount",
+    "outstanding_receivable_amount",
+    "outstanding_receivable_amount_bcy",
+    "outstanding_payable_amount",
+    "outstanding_payable_amount_bcy",
+    "unused_credits_receivable_amount",
+    "unused_credits_receivable_amount_bcy",
+    "unused_credits_payable_amount",
+    "unused_credits_payable_amount_bcy",
+    "unused_retainer_payments",
+    "payment_reminder_enabled",
+    "is_sms_enabled",
+    "is_consent_agreed",
+    "is_client_review_settings_enabled",
+    "approvers_list",
+    "integration_references",
+    "allow_parent_for_payment_and_view",
+    "ach_supported",
+    "cards",
+    "checks",
+    "bank_accounts",
+    "vpa_list",
+    "last_modified_time",
+    "default_templates",
+    "custom_field_hash",
+    "source",
+    "portal_status",
+]
+
+
 def handle_customer(data: dict):
     contact = data.get("contact")
     contact_id = contact.get("contact_id")
@@ -44,6 +89,15 @@ def handle_customer(data: dict):
             all(address.get(key) == existing_addr.get(key) for key in address.keys())
             for existing_addr in existing_addresses
         )
+
+    def clean_data(document):
+        # Remove unwanted keys from the document
+        for key in UNWANTED_KEYS:
+            document.pop(key, None)
+        return document
+
+    # Clean contact data
+    contact = clean_data(contact)
 
     if not existing_customer:
         # Insert the new customer with addresses
@@ -112,10 +166,7 @@ def handle_customer(data: dict):
             update_fields["updated_at"] = datetime.datetime.now()
             db.customers.update_one(
                 {"contact_id": contact_id},
-                {
-                    "$set": update_fields,
-                    "$unset": {"billing_address": "", "shipping_address": ""},
-                },
+                {"$set": update_fields, "$unset": {key: "" for key in UNWANTED_KEYS}},
             )
             # Convert datetime to string for JSON serialization
             update_fields_serialized = {
