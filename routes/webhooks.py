@@ -117,7 +117,14 @@ def handle_customer(data: dict):
                     "$unset": {"billing_address": "", "shipping_address": ""},
                 },
             )
-            print("Customer updated:", json.dumps(update_fields, indent=4))
+            # Convert datetime to string for JSON serialization
+            update_fields_serialized = {
+                key: (
+                    value.isoformat() if isinstance(value, datetime.datetime) else value
+                )
+                for key, value in update_fields.items()
+            }
+            print("Customer updated:", json.dumps(update_fields_serialized, indent=4))
         else:
             print("No updates required for the customer.")
 
