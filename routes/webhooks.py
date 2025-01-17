@@ -22,6 +22,9 @@ def handle_estimate(data: dict):
                 "created_at": datetime.datetime.now(),
             }
         )
+    else:
+        print("Estimate Exists", json.dumps(dict(exists), indent=4))
+        print("New Estimate Data", json.dumps(data, indent=4))
 
 
 def handle_customer(data: dict):
