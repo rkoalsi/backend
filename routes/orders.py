@@ -32,6 +32,7 @@ def serialize_mongo_document(document):
 client, db = connect_to_mongo()
 orders_collection = db["orders"]
 customers_collection = db["customers"]
+users_collection = db["users"]
 
 router = APIRouter()
 
@@ -85,25 +86,40 @@ def get_order(
     return None
 
 
-# Get all orders
-def get_all_orders(created_by: str, collection: Collection):
+def get_all_orders(
+    role: str, created_by: str, collection: Collection, users_collection: Collection
+):
     query = {}
-    if created_by:
+
+    # Salesperson-specific query
+    if role == "salesperson":
+        if not created_by:
+            raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
-    return [
-        serialize_mongo_document(
-            {
-                **doc,
-            }
-        )
-        for doc in collection.find(query)
-    ]
+
+    # Fetch orders
+    orders = collection.find(query)
+
+    # For admin, populate created_by_info with user information
+    orders_with_user_info = []
+    if role == "admin":
+        for order in orders:
+            user_info = users_collection.find_one({"_id": order["created_by"]})
+            if user_info:
+                order["created_by_info"] = {
+                    "id": str(user_info["_id"]),
+                    "name": user_info.get("name"),
+                    "email": user_info.get("email"),
+                }
+            orders_with_user_info.append(serialize_mongo_document(order))
+    else:
+        # For salesperson, no need to populate created_by_info
+        orders_with_user_info = [serialize_mongo_document(order) for order in orders]
+
+    return orders_with_user_info
 
 
 # Update an order
-from bson.objectid import ObjectId
-from pymongo.collection import Collection
-from datetime import datetime
 
 
 def update_order(
@@ -141,6 +157,7 @@ def update_order(
                     "product_code": product.get("cf_sku_code", ""),
                     "quantity": product.get("quantity", 1),
                     "name": product.get("item_name", ""),
+                    "image_url": product.get("image_url", ""),
                     "price": product.get("rate", 0),
                 }
             )
@@ -154,6 +171,63 @@ def update_order(
 # Delete an order
 def delete_order(order_id: str, collection: Collection):
     collection.delete_one({"_id": ObjectId(order_id)})
+
+
+async def email_estimate(
+    status: str,
+    order_id: str,
+    estimate_id: str,
+    estimate_number: str,
+    estimate_url: str,
+    message: str,
+    headers: dict,
+):
+    async with httpx.AsyncClient() as client:
+        if status in {"accepted", "declined"}:
+            await client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/sent?organization_id={org_id}",
+                headers=headers,
+            )
+            status_response = await client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/{status}?organization_id={org_id}",
+                headers=headers,
+            )
+            status_response.raise_for_status()
+            message += status_response.json()["message"]
+            db.orders.update_one(
+                {"_id": ObjectId(order_id)},
+                {
+                    "$set": {
+                        "status": f"{status}",
+                        "estimate_created": True,
+                        "estimate_id": estimate_id,
+                        "estimate_number": estimate_number,
+                        "estimate_url": estimate_url,
+                    }
+                },
+            )
+        # if status == "accepted":
+        #     body = {
+        #         "send_from_org_email_id": True,
+        #         "to_mail_ids": ["rkoalsi2000@gmail.com"],
+        #         "cc_mail_ids": ["rushil@barkbutler.in", "rohit@barkbutler.in"],
+        #         "subject": f"Estimate {estimate_number} Accepted",
+        #         "body": f"Dear Customer,\n\nThe estimate {estimate_number} has been accepted.\n\nRegards,\nPupscribe Enterprises Pvt Ltd",
+        #     }
+        #     resp = await client.post(
+        #         url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/email?organization_id={org_id}",
+        #         headers=headers,
+        #         json=body,
+        #     )
+        #     resp.raise_for_status()
+        #     print(resp.json())
+
+
+def clear_cart(order_id: str, orders_collection: Collection):
+    order = orders_collection.update_one(
+        {"_id": ObjectId(order_id)}, {"$set": {"products": []}}
+    )
+    return order.did_upsert
 
 
 # API Endpoints
@@ -209,11 +283,13 @@ def read_order(order_id: str):
 
 # Get all orders
 @router.get("")
-def read_all_orders(created_by=""):
+def read_all_orders(role: str = "salesperson", created_by: str = ""):
     """
     Retrieve all orders.
+    If role is 'admin', return all orders.
+    If role is 'salesperson', return only orders created by the specified user.
     """
-    orders = get_all_orders(created_by, orders_collection)
+    orders = get_all_orders(role, created_by, orders_collection, users_collection)
     return orders
 
 
@@ -493,60 +569,3 @@ async def finalise(order_dict: dict):
         headers,
     )
     return {"status": "success", "message": message}
-
-
-async def email_estimate(
-    status: str,
-    order_id: str,
-    estimate_id: str,
-    estimate_number: str,
-    estimate_url: str,
-    message: str,
-    headers: dict,
-):
-    async with httpx.AsyncClient() as client:
-        if status in {"accepted", "declined"}:
-            await client.post(
-                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/sent?organization_id={org_id}",
-                headers=headers,
-            )
-            status_response = await client.post(
-                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/{status}?organization_id={org_id}",
-                headers=headers,
-            )
-            status_response.raise_for_status()
-            message += status_response.json()["message"]
-            db.orders.update_one(
-                {"_id": ObjectId(order_id)},
-                {
-                    "$set": {
-                        "status": f"{status}",
-                        "estimate_created": True,
-                        "estimate_id": estimate_id,
-                        "estimate_number": estimate_number,
-                        "estimate_url": estimate_url,
-                    }
-                },
-            )
-        # if status == "accepted":
-        #     body = {
-        #         "send_from_org_email_id": True,
-        #         "to_mail_ids": ["rkoalsi2000@gmail.com"],
-        #         "cc_mail_ids": ["rushil@barkbutler.in", "rohit@barkbutler.in"],
-        #         "subject": f"Estimate {estimate_number} Accepted",
-        #         "body": f"Dear Customer,\n\nThe estimate {estimate_number} has been accepted.\n\nRegards,\nPupscribe Enterprises Pvt Ltd",
-        #     }
-        #     resp = await client.post(
-        #         url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/email?organization_id={org_id}",
-        #         headers=headers,
-        #         json=body,
-        #     )
-        #     resp.raise_for_status()
-        #     print(resp.json())
-
-
-def clear_cart(order_id: str, orders_collection: Collection):
-    order = orders_collection.update_one(
-        {"_id": ObjectId(order_id)}, {"$set": {"products": []}}
-    )
-    return order.did_upsert

@@ -153,20 +153,35 @@ def create_address_on_zoho(address, customer):
 
 
 @router.get("")
-def get_customers(name: str | None = None):
+def get_customers(
+    name: str | None = None, role: str = "salesperson", sort: str | None = None
+):
     customers = []
-    query = {"status": "active"}
+    query = {}
 
+    # Filter by role and status
+    if role == "salesperson":
+        query["status"] = "active"
+
+    # Filter by name if provided
     if name:
         query["company_name"] = re.compile(name, re.IGNORECASE)
+
+    # Sort logic
+    sort_order = [("status", 1)]  # Default: Ascending order of status
+    if sort and sort.lower() == "desc":
+        sort_order = [("status", -1)]  # Descending order
+
+    # Fetch and serialize customers
     customers = [
         serialize_mongo_document(
             {
                 **doc,
             }
         )
-        for doc in db.customers.find(query)
+        for doc in db.customers.find(query).sort(sort_order)
     ]
+
     return {"customers": customers}
 
 
@@ -494,3 +509,23 @@ def get_customer(customer_id: str):
     print(query)
     customer = serialize_mongo_document(db.customers.find_one(query))
     return {"customer": customer}
+
+
+@router.put("/{customer_id}")
+async def update_customer(customer_id: str, product: dict):
+    # Ensure '_id' is not in the update data
+    update_data = {k: v for k, v in product.items() if k != "_id" and v is not None}
+
+    if not update_data:
+        raise HTTPException(
+            status_code=400, detail="No valid fields provided for update"
+        )
+
+    # Perform the update
+    result = db.customers.update_one(
+        {"_id": ObjectId(customer_id)},
+        {"$set": update_data},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return {"message": "Customer updated"}

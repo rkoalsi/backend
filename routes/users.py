@@ -123,6 +123,24 @@ async def read_users_me(token: str = Depends(oauth2_scheme)):
         )
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/me")
+async def read_users_me(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("data")
+        if email is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication",
+            )
+        return {"email": email}
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        )
+
+
+@router.get("")
 def index():
-    return "<h1>Backend is running<h1>"
+    users = db.users.find({"role": "sales_person"})
+    return users
