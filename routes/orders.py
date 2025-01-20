@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List
 from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
-from backend.config.root import connect_to_mongo  # type: ignore
+from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 import requests, os, json, httpx
 from dotenv import load_dotenv
@@ -12,20 +12,6 @@ load_dotenv()
 
 org_id = os.getenv("ORG_ID")
 ESTIMATE_URL = os.getenv("ESTIMATE_URL")
-
-
-def serialize_mongo_document(document):
-    """
-    Recursively convert MongoDB ObjectId fields to strings in a document.
-    """
-    if isinstance(document, list):
-        return [serialize_mongo_document(item) for item in document]
-    elif isinstance(document, dict):
-        return {key: serialize_mongo_document(value) for key, value in document.items()}
-    elif isinstance(document, ObjectId):
-        return str(document)
-    else:
-        return document
 
 
 # Connect to MongoDB
@@ -102,7 +88,7 @@ def get_all_orders(
 
     # For admin, populate created_by_info with user information
     orders_with_user_info = []
-    if role == "admin":
+    if "admin" in role:
         for order in orders:
             user_info = users_collection.find_one({"_id": order["created_by"]})
             if user_info:

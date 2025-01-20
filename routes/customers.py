@@ -9,6 +9,9 @@ from PIL import Image
 from io import BytesIO
 import boto3, traceback
 from datetime import datetime
+from typing import Optional
+from bson.json_util import dumps
+from fastapi.responses import JSONResponse
 
 load_dotenv()
 router = APIRouter()
@@ -154,7 +157,10 @@ def create_address_on_zoho(address, customer):
 
 @router.get("")
 def get_customers(
-    name: str | None = None, role: str = "salesperson", sort: str | None = None
+    name: Optional[str] = None,
+    role: str = "salesperson",
+    user_code: Optional[str] = None,  # Salesperson's code (if applicable)
+    sort: Optional[str] = None,
 ):
     customers = []
     query = {}
@@ -162,26 +168,44 @@ def get_customers(
     # Filter by role and status
     if role == "salesperson":
         query["status"] = "active"
+        # If salesperson, restrict to assigned customers or special cases
+        if user_code:
+            query["$or"] = [
+                {"cf_sales_person": {"$regex": f"\\b{user_code}\\b", "$options": "i"}},
+                {"cf_sales_person": "Defaulter"},
+                {"cf_sales_person": "Company customers"},
+            ]
 
     # Filter by name if provided
     if name:
-        query["company_name"] = re.compile(name, re.IGNORECASE)
+        query["contact_name"] = re.compile(name, re.IGNORECASE)
 
     # Sort logic
     sort_order = [("status", 1)]  # Default: Ascending order of status
     if sort and sort.lower() == "desc":
         sort_order = [("status", -1)]  # Descending order
 
-    # Fetch and serialize customers
     customers = [
-        serialize_mongo_document(
-            {
-                **doc,
-            }
-        )
+        serialize_mongo_document(doc)
         for doc in db.customers.find(query).sort(sort_order)
     ]
+    # Return the response as JSON
+    return {"customers": customers}
 
+
+@router.get("/salespersons")
+def get_customers_for_sales_person(
+    code: Optional[str] = None,  # Salesperson's code (if applicable)
+):
+    customers = []
+    query = {}
+
+    # Filter by role and status
+    query["status"] = "active"
+    query["cf_sales_person"] = {"$not": {"$regex": f"\\b{code}\\b", "$options": "i"}}
+
+    customers = [serialize_mongo_document(doc) for doc in db.customers.find(query)]
+    # Return the response as JSON
     return {"customers": customers}
 
 
@@ -521,11 +545,45 @@ async def update_customer(customer_id: str, product: dict):
             status_code=400, detail="No valid fields provided for update"
         )
 
+    # If 'cf_sales_person' is in the update data, ensure it's a comma-separated list
+    if "cf_sales_person" in update_data:
+        if isinstance(update_data["cf_sales_person"], str):
+            update_data["cf_sales_person"] = [
+                s.strip() for s in update_data["cf_sales_person"].split(",")
+            ]
+
     # Perform the update
     result = db.customers.update_one(
         {"_id": ObjectId(customer_id)},
         {"$set": update_data},
     )
+
+    # Prepare payload for Zoho API if 'cf_sales_person' is updated
+    if "cf_sales_person" in update_data:
+        customer = db.customers.find_one({"_id": ObjectId(customer_id)})
+        payload = {
+            "custom_fields": [
+                {
+                    "value": (
+                        update_data["cf_sales_person"]
+                        if update_data["cf_sales_person"][0] != ""
+                        else []
+                    ),
+                    "customfield_id": "3220178000221198007",
+                    "label": "Sales person",
+                    "index": 11,
+                }
+            ]
+        }
+        x = requests.put(
+            url=f"https://www.zohoapis.com/books/v3/contacts/{customer.get('contact_id')}?organization_id={org_id}",
+            headers={"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"},
+            json=payload,
+        )
+        print(payload)
+        print(x.json()["message"])
+
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Customer not found")
+
     return {"message": "Customer updated"}
