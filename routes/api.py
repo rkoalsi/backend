@@ -6,12 +6,10 @@ from .zoho import router as zoho
 from .orders import router as orders
 from .util import router as util
 from .admin import router as admin
-from .salespeople import router as salespeople
 from .webhooks import router as webhooks
 
 router = APIRouter()
 
-router.include_router(salespeople, prefix="/salespeoples", tags=["SalesPeople"])
 router.include_router(users, prefix="/users", tags=["User"])
 router.include_router(customers, prefix="/customers", tags=["Customer"])
 router.include_router(products, prefix="/products", tags=["Product"])
