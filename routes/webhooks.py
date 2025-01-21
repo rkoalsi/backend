@@ -1,14 +1,98 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
-import datetime, json
+import datetime, json, os, requests, asyncio
 
 load_dotenv()
 
 router = APIRouter()
 
 client, db = connect_to_mongo()
+
+now = datetime.datetime.utcnow()
+TOTAL_WAREHOUSE_URL = os.getenv("TOTAL_WAREHOUSE_URL")
+WAREHOUSE_URL = os.getenv("WAREHOUSE_URL")
+org_id = os.getenv("ORG_ID")
+access_token = get_access_token("books")
+headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+collection = db["products"]
+
+
+def get_zoho_stock(day=now.day, month=now.month, year=now.year):
+    print(f"Fetching stock for {now.replace(month=month).strftime('%b')}-{year}")
+    to_date = now.replace(month=month, day=day).date()
+    warehouse_stock = []
+    z = requests.get(
+        url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id), headers=headers
+    )
+    total_pages = int(z.json().get("page_context", {}).get("total_pages", 0)) + 1
+
+    for i in range(1, total_pages):
+        y = requests.get(
+            url=WAREHOUSE_URL.format(page=i, date1=to_date, org_id=org_id),
+            headers=headers,
+        )
+        warehouse_stock.extend(y.json().get("warehouse_stock_info", []))
+
+    arr = []
+    for item in warehouse_stock:
+        for w in item["warehouses"]:
+            if w["warehouse_name"] == "Pupscribe Enterprises Private Limited":
+                arr.append(
+                    {
+                        "name": item["item_name"],
+                        "stock": int(w["quantity_available"]),
+                    }
+                )
+    print("Got Stock")
+    return arr
+
+
+async def update_stock():
+    """
+    Update the stock field in active products based on their name (async).
+    """
+    active_products = collection.find({"status": "active"})
+    stock_data = get_zoho_stock()  # synchronous call
+    stock_dict = {item["name"]: item["stock"] for item in stock_data}
+
+    updated_count = 0
+    for product in active_products:
+        product_name = product.get("name", "")
+        # Check if product exists in stock data
+        stock = stock_dict.get(product_name)
+        if stock is not None:
+            collection.update_one({"_id": product["_id"]}, {"$set": {"stock": stock}})
+            updated_count += 1
+            print(f"Updated product '{product_name}' with stock: {stock}")
+        else:
+            print(f"No stock data for product '{product_name}'")
+
+    print(f"Total products updated with stock: {updated_count}")
+    return updated_count
+
+
+# Wrapper function to call async code in a background task
+def run_update_stock():
+    """
+    Runs the async `update_stock` inside a sync function
+    so it can be scheduled as a background task in FastAPI.
+    """
+    asyncio.run(update_stock())
+
+
+@router.post("/update/stock")
+def update_stock_webhook(data: dict, background_tasks: BackgroundTasks):
+    """
+    Receives a webhook to update product stock from Zoho in the background.
+    Returns immediately while the update runs.
+    """
+    print("Webhook data:", json.dumps(data, indent=4, default=str))
+    # Schedule the stock update to run in the background
+    background_tasks.add_task(run_update_stock)
+
+    return {"message": "Stock update has been scheduled in the background."}
 
 
 def handle_estimate(data: dict):
