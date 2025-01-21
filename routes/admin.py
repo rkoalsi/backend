@@ -26,6 +26,32 @@ def get_product(product_id: str, collection: Collection):
     return serialize_mongo_document(product)
 
 
+@router.get("/stats")
+async def get_stats():
+    try:
+        active_products = db["products"].count_documents({"status": "active"})
+        active_customers = db["customers"].count_documents({"status": "active"})
+        active_sales_people = db["users"].count_documents(
+            {"status": "active", "role": "sales_person"}
+        )
+
+        orders_draft = db["orders"].count_documents({"status": "draft"})
+        orders_accepted = db["orders"].count_documents({"status": "accepted"})
+        orders_declined = db["orders"].count_documents({"status": "declined"})
+
+        return {
+            "active_products": active_products,
+            "active_customers": active_customers,
+            "active_sales_people": active_sales_people,
+            "orders_draft": orders_draft,
+            "orders_accepted": orders_accepted,
+            "orders_declined": orders_declined,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/products")
 def get_products(
     page: int = Query(0, ge=0),  # 0-based page index
