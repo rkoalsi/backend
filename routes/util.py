@@ -16,7 +16,7 @@ client, db = connect_to_mongo()
 @router.get("/")
 def index():
     users = parse_data(db.users.find())
-    return {"all_users": users}
+    return {"users": users}
 
 
 @router.get("/hello")
