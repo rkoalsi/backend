@@ -7,14 +7,10 @@ router = APIRouter()
 client, db = connect_to_mongo()
 
 
-client, db = connect_to_mongo()
-users_collection = db["users"]
-
-
 @router.get("")
-def salespeople():
+def home():
     users_cursor = db.users.find({"role": "sales_person"})
-    sales_people = list(users_cursor)
+    sales_people = serialize_mongo_document(list(users_cursor))
 
     # Prepare the result
     # for sales_person in sales_people:
@@ -51,7 +47,7 @@ def salespeople():
     #         )
     #         sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
 
-    return {"users": serialize_mongo_document(sales_people)}
+    return {"users": sales_people}
 
 
 @router.get("/customers")

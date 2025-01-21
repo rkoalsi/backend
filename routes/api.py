@@ -11,6 +11,7 @@ from .webhooks import router as webhooks
 
 router = APIRouter()
 
+router.include_router(salespeople, prefix="/salespeoples", tags=["SalesPeople"])
 router.include_router(users, prefix="/users", tags=["User"])
 router.include_router(customers, prefix="/customers", tags=["Customer"])
 router.include_router(products, prefix="/products", tags=["Product"])
@@ -19,7 +20,6 @@ router.include_router(orders, prefix="/orders", tags=["Orders"])
 router.include_router(admin, prefix="/admin", tags=["Admin"])
 router.include_router(util, prefix="/util", tags=["Util"])
 router.include_router(webhooks, prefix="/zoho/webhooks", tags=["Zoho"])
-router.include_router(salespeople, prefix="/salespeoples", tags=["SalesPeople"])
 
 
 @router.get("/")
