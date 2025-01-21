@@ -61,5 +61,13 @@ async def custom_404_handler(_, __):
     return RedirectResponse("/")
 
 
+@app.on_event("startup")
+async def log_routes():
+    print("Logging all routes...")
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            print(f"Path: {route.path}, Methods: {route.methods}")
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
