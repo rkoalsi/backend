@@ -13,20 +13,23 @@ client, db = connect_to_mongo()
 
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
-    estimate_id = estimate.get("estimate_id")
-    exists = serialize_mongo_document(
-        db.estimates.find_one({"estimate_id": estimate_id})
-    )
-    if not exists:
-        db.estimates.insert_one(
-            {
-                **estimate,
-                "created_at": datetime.datetime.now(),
-            }
+    estimate_id = estimate.get("estimate_id", "")
+    if estimate_id != "":
+        exists = serialize_mongo_document(
+            db.estimates.find_one({"estimate_id": estimate_id})
         )
+        if not exists:
+            db.estimates.insert_one(
+                {
+                    **estimate,
+                    "created_at": datetime.datetime.now(),
+                }
+            )
+        else:
+            print("Estimate Exists", json.dumps((exists), indent=4))
+            print("New Estimate Data", json.dumps(data, indent=4))
     else:
-        print("Estimate Exists", json.dumps((exists), indent=4))
-        print("New Estimate Data", json.dumps(data, indent=4))
+        print("Estimate Does Not Exist. Webhook Received")
 
 
 UNWANTED_KEYS = [
