@@ -17,39 +17,39 @@ def salespeople():
     sales_people = list(users_cursor)
 
     # Prepare the result
-    for sales_person in sales_people:
-        sales_person_code = sales_person.get("code")
+    # for sales_person in sales_people:
+    #     sales_person_code = sales_person.get("code")
 
-        if sales_person_code:
-            # Fetch customers assigned to the salesperson
-            customers_cursor = db.customers.find(
-                {
-                    "$or": [
-                        {
-                            "cf_sales_person": {
-                                "$regex": f"\\b{sales_person_code}\\b",
-                                "$options": "i",
-                            }
-                        },
-                        {"cf_sales_person": "Defaulter"},
-                        {"cf_sales_person": "Company customers"},
-                    ],
-                    "status": "active",
-                }
-            )
-            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
-        else:
-            # Assign customers with "Defaulter" or "Company customers" to all salespeople
-            customers_cursor = db.customers.find(
-                {
-                    "$or": [
-                        {"cf_sales_person": "Defaulter"},
-                        {"cf_sales_person": "Company customers"},
-                    ],
-                    "status": "active",
-                }
-            )
-            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+    #     if sales_person_code:
+    #         # Fetch customers assigned to the salesperson
+    #         customers_cursor = db.customers.find(
+    #             {
+    #                 "$or": [
+    #                     {
+    #                         "cf_sales_person": {
+    #                             "$regex": f"\\b{sales_person_code}\\b",
+    #                             "$options": "i",
+    #                         }
+    #                     },
+    #                     {"cf_sales_person": "Defaulter"},
+    #                     {"cf_sales_person": "Company customers"},
+    #                 ],
+    #                 "status": "active",
+    #             }
+    #         )
+    #         sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+    #     else:
+    #         # Assign customers with "Defaulter" or "Company customers" to all salespeople
+    #         customers_cursor = db.customers.find(
+    #             {
+    #                 "$or": [
+    #                     {"cf_sales_person": "Defaulter"},
+    #                     {"cf_sales_person": "Company customers"},
+    #                 ],
+    #                 "status": "active",
+    #             }
+    #         )
+    #         sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
 
     return {"users": serialize_mongo_document(sales_people)}
 
