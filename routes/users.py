@@ -109,7 +109,7 @@ def salespeople():
 
 
 @router.get("/salespeoples/customers")
-def salespeople():
+def get_salespeople_customers():
     users_cursor = db.users.find({"role": "sales_person"})
     users = serialize_mongo_document(list(users_cursor))
     return {"users": users}
@@ -175,7 +175,7 @@ async def read_users_me(token: str = Depends(oauth2_scheme)):
 
 
 @router.put("/salespeople/{salesperson_id}")
-def salespeople(salesperson_id: str, salesperson: dict):
+def salespeople_id(salesperson_id: str, salesperson: dict):
     update_data = {k: v for k, v in salesperson.items() if k != "_id" and v is not None}
 
     if not update_data:
