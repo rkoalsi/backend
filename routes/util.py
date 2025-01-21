@@ -16,7 +16,7 @@ client, db = connect_to_mongo()
 @router.get("/")
 def index():
     users = serialize_mongo_document(list(db.users.find()))
-    return {"all_users": users}
+    return {"some_users": users}
 
 
 @router.get("/hello")
