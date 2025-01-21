@@ -5,6 +5,7 @@ from .routes.api import router
 from .config.root import connect_to_mongo, disconnect_on_exit
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
+from contextlib import asynccontextmanager
 
 origins = [
     "http://localhost:3000",
@@ -44,9 +45,19 @@ async def custom_404_handler(_, __):
     return RedirectResponse("/")
 
 
-for route in app.routes:
-    if isinstance(route, APIRoute):
-        print(f"Path: {route.path}, Methods: {route.methods}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This block runs when the application starts
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            print(f"Path: {route.path}, Methods: {route.methods}")
+    yield  # This indicates the application is now running
+    # This block runs when the application stops
+    print("Application shutdown")
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 # Add shutdown handler for MongoDB
 app.add_event_handler("shutdown", disconnect_on_exit(client))
