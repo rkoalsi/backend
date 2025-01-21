@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
-import uvicorn
-from .routes.api import router
-from .config.root import connect_to_mongo, disconnect_on_exit
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from contextlib import asynccontextmanager
+from .routes.api import router
+from .config.root import connect_to_mongo, disconnect_on_exit
+import uvicorn
 
 origins = [
     "http://localhost:3000",
@@ -14,12 +14,23 @@ origins = [
     "http://127.0.0.1:8080",
 ]
 
-
-# Set up logging
-# logging.basicConfig(level=logging.DEBUG)
-
-app = FastAPI()
+# Initialize the app
 client, db = connect_to_mongo()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Log available routes
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            print(f"Path: {route.path}, Methods: {route.methods}")
+    yield
+    print("Application shutdown")
+
+
+app = FastAPI(lifespan=lifespan)
+
+# Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,7 +38,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include API router
 app.include_router(router, prefix="/api")
+
+# Add shutdown handler for MongoDB
+app.add_event_handler("shutdown", disconnect_on_exit(client))
 
 
 @app.get("/")
@@ -45,23 +61,5 @@ async def custom_404_handler(_, __):
     return RedirectResponse("/")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # This block runs when the application starts
-    for route in app.routes:
-        if isinstance(route, APIRoute):
-            print(f"Path: {route.path}, Methods: {route.methods}")
-    yield  # This indicates the application is now running
-    # This block runs when the application stops
-    print("Application shutdown")
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-# Add shutdown handler for MongoDB
-app.add_event_handler("shutdown", disconnect_on_exit(client))
-
-# Main entry point
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
