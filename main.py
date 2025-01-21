@@ -70,4 +70,8 @@ async def log_routes():
 
 
 if __name__ == "__main__":
+    print("Logging all routes...")
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            print(f"Path: {route.path}, Methods: {route.methods}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
