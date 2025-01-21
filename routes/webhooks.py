@@ -13,7 +13,7 @@ client, db = connect_to_mongo()
 
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
-    print("Estimate", json.dumps(estimate, indent=4))
+    print("Estimate", json.dumps(estimate, indent=4, default=str))  # <-- default=str
     estimate_id = estimate.get("estimate_id", "")
     if estimate_id != "":
         exists = serialize_mongo_document(
@@ -27,8 +27,8 @@ def handle_estimate(data: dict):
                 }
             )
         else:
-            print("Estimate Exists", json.dumps((exists), indent=4))
-            print("New Estimate Data", json.dumps(data, indent=4))
+            print("Estimate Exists", json.dumps(exists, indent=4, default=str))
+            print("New Estimate Data", json.dumps(data, indent=4, default=str))
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
