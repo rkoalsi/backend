@@ -13,6 +13,7 @@ client, db = connect_to_mongo()
 
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
+    print("Estimate", json.dumps(estimate, indent=4))
     estimate_id = estimate.get("estimate_id", "")
     if estimate_id != "":
         exists = serialize_mongo_document(
@@ -221,13 +222,13 @@ def handle_customer(data: dict):
 
 @router.post("/estimate")
 def estimate(data: dict):
-    print(data)
+    print(json.dumps(data, indent=4))
     handle_estimate(data)
     return "Estimate Webhook Received Successfully"
 
 
 @router.post("/customer")
 def customer(data: dict):
-    print(data)
+    print(json.dumps(data, indent=4))
     handle_customer(data)
     return "Customer Webhook Received Successfully"
