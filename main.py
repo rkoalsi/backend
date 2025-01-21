@@ -4,6 +4,7 @@ import uvicorn
 from .routes.api import router
 from .config.root import connect_to_mongo, disconnect_on_exit
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRoute
 
 origins = [
     "http://localhost:3000",
@@ -43,6 +44,13 @@ async def custom_404_handler(_, __):
     return RedirectResponse("/")
 
 
+for route in app.routes:
+    if isinstance(route, APIRoute):
+        print(f"Path: {route.path}, Methods: {route.methods}")
+
+# Add shutdown handler for MongoDB
+app.add_event_handler("shutdown", disconnect_on_exit(client))
+
+# Main entry point
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    app.add_event_handler("shutdown", disconnect_on_exit(client))
