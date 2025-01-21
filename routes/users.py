@@ -65,6 +65,56 @@ class UserLogin(BaseModel):
     password: str
 
 
+@router.get("/salespeople")
+def salespeople():
+    users_cursor = db.users.find({"role": "sales_person"})
+    sales_people = list(users_cursor)
+
+    # Prepare the result
+    for sales_person in sales_people:
+        sales_person_code = sales_person.get("code")
+
+        if sales_person_code:
+            # Fetch customers assigned to the salesperson
+            customers_cursor = db.customers.find(
+                {
+                    "$or": [
+                        {
+                            "cf_sales_person": {
+                                "$regex": f"\\b{sales_person_code}\\b",
+                                "$options": "i",
+                            }
+                        },
+                        {"cf_sales_person": "Defaulter"},
+                        {"cf_sales_person": "Company customers"},
+                    ],
+                    "status": "active",
+                }
+            )
+            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+        else:
+            # Assign customers with "Defaulter" or "Company customers" to all salespeople
+            customers_cursor = db.customers.find(
+                {
+                    "$or": [
+                        {"cf_sales_person": "Defaulter"},
+                        {"cf_sales_person": "Company customers"},
+                    ],
+                    "status": "active",
+                }
+            )
+            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+
+    return {"users": serialize_mongo_document(sales_people)}
+
+
+@router.get("/salespeoples/customers")
+def salespeople():
+    users_cursor = db.users.find({"role": "sales_person"})
+    users = serialize_mongo_document(list(users_cursor))
+    return {"users": users}
+
+
 @router.post("/register")
 async def register_user(user: UserCreate):
     # Check if user already exists
@@ -122,73 +172,6 @@ async def read_users_me(token: str = Depends(oauth2_scheme)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
         )
-
-
-@router.get("/me")
-async def read_users_me(token: str = Depends(oauth2_scheme)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("data")
-        if email is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication",
-            )
-        return {"email": email}
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        )
-
-
-@router.get("/salespeople")
-def salespeople():
-    users_cursor = db.users.find({"role": "sales_person"})
-    sales_people = list(users_cursor)
-
-    # Prepare the result
-    for sales_person in sales_people:
-        sales_person_code = sales_person.get("code")
-
-        if sales_person_code:
-            # Fetch customers assigned to the salesperson
-            customers_cursor = db.customers.find(
-                {
-                    "$or": [
-                        {
-                            "cf_sales_person": {
-                                "$regex": f"\\b{sales_person_code}\\b",
-                                "$options": "i",
-                            }
-                        },
-                        {"cf_sales_person": "Defaulter"},
-                        {"cf_sales_person": "Company customers"},
-                    ],
-                    "status": "active",
-                }
-            )
-            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
-        else:
-            # Assign customers with "Defaulter" or "Company customers" to all salespeople
-            customers_cursor = db.customers.find(
-                {
-                    "$or": [
-                        {"cf_sales_person": "Defaulter"},
-                        {"cf_sales_person": "Company customers"},
-                    ],
-                    "status": "active",
-                }
-            )
-            sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
-
-    return {"users": serialize_mongo_document(sales_people)}
-
-
-@router.get("/salespeoples/customers")
-def salespeople():
-    users_cursor = db.users.find({"role": "sales_person"})
-    users = serialize_mongo_document(list(users_cursor))
-    return {"users": users}
 
 
 @router.put("/salespeople/{salesperson_id}")
