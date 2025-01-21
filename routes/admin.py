@@ -135,12 +135,23 @@ def read_all_orders(
                 "created_by": 1,
                 "total_amount": 1,
                 "total_gst": 1,
+                "gst_type": 1,
                 "status": 1,
+                "products": 1,
+                "shipping_address": 1,
+                "billing_address": 1,
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
+                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+                "updated_at": {
+                    "$dateToString": {
+                        "date": "$updated_at",
                         "format": "%Y-%m-%d %H:%M:%S",  # date/time format
                         "timezone": "Asia/Kolkata",
                     }
@@ -213,6 +224,48 @@ def get_salespeople_customers():
     users_cursor = db.users.find({"role": "sales_person"})
     users = serialize_mongo_document(list(users_cursor))
     return {"users": users}
+
+
+@router.get("/salespeople/{salesperson_id}")
+def salesperson(salesperson_id: str):
+    users_cursor = db.users.find_one({"_id": ObjectId(salesperson_id)})
+    sales_person = serialize_mongo_document(dict(users_cursor))
+
+    # Prepare the result
+    sales_person_code = sales_person.get("code")
+
+    if sales_person_code:
+        # Fetch customers assigned to the salesperson
+        customers_cursor = db.customers.find(
+            {
+                "$or": [
+                    {
+                        "cf_sales_person": {
+                            "$regex": f"\\b{sales_person_code}\\b",
+                            "$options": "i",
+                        }
+                    },
+                    {"cf_sales_person": "Defaulter"},
+                    {"cf_sales_person": "Company customers"},
+                ],
+                "status": "active",
+            }
+        )
+        sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+    else:
+        # Assign customers with "Defaulter" or "Company customers" to all salespeople
+        customers_cursor = db.customers.find(
+            {
+                "$or": [
+                    {"cf_sales_person": "Defaulter"},
+                    {"cf_sales_person": "Company customers"},
+                ],
+                "status": "active",
+            }
+        )
+        sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
+
+    return {"sales_person": sales_person}
 
 
 @router.put("/salespeople/{salesperson_id}")

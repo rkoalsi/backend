@@ -338,7 +338,12 @@ def validate_order(order_id: str, status: str):
     products = order.get("products", [])
     if not products:
         raise HTTPException(status_code=400, detail="Products are missing")
-
+    for product in products:
+        doc = dict(db.products.find_one({"_id": ObjectId(product.get("product_id"))}))
+        if doc.get("status") == "inactive":
+            raise HTTPException(
+                status_code=400, detail=f"Cannot Proceed, {doc.get('name')} is inactive"
+            )
     # Check if total amount is missing or invalid
     total_amount = order.get("total_amount")
     if total_amount is None:
