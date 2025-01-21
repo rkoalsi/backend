@@ -143,7 +143,6 @@ async def read_users_me(token: str = Depends(oauth2_scheme)):
 
 @router.get("/salespeople")
 def salespeople():
-    # Fetch all salespeople
     users_cursor = db.users.find({"role": "sales_person"})
     sales_people = list(users_cursor)
 
