@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 from bson.json_util import dumps
 from fastapi.responses import JSONResponse
+from math import ceil
 
 load_dotenv()
 router = APIRouter()
@@ -193,20 +194,52 @@ def get_customers(
     return {"customers": customers}
 
 
-@router.get("/salespersons")
+@router.get("/salesperson")
+@router.get("/customers/salesperson")
 def get_customers_for_sales_person(
-    code: Optional[str] = None,  # Salesperson's code (if applicable)
+    code: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    search: Optional[str] = None,
 ):
-    customers = []
-    query = {}
+    """
+    Returns active customers that do NOT match the given salesperson code,
+    with pagination + optional search support.
+    """
+    or_condition = [
+        {"cf_sales_person": {"$not": {"$regex": f"\\b{code}\\b", "$options": "i"}}},
+        {"cf_sales_person": {"$not": {"$regex": "Defaulter", "$options": "i"}}},
+        {"cf_sales_person": {"$not": {"$regex": "Company customers", "$options": "i"}}},
+    ]
 
-    # Filter by role and status
-    query["status"] = "active"
-    query["cf_sales_person"] = {"$not": {"$regex": f"\\b{code}\\b", "$options": "i"}}
+    # We'll build a top-level $and to combine status + $or + optional search
+    query = {
+        "$and": [
+            {"status": "active"},
+            {"$or": or_condition},
+        ]
+    }
 
-    customers = [serialize_mongo_document(doc) for doc in db.customers.find(query)]
-    # Return the response as JSON
-    return {"customers": customers}
+    # If we have a search term, add a contact_name regex condition as well
+    if search:
+        # We can push this into the $and array
+        query["$and"].append({"contact_name": {"$regex": search, "$options": "i"}})
+
+    total_count = db.customers.count_documents(query)
+
+    skip = (page - 1) * limit
+    cursor = db.customers.find(query).skip(skip).limit(limit)
+
+    customers = [serialize_mongo_document(doc) for doc in cursor]
+    total_pages = ceil(total_count / limit) if total_count else 1
+
+    return {
+        "customers": customers,
+        "totalCount": total_count,
+        "totalPages": total_pages,
+        "currentPage": page,
+        "limit": limit,
+    }
 
 
 @router.get("/validate_gst")
