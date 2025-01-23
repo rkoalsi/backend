@@ -63,7 +63,18 @@ def handle_item(data: dict):
 
                 # Check for changes
                 if field in exists and exists[field] != value:
-                    update_data[field] = value
+                    if field in ["created_time", "last_modified_time"]:
+                        # Convert datetime strings to Python datetime objects
+                        if field == "created_time":
+                            update_data["created_at"] = datetime.strptime(
+                                value, "%Y-%m-%d %H:%M:%S%z"
+                            ).replace(tzinfo=None)
+                        elif field == "last_modified_time":
+                            update_data["updated_at"] = datetime.strptime(
+                                value, "%Y-%m-%d %H:%M:%S%z"
+                            ).replace(tzinfo=None)
+                    else:
+                        update_data[field] = value
 
             # Update 'updated_at' field with current time if there are changes
             if update_data:
