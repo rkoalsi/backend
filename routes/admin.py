@@ -56,46 +56,63 @@ async def get_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/brands")
+def get_all_brands():
+    """
+    Retrieve a list of all distinct brands.
+    """
+    try:
+        brands = products_collection.distinct(
+            "brand", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+        )
+        brands = [brand for brand in brands if brand]  # Remove empty or null brands
+        return {"brands": brands}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch brands.")
+
+
 @router.get("/products")
 def get_products(
     page: int = Query(0, ge=0),
     limit: int = Query(10, ge=1),
     search: Optional[str] = None,
+    brand: Optional[str] = None,
 ):
     """
-    If search is provided, return ALL matching products (no pagination).
-    Otherwise, return a paginated list of products.
+    Retrieve products with optional search and brand filtering.
+    Always applies pagination.
     """
-    # Base query: only products with stock > 0 and not marked as deleted
-    query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+    try:
+        # Base query: only products with stock > 0 and not marked as deleted
+        query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+        # If there's a search string, match name or cf_sku_code (case-insensitive)
+        if search and search != "":
+            regex = {"$regex": search, "$options": "i"}
+            query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
 
-    # If there's a search string, match name or cf_sku_code (case-insensitive)
-    if search:
-        regex = {"$regex": search, "$options": "i"}
-        query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
-        # We will ignore pagination if search is present.
-        # That means we return ALL matching items.
-        docs_cursor = products_collection.find(query)
-    else:
-        # Normal pagination scenario
+        # If brand filter is applied, add it to the query
+        if brand and brand.lower() != "all":
+            query["brand"] = {"$regex": f"^{re.escape(brand)}$", "$options": "i"}
+
+        # Always apply pagination
         skip = page * limit
         docs_cursor = products_collection.find(query).skip(skip).limit(limit)
 
-    # Count how many total match the query (if you need it on the frontend)
-    total_count = products_collection.count_documents(query)
+        # Count how many total match the query
+        total_count = products_collection.count_documents(query)
 
-    products = [serialize_mongo_document(doc) for doc in docs_cursor]
+        products = [serialize_mongo_document(doc) for doc in docs_cursor]
 
-    # If ignoring pagination for search, you could set page=0, limit=len(products),
-    # or just return the entire matched set. It's your choice how to inform the frontend.
-    return JSONResponse({"products": products, "total_count": total_count})
+        return JSONResponse({"products": products, "total_count": total_count})
+    except Exception as e:
+        return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
 @router.get("/customers")
 def get_customers(
     name: Optional[str] = None,
-    # Remove salesperson logic
-    page: int = Query(0, ge=0, description="0-based page index"),
+    page: int = Query(1, ge=1, description="1-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
     sort: Optional[str] = None,
 ):
@@ -105,31 +122,32 @@ def get_customers(
       - Default sort is ascending by 'status'
       - If ?sort=desc, it will sort descending by 'status'
     """
-    query = {}
+    try:
+        query = {}
 
-    # Filter by name if provided
-    if name:
-        query["contact_name"] = re.compile(name, re.IGNORECASE)
+        # Filter by name if provided
+        if name:
+            query["contact_name"] = re.compile(name, re.IGNORECASE)
 
-    # Sort logic
-    sort_order = [("status", 1)]  # default ascending by status
-    if sort and sort.lower() == "desc":
-        sort_order = [("status", -1)]
+        # Sort logic
+        sort_order = [("status", 1)]  # default ascending by status
+        if sort and sort.lower() == "desc":
+            sort_order = [("status", -1)]
 
-    # Count total matching documents for pagination
-    total_count = customers_collection.count_documents(query)
+        # Count total matching documents for pagination
+        total_count = customers_collection.count_documents(query)
 
-    # Use skip/limit for server-side pagination
-    cursor = (
-        customers_collection.find(query)
-        .sort(sort_order)
-        .skip(page * limit)
-        .limit(limit)
-    )
+        # Calculate skip based on 1-based indexing
+        skip = (page - 1) * limit
+        cursor = (
+            customers_collection.find(query).sort(sort_order).skip(skip).limit(limit)
+        )
 
-    customers = [serialize_mongo_document(doc) for doc in cursor]
+        customers = [serialize_mongo_document(doc) for doc in cursor]
 
-    return {"customers": customers, "total_count": total_count}
+        return {"customers": customers, "total_count": total_count}
+    except Exception as e:
+        return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
 @router.get("/orders")
@@ -490,58 +508,50 @@ def get_customer_special_margins(customer_id: str):
 
 
 @router.post("/customer/special_margins/bulk/{customer_id}")
-def create_customer_special_margins_bulk(customer_id: str, data: list = Body(...)):
+def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(...)):
     """
-    Creates multiple special margin entries in bulk if not already present.
-    [
-      {
-        "product_id": "ABC123",
-        "name": "Product Name",
-        "margin": "45%"
-      },
-      ...
-    ]
+    Create or update multiple special margin entries in bulk for a given customer using update_many.
     """
     if not data:
         raise HTTPException(status_code=400, detail="Request body cannot be empty.")
 
-    new_entries = []
-    for item in data:
-        if not all(k in item for k in ("product_id", "name", "margin")):
-            raise HTTPException(
-                status_code=400,
-                detail="Each item must have 'product_id', 'name', and 'margin'.",
+    try:
+        if not ObjectId.is_valid(customer_id):
+            raise HTTPException(status_code=400, detail="Invalid customer_id")
+        customer_obj_id = ObjectId(customer_id)
+
+        for item in data:
+            if not all(k in item for k in ("product_id", "name", "margin")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each item must have 'product_id', 'name', and 'margin'.",
+                )
+
+            if not ObjectId.is_valid(item["product_id"]):
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid product_id: {item['product_id']}"
+                )
+
+            product_obj_id = ObjectId(item["product_id"])
+
+            # Use update_many to update or insert
+            db.special_margins.update_one(
+                {"customer_id": customer_obj_id, "product_id": product_obj_id},
+                {
+                    "$set": {
+                        "name": item["name"],
+                        "margin": item["margin"],
+                        "customer_id": customer_obj_id,
+                        "product_id": product_obj_id,
+                    }
+                },
+                upsert=True,
             )
 
-        # Check duplicate
-        existing = db.special_margins.find_one(
-            {
-                "customer_id": ObjectId(customer_id),
-                "product_id": ObjectId(item["product_id"]),
-            }
-        )
-        if existing:
-            # If you want to skip duplicates instead of raising an error,
-            # you could just continue. Otherwise, raise a 409:
-            continue
+        return {"message": "Bulk operation completed successfully."}
 
-        new_entry = {
-            "customer_id": ObjectId(customer_id),
-            "product_id": ObjectId(item["product_id"]),
-            "name": item["name"],
-            "margin": item["margin"],
-        }
-        result = db.special_margins.insert_one(new_entry)
-
-        new_entry["_id"] = str(result.inserted_id)
-        new_entry["customer_id"] = customer_id
-        new_entry["product_id"] = item["product_id"]
-        new_entries.append(new_entry)
-
-    return {
-        "message": "Bulk special margins created successfully.",
-        "products": new_entries,
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.post("/customer/special_margins/{customer_id}")
@@ -594,6 +604,22 @@ def create_customer_special_margin(customer_id: str, data: dict = Body(...)):
     return {
         "message": "Special margin created successfully.",
         "product": response_margin,
+    }
+
+
+@router.delete("/customer/special_margins/{customer_id}/bulk")
+def delete_all_customer_special_margins(customer_id: str):
+    """
+    Delete all special margin entries for a specific customer.
+    """
+    result = db.special_margins.delete_many({"customer_id": ObjectId(customer_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="No special margins found for the specified customer or already deleted.",
+        )
+    return {
+        "message": f"Successfully deleted {result.deleted_count} special margin(s)."
     }
 
 

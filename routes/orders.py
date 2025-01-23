@@ -320,6 +320,12 @@ def validate_order(order_id: str, status: str):
     if not order:
         raise HTTPException(status_code=400, detail="Order not found")
     # Check if shipping address is missing or invalid
+    customer_id = order.get("customer_id", "")
+    customer = customers_collection.find_one({"_id": ObjectId(customer_id)})
+    if customer.get("status") == "inactive":
+        raise HTTPException(
+            status_code=400, detail="Cannot Proceed, Customer is Inactive"
+        )
     shipping_address = order.get("shipping_address", {}).get("address")
     if not shipping_address:
         raise HTTPException(status_code=400, detail="Shipping address is missing")

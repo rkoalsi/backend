@@ -66,17 +66,17 @@ class UserLogin(BaseModel):
 
 
 @router.post("/register")
-async def register_user(user: UserCreate):
+async def register_user(user: dict):
     # Check if user already exists
-    existing_user = find_user_by_email(user.email)
+    existing_user = find_user_by_email(user.get("email", ""))
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # Hash the password
-    hashed_password = hash_password(user.password)
+    hashed_password = hash_password(user.get("password"))
 
     # Insert user into the database
-    user_data = {"email": user.email, "password": hashed_password}
+    user_data = {"email": user.get("email", ""), "password": hashed_password}
     result = users_collection.insert_one(user_data)
     if not result:
         raise HTTPException(status_code=400, detail="Error inserting user in database")
