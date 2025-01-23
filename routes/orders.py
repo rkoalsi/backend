@@ -195,8 +195,11 @@ def update_order(
 
 
 # Delete an order
-def delete_order(order_id: str, collection: Collection):
-    collection.delete_one({"_id": ObjectId(order_id)})
+def delete_order(user_id: str, collection: Collection):
+    orders = collection.find({"created_by": ObjectId(user_id)})
+    for order in orders:
+        if not order.get("customer_id"):
+            collection.delete_one({"_id": order.get("_id")})
 
 
 async def email_estimate(
@@ -335,13 +338,13 @@ def update_existing_order(order_id: str, order_update: dict):
 
 
 # Delete an order
-@router.delete("/{order_id}")
-def delete_existing_order(order_id: str):
+@router.delete("/{user_id}")
+def delete_existing_order(user_id: str):
     """
-    Delete an order by its ID.
+    Deletes all orders by a given user who has created it if there is no customer information
     """
-    delete_order(order_id, orders_collection)
-    return {"detail": "Order deleted successfully"}
+    delete_order(user_id, orders_collection)
+    return {"detail": "Orders deleted successfully"}
 
 
 # Update an order
