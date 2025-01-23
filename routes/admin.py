@@ -100,7 +100,12 @@ def get_products(
 
         # Always apply pagination
         skip = page * limit
-        docs_cursor = products_collection.find(query).skip(skip).limit(limit)
+        docs_cursor = (
+            products_collection.find(query)
+            .sort([("status", 1), ("name", 1)])
+            .skip(skip)
+            .limit(limit)
+        )
 
         # Count how many total match the query
         total_count = products_collection.count_documents(query)
