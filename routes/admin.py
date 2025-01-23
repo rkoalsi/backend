@@ -214,6 +214,8 @@ def read_all_orders(
                 "products": 1,
                 "shipping_address": 1,
                 "billing_address": 1,
+                "customer_id": 1,
+                "customer_name": 1,
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
                 "created_at": {

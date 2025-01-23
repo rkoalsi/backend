@@ -1,3 +1,4 @@
+from types import NoneType
 from pymongo.collection import Collection
 from datetime import datetime
 from typing import List
@@ -162,8 +163,21 @@ def update_order(
 
         if customer:
             order_update["customer_id"] = ObjectId(customer_id)
-            order_update["customer_name"] = customer.get("company_name")
-            order_update["gst_type"] = customer.get("cf_in_ex")
+            order_update["customer_name"] = (
+                customer.get("company_name")
+                if customer.get("company_name") != ""
+                else customer.get("contact_name")
+            )
+            print(
+                customer.get("cf_in_ex")
+                if type(customer.get("cf_in_ex")) is not NoneType
+                else "Exclusive"
+            )
+            order_update["gst_type"] = (
+                customer.get("cf_in_ex")
+                if type(customer.get("cf_in_ex")) is not NoneType
+                else "Exclusive"
+            )
 
     # Handle product updates (replace the entire product list)
     if "products" in order_update:

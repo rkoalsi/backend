@@ -20,6 +20,60 @@ collection = db["products"]
 _access_token_cache = {"token": None, "expires_at": None}
 
 
+def handle_item(data: dict):
+    item = data.get("item")
+    print("Item", json.dumps(item, indent=4, default=str))  # <-- default=str
+    item_id = item.get("item_id", "")
+    if item_id != "":
+        exists = serialize_mongo_document(db.products.find_one({"item_id": item_id}))
+        if not exists:
+            db.products.insert_one(
+                {
+                    "item_id": item.get("item_id", ""),
+                    "item_name": item.get("item_name", ""),
+                    "unit": item.get("unit", "pcs"),
+                    "status": item.get("status", "inactive"),
+                    "is_combo_product": item.get("is_combo_product", False),
+                    "rate": item.get("rate", 1),
+                    "item_tax_preferences": item.get("item_tax_preferences", []),
+                    "account_name": item.get("account_name", ""),
+                    "purchase_rate": item.get("purchase_rate", 0),
+                    "item_type": item.get("item_type", "sales"),
+                    "product_type": item.get("product_type", "goods"),
+                    "is_taxable": item.get("is_taxable", True),
+                    "track_batch_number": item.get("track_batch_number", False),
+                    "hsn_or_sac": item.get("hsn_or_sac", ""),
+                    "sku": item.get("sku", ""),
+                    "cf_item_code": item.get("cf_item_code", ""),
+                    "cf_sku_code": item.get("cf_sku_code", ""),
+                    "created_at": item.get("created_time", datetime.now()),
+                    "updated_at": item.get("last_modified_time", datetime.now()),
+                }
+            )
+        else:
+            print("Item Exists", json.dumps(exists, indent=4, default=str))
+            print("New Item Data", json.dumps(data, indent=4, default=str))
+            update_data = {}
+            for field, value in item.items():
+                # Exclude 'status' from updates
+                if field == "status":
+                    continue
+
+                # Check for changes
+                if field in exists and exists[field] != value:
+                    update_data[field] = value
+
+            # Update 'updated_at' field with current time if there are changes
+            if update_data:
+                update_data["updated_at"] = datetime.now()
+                db.products.update_one({"item_id": item_id}, {"$set": update_data})
+                print("Updated Fields:", json.dumps(update_data, indent=4, default=str))
+            else:
+                print("No fields to update.")
+    else:
+        print("Item Does Not Exist. Webhook Received")
+
+
 def get_cached_access_token():
     """
     Get or refresh the Zoho access token with caching to improve performance.
@@ -390,3 +444,10 @@ def customer(data: dict):
     print(json.dumps(data, indent=4))
     handle_customer(data)
     return "Customer Webhook Received Successfully"
+
+
+@router.post("/item")
+def item(data: dict):
+    print(json.dumps(data, indent=4))
+    handle_item(data)
+    return "Item Webhook Received Successfully"
