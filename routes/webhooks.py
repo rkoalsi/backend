@@ -3,6 +3,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, asyncio
+import httpx
 
 load_dotenv()
 
@@ -16,32 +17,95 @@ WAREHOUSE_URL = os.getenv("WAREHOUSE_URL")
 org_id = os.getenv("ORG_ID")
 collection = db["products"]
 
+_access_token_cache = {"token": None, "expires_at": None}
 
-def get_zoho_stock(day=now.day, month=now.month, year=now.year):
+
+def get_cached_access_token():
+    """
+    Get or refresh the Zoho access token with caching to improve performance.
+    """
+    global _access_token_cache
+    if (
+        not _access_token_cache["token"]
+        or _access_token_cache["expires_at"] < datetime.datetime.utcnow()
+    ):
+        access_token = get_access_token("inventory")
+        _access_token_cache["token"] = access_token
+        _access_token_cache["expires_at"] = (
+            datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        )
+    return _access_token_cache["token"]
+
+
+async def fetch_with_retries(client, url, headers, retries=3, timeout=10):
+    """
+    Fetch data from a URL with retry logic and timeout.
+    """
+    for attempt in range(retries):
+        try:
+            response = await client.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            return response
+        except httpx.RequestError as e:
+            if attempt < retries - 1:
+                print(f"Retry {attempt + 1}/{retries} for URL: {url}")
+                await asyncio.sleep(1)  # Exponential backoff can be implemented here
+            else:
+                print(f"Request failed after {retries} attempts: {e}")
+                raise
+
+
+async def get_zoho_stock(day=now.day, month=now.month, year=now.year):
+    """
+    Fetch stock data from Zoho Inventory in an asynchronous manner with retries and timeout handling.
+    """
     print(f"Fetching stock for {now.replace(month=month).strftime('%b')}-{year}")
     to_date = now.replace(month=month, day=day).date()
     warehouse_stock = []
-    access_token = get_access_token("inventory")
+    access_token = get_cached_access_token()
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    z = requests.get(
-        url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id), headers=headers
-    )
-    total_pages = int(z.json().get("page_context", {}).get("total_pages", 0)) + 1
 
-    for i in range(1, total_pages):
-        y = requests.get(
-            url=WAREHOUSE_URL.format(page=i, date1=to_date, org_id=org_id),
-            headers=headers,
-        )
-        warehouse_stock.extend(y.json().get("warehouse_stock_info", []))
+    async with httpx.AsyncClient() as client:
+        # Fetch the total number of pages
+        try:
+            response = await fetch_with_retries(
+                client,
+                url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
+                headers=headers,
+            )
+            total_pages = (
+                int(response.json().get("page_context", {}).get("total_pages", 0)) + 1
+            )
 
+            # Fetch all pages in parallel
+            tasks = [
+                fetch_with_retries(
+                    client,
+                    url=WAREHOUSE_URL.format(page=i, date1=to_date, org_id=org_id),
+                    headers=headers,
+                )
+                for i in range(1, total_pages + 1)
+            ]
+            responses = await asyncio.gather(*tasks)
+
+            for resp in responses:
+                warehouse_stock.extend(resp.json().get("warehouse_stock_info", []))
+
+        except Exception as e:
+            print(f"Failed to fetch stock data: {e}")
+            return []
+
+    # Filter and process warehouse stock data
     arr = []
     for item in warehouse_stock:
         for w in item["warehouses"]:
-            if w["warehouse_name"] == "Pupscribe Enterprises Private Limited":
+            if (
+                w["warehouse_name"].strip().lower()
+                == "pupscribe enterprises private limited".lower()
+            ):
                 arr.append(
                     {
-                        "name": item["item_name"],
+                        "name": item["item_name"].strip().lower(),
                         "stock": int(w["quantity_available"]),
                     }
                 )
@@ -53,27 +117,37 @@ async def update_stock():
     """
     Update the stock field in active products based on their name (async).
     """
-    active_products = collection.find({"status": "active"})
-    stock_data = get_zoho_stock()  # synchronous call
+    # Fetch active products
+    active_products = list(collection.find({}, {"_id": 1, "name": 1}))
+    stock_data = await get_zoho_stock()
     stock_dict = {item["name"]: item["stock"] for item in stock_data}
 
-    updated_count = 0
+    # Prepare bulk updates
+    updates = []
     for product in active_products:
-        product_name = product.get("name", "")
-        # Check if product exists in stock data
+        product_name = product.get("name", "").strip().lower()
         stock = stock_dict.get(product_name)
         if stock is not None:
-            collection.update_one({"_id": product["_id"]}, {"$set": {"stock": stock}})
-            updated_count += 1
-            print(f"Updated product '{product_name}' with stock: {stock}")
+            updates.append(
+                {
+                    "filter": {"_id": product["_id"]},
+                    "update": {"$set": {"stock": stock}},
+                }
+            )
+            print(f"Prepared update for '{product_name}' with stock: {stock}")
         else:
             print(f"No stock data for product '{product_name}'")
 
-    print(f"Total products updated with stock: {updated_count}")
-    return updated_count
+    # Execute bulk updates
+    if updates:
+        from pymongo import UpdateOne
+
+        collection.bulk_write([UpdateOne(u["filter"], u["update"]) for u in updates])
+        print(f"Total products updated with stock: {len(updates)}")
+    else:
+        print("No updates required.")
 
 
-# Wrapper function to call async code in a background task
 def run_update_stock():
     """
     Runs the async `update_stock` inside a sync function
