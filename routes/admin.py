@@ -31,6 +31,14 @@ def get_product(product_id: str, collection: Collection):
 @router.get("/stats")
 async def get_stats():
     try:
+
+        active_stock_products = db["products"].count_documents(
+            {
+                "stock": {"$gt": 0},
+            }
+        )
+        inactive_products = db["products"].count_documents({"status": "inactive"})
+        total_products = db["products"].count_documents({})
         active_products = db["products"].count_documents({"status": "active"})
         active_customers = db["customers"].count_documents({"status": "active"})
         active_sales_people = db["users"].count_documents(
@@ -43,7 +51,10 @@ async def get_stats():
         orders_declined = db["orders"].count_documents({"status": "declined"})
 
         return {
+            "active_stock_products": active_stock_products,
             "active_products": active_products,
+            "inactive_products": inactive_products,
+            "total_products": total_products,
             "active_customers": active_customers,
             "active_sales_people": active_sales_people,
             "orders_draft": orders_draft,
@@ -317,6 +328,29 @@ def get_salespeople_customers():
     users_cursor = db.users.find({"role": "sales_person"})
     users = serialize_mongo_document(list(users_cursor))
     return {"users": users}
+
+
+@router.post("/salespeople")
+async def create_salesperson(salesperson: dict):
+    # Check if salesperson code or email already exists
+    existing_person = next(
+        (
+            sp
+            for sp in db.users.find({})
+            if sp.get("email") == salesperson.get("email")
+            or sp.get("code") == salesperson.get("code")
+        ),
+        None,
+    )
+    if existing_person:
+        raise HTTPException(
+            status_code=400,
+            detail="Salesperson with this email or code already exists.",
+        )
+
+    # Add salesperson to the collection
+    db.users.insert_one(salesperson)
+    return "Sales Person Created"
 
 
 @router.get("/salespeople/{salesperson_id}")
