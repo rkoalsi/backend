@@ -118,7 +118,7 @@ async def update_stock():
     Update the stock field in active products based on their name (async).
     """
     # Fetch active products
-    active_products = list(collection.find({}, {"_id": 1, "name": 1}))
+    active_products = list(collection.find({"status": "active"}, {"_id": 1, "name": 1}))
     stock_data = await get_zoho_stock()
     stock_dict = {item["name"]: item["stock"] for item in stock_data}
 
