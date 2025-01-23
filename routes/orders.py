@@ -22,6 +22,45 @@ users_collection = db["users"]
 
 router = APIRouter()
 
+STATE_CODES = {
+    "Andhra Pradesh": "AP",
+    "Arunachal Pradesh": "AR",
+    "Assam": "AS",
+    "Bihar": "BR",
+    "Chhattisgarh": "CG",
+    "Goa": "GA",
+    "Gujarat": "GJ",
+    "Haryana": "HR",
+    "Himachal Pradesh": "HP",
+    "Jharkhand": "JH",
+    "Karnataka": "KA",
+    "Kerala": "KL",
+    "Madhya Pradesh": "MP",
+    "Maharashtra": "MH",
+    "Manipur": "MN",
+    "Meghalaya": "ML",
+    "Mizoram": "MZ",
+    "Nagaland": "NL",
+    "Odisha": "OD",
+    "Punjab": "PB",
+    "Rajasthan": "RJ",
+    "Sikkim": "SK",
+    "Tamil Nadu": "TN",
+    "Telangana": "TG",
+    "Tripura": "TR",
+    "Uttar Pradesh": "UP",
+    "Uttarakhand": "UK",
+    "West Bengal": "WB",
+    "Andaman and Nicobar Islands": "AN",
+    "Chandigarh": "CH",
+    "Dadra and Nagar Haveli and Daman and Diu": "DD",
+    "Delhi": "DL",
+    "Jammu and Kashmir": "JK",
+    "Ladakh": "LA",
+    "Lakshadweep": "LD",
+    "Puducherry": "PY",
+}
+
 
 # Create a new order
 def create_order(order: dict, collection: Collection) -> str:
@@ -145,6 +184,7 @@ def update_order(
                     "name": product.get("item_name", ""),
                     "image_url": product.get("image_url", ""),
                     "price": product.get("rate", 0),
+                    "added_by": product.get("added_by", ""),
                 }
             )
         # Replace the product list in the update payload
@@ -337,7 +377,10 @@ def validate_order(order_id: str, status: str):
 
     # Check if place of supply is missing or invalid
     place_of_supply = order.get("shipping_address", {}).get("state_code")
-    if not place_of_supply:
+    place_of_supply_backup = STATE_CODES[
+        str(order.get("shipping_address", {}).get("state", "")).capitalize()
+    ]
+    if not place_of_supply and not place_of_supply_backup:
         raise HTTPException(status_code=400, detail="Place of supply is missing")
 
     # Check if products are missing or invalid
@@ -378,7 +421,9 @@ async def finalise(order_dict: dict):
     shipping_address_id = order.get("shipping_address", {}).get("address_id", "")
     billing_address_id = order.get("billing_address", {}).get("address_id", "")
     customer = db.customers.find_one({"_id": ObjectId(order.get("customer_id"))})
-    place_of_supply = order.get("shipping_address", {}).get("state_code")
+    place_of_supply = STATE_CODES[
+        str(order.get("shipping_address", {}).get("state", "")).capitalize()
+    ]
     gst_type = order.get("gst_type", "")
     products = order.get("products", [])
     total_amount = order.get("total_amount")
@@ -440,7 +485,7 @@ async def finalise(order_dict: dict):
                 "terms": terms,
                 "line_items": line_items,
                 "custom_fields": [],
-                "is_inclusive_tax": True,
+                "is_inclusive_tax": False if gst_type == "Exclusive" else True,
                 "is_discount_before_tax": "",
                 "discount": 0,
                 "discount_type": "item_level",
