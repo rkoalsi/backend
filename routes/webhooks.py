@@ -14,8 +14,6 @@ now = datetime.datetime.utcnow()
 TOTAL_WAREHOUSE_URL = os.getenv("TOTAL_WAREHOUSE_URL")
 WAREHOUSE_URL = os.getenv("WAREHOUSE_URL")
 org_id = os.getenv("ORG_ID")
-access_token = get_access_token("books")
-headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 collection = db["products"]
 
 
@@ -23,6 +21,8 @@ def get_zoho_stock(day=now.day, month=now.month, year=now.year):
     print(f"Fetching stock for {now.replace(month=month).strftime('%b')}-{year}")
     to_date = now.replace(month=month, day=day).date()
     warehouse_stock = []
+    access_token = get_access_token("inventory")
+    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
     z = requests.get(
         url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id), headers=headers
     )
