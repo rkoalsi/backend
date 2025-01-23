@@ -46,8 +46,10 @@ def handle_item(data: dict):
                     "sku": item.get("sku", ""),
                     "cf_item_code": item.get("cf_item_code", ""),
                     "cf_sku_code": item.get("cf_sku_code", ""),
-                    "created_at": item.get("created_time", datetime.now()),
-                    "updated_at": item.get("last_modified_time", datetime.now()),
+                    "created_at": item.get("created_time", datetime.datetime.now()),
+                    "updated_at": item.get(
+                        "last_modified_time", datetime.datetime.now()
+                    ),
                 }
             )
         else:
@@ -65,7 +67,7 @@ def handle_item(data: dict):
 
             # Update 'updated_at' field with current time if there are changes
             if update_data:
-                update_data["updated_at"] = datetime.now()
+                update_data["updated_at"] = datetime.datetime.now()
                 db.products.update_one({"item_id": item_id}, {"$set": update_data})
                 print("Updated Fields:", json.dumps(update_data, indent=4, default=str))
             else:
