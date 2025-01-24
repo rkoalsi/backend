@@ -3,6 +3,7 @@ from bson import json_util
 from bson.objectid import ObjectId
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -50,5 +51,7 @@ def serialize_mongo_document(document):
         return {key: serialize_mongo_document(value) for key, value in document.items()}
     elif isinstance(document, ObjectId):
         return str(document)
+    elif isinstance(document, datetime):
+        return document.isoformat()
     else:
         return document

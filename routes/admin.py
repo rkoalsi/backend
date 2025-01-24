@@ -125,6 +125,7 @@ def get_products(
 
         return JSONResponse({"products": products, "total_count": total_count})
     except Exception as e:
+        print(e)
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
 
