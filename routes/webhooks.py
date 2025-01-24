@@ -114,6 +114,7 @@ def handle_item(data: dict):
                     "created_time",
                     "last_modified_time",
                     "created_at",
+                    "brand",
                 ]:
                     continue
 
