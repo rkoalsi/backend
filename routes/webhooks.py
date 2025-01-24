@@ -42,12 +42,17 @@ def handle_item(data: dict):
     if item_id != "":
         exists = serialize_mongo_document(db.products.find_one({"item_id": item_id}))
         if not exists:
+            item_name = str(item.get("item_name"))
+            brand_name = item_name.split(" ", 1)[0]
             db.products.insert_one(
                 {
                     "item_id": item.get("item_id", ""),
                     "name": item.get("name", ""),
                     "item_name": item.get("name", ""),
                     "unit": item.get("unit", "pcs"),
+                    "brand": (
+                        brand_name.capitalize() if brand_name != "FOFOS" else brand_name
+                    ),
                     "status": item.get("status", "inactive"),
                     "is_combo_product": item.get("is_combo_product", False),
                     "rate": item.get("rate", 1),
