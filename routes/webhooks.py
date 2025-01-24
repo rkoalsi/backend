@@ -100,11 +100,11 @@ def handle_item(data: dict):
                     brand_name.capitalize() if brand_name != "FOFOS" else brand_name
                 )
             if "custom_field_hash" in item:
-                update_data["cf_sku_code"] = (
-                    item.get("custom_field_hash", {}).get("cf_sku_code", ""),
+                update_data["cf_sku_code"] = item.get("custom_field_hash", {}).get(
+                    "cf_sku_code", ""
                 )
-                update_data["cf_item_code"] = (
-                    item.get("custom_field_hash", {}).get("cf_item_code", ""),
+                update_data["cf_item_code"] = item.get("custom_field_hash", {}).get(
+                    "cf_item_code", ""
                 )
             # Iterate over other fields to detect changes
             for field, value in item.items():
