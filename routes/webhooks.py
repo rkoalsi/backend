@@ -65,8 +65,12 @@ def handle_item(data: dict):
                     "track_batch_number": item.get("track_batch_number", False),
                     "hsn_or_sac": item.get("hsn_or_sac", ""),
                     "sku": item.get("sku", ""),
-                    "cf_item_code": item.get("cf_item_code", ""),
-                    "cf_sku_code": item.get("cf_sku_code", ""),
+                    "cf_item_code": item.get("custom_field_hash", {}).get(
+                        "cf_item_code", ""
+                    ),
+                    "cf_sku_code": item.get("custom_field_hash", {}).get(
+                        "cf_sku_code", ""
+                    ),
                     "created_at": parse_datetime(item.get("created_time")),
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
@@ -89,7 +93,19 @@ def handle_item(data: dict):
                 print(
                     f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
                 )
-
+            if "brand" in item:
+                item_name = str(item.get("item_name"))
+                brand_name = item_name.split(" ", 1)[0]
+                update_data["brand"] = (
+                    brand_name.capitalize() if brand_name != "FOFOS" else brand_name
+                )
+            if "custom_field_hash" in item:
+                update_data["cf_sku_code"] = (
+                    item.get("custom_field_hash", {}).get("cf_sku_code", ""),
+                )
+                update_data["cf_item_code"] = (
+                    item.get("custom_field_hash", {}).get("cf_item_code", ""),
+                )
             # Iterate over other fields to detect changes
             for field, value in item.items():
                 # Exclude 'status', 'created_time', 'last_modified_time', and 'created_at' from updates
