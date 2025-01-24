@@ -45,7 +45,7 @@ def handle_item(data: dict):
             db.products.insert_one(
                 {
                     "item_id": item.get("item_id", ""),
-                    "item_name": item.get("item_name", ""),
+                    "item_name": item.get("name", ""),
                     "unit": item.get("unit", "pcs"),
                     "status": item.get("status", "inactive"),
                     "is_combo_product": item.get("is_combo_product", False),
