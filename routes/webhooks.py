@@ -68,38 +68,41 @@ def handle_item(data: dict):
                 }
             )
         else:
-            print("Item Exists", json.dumps(exists, indent=4, default=str))
-            print("New Item Data", json.dumps(data, indent=4, default=str))
+            print("Item Exists")
             update_data = {}
+
+            # Handle 'created_time' and 'last_modified_time' separately
+            if "created_time" in item:
+                parsed_created = parse_datetime(item.get("created_time"))
+                update_data["created_at"] = parsed_created
+                print(
+                    f"Parsed created_at: {parsed_created} (Type: {type(parsed_created)})"
+                )
+
+            if "last_modified_time" in item:
+                parsed_updated = parse_datetime(item.get("last_modified_time"))
+                update_data["updated_at"] = parsed_updated
+                print(
+                    f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
+                )
+
+            # Iterate over other fields to detect changes
             for field, value in item.items():
-                # Exclude 'status' from updates
-                if field == "status":
+                # Exclude 'status', 'created_time', 'last_modified_time', and 'created_at' from updates
+                if field in [
+                    "status",
+                    "created_time",
+                    "last_modified_time",
+                    "created_at",
+                ]:
                     continue
 
-                # Check for changes
+                # Check if the field exists in the document and if its value has changed
                 if field in exists and exists[field] != value:
-                    if field in ["created_time", "last_modified_time"]:
-                        # Convert datetime strings to Python datetime objects
-                        if field == "created_time":
-                            parsed_created = parse_datetime(value)
-                            update_data["created_at"] = parsed_created
-                            print(
-                                f"Parsed created_at: {parsed_created} (Type: {type(parsed_created)})"
-                            )
-                        elif field == "last_modified_time":
-                            parsed_updated = parse_datetime(value)
-                            update_data["updated_at"] = parsed_updated
-                            print(
-                                f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
-                            )
-                    else:
-                        update_data[field] = value
+                    update_data[field] = value
 
-            # Update 'updated_at' field with current time if there are changes
+            # If there are fields to update, perform the update
             if update_data:
-                # Optionally, you might want to set 'updated_at' to current time regardless
-                # Uncomment the following line if desired:
-                # update_data["updated_at"] = datetime.datetime.now()
                 try:
                     db.products.update_one({"item_id": item_id}, {"$set": update_data})
                     print(
