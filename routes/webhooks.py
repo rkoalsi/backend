@@ -81,18 +81,33 @@ def handle_item(data: dict):
                     if field in ["created_time", "last_modified_time"]:
                         # Convert datetime strings to Python datetime objects
                         if field == "created_time":
-                            update_data["created_at"] = parse_datetime(value)
+                            parsed_created = parse_datetime(value)
+                            update_data["created_at"] = parsed_created
+                            print(
+                                f"Parsed created_at: {parsed_created} (Type: {type(parsed_created)})"
+                            )
                         elif field == "last_modified_time":
-                            update_data["updated_at"] = parse_datetime(value)
+                            parsed_updated = parse_datetime(value)
+                            update_data["updated_at"] = parsed_updated
+                            print(
+                                f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
+                            )
                     else:
                         update_data[field] = value
 
             # Update 'updated_at' field with current time if there are changes
             if update_data:
-                # Ensure 'updated_at' is a datetime object
-                update_data["updated_at"] = datetime.datetime.now()
-                db.products.update_one({"item_id": item_id}, {"$set": update_data})
-                print("Updated Fields:", json.dumps(update_data, indent=4, default=str))
+                # Optionally, you might want to set 'updated_at' to current time regardless
+                # Uncomment the following line if desired:
+                # update_data["updated_at"] = datetime.datetime.now()
+                try:
+                    db.products.update_one({"item_id": item_id}, {"$set": update_data})
+                    print(
+                        "Updated Fields:",
+                        json.dumps(update_data, indent=4, default=str),
+                    )
+                except Exception as e:
+                    print(f"Error updating document with item_id {item_id}: {e}")
             else:
                 print("No fields to update.")
     else:
