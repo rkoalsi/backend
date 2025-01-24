@@ -4,6 +4,7 @@ from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, asyncio
 import httpx
+from dateutil.parser import parse
 
 load_dotenv()
 
@@ -18,6 +19,20 @@ org_id = os.getenv("ORG_ID")
 collection = db["products"]
 
 _access_token_cache = {"token": None, "expires_at": None}
+
+
+def parse_datetime(value):
+    """
+    Parses a datetime string into a datetime object.
+    If the value is already a datetime object, returns it as is.
+    If parsing fails, returns the current datetime.
+    """
+    if isinstance(value, datetime.datetime):
+        return value
+    try:
+        return parse(value)
+    except (ValueError, TypeError):
+        return datetime.datetime.now()
 
 
 def handle_item(data: dict):
@@ -66,18 +81,15 @@ def handle_item(data: dict):
                     if field in ["created_time", "last_modified_time"]:
                         # Convert datetime strings to Python datetime objects
                         if field == "created_time":
-                            update_data["created_at"] = datetime.strptime(
-                                value, "%Y-%m-%d %H:%M:%S%z"
-                            ).replace(tzinfo=None)
+                            update_data["created_at"] = parse_datetime(value)
                         elif field == "last_modified_time":
-                            update_data["updated_at"] = datetime.strptime(
-                                value, "%Y-%m-%d %H:%M:%S%z"
-                            ).replace(tzinfo=None)
+                            update_data["updated_at"] = parse_datetime(value)
                     else:
                         update_data[field] = value
 
             # Update 'updated_at' field with current time if there are changes
             if update_data:
+                # Ensure 'updated_at' is a datetime object
                 update_data["updated_at"] = datetime.datetime.now()
                 db.products.update_one({"item_id": item_id}, {"$set": update_data})
                 print("Updated Fields:", json.dumps(update_data, indent=4, default=str))
