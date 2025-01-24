@@ -61,10 +61,8 @@ def handle_item(data: dict):
                     "sku": item.get("sku", ""),
                     "cf_item_code": item.get("cf_item_code", ""),
                     "cf_sku_code": item.get("cf_sku_code", ""),
-                    "created_at": item.get("created_time", datetime.datetime.now()),
-                    "updated_at": item.get(
-                        "last_modified_time", datetime.datetime.now()
-                    ),
+                    "created_at": parse_datetime(item.get("created_time")),
+                    "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
             )
         else:
