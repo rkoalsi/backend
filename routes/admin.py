@@ -97,8 +97,8 @@ def get_products(
     try:
         # Base query: only products with stock > 0 and not marked as deleted
         query = {
-            "stock": {"$gt": 0},
-            "is_deleted": {"$exists": False},
+            # "stock": {"$gt": 0},
+            # "is_deleted": {"$exists": False},
         }
         # If there's a search string, match name or cf_sku_code (case-insensitive)
         if search and search != "":
