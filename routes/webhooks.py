@@ -42,7 +42,7 @@ def handle_item(data: dict):
     if item_id != "":
         exists = serialize_mongo_document(db.products.find_one({"item_id": item_id}))
         if not exists:
-            item_name = str(item.get("item_name"))
+            item_name = str(item.get("name"))
             brand_name = item_name.split(" ", 1)[0]
             db.products.insert_one(
                 {
@@ -94,7 +94,7 @@ def handle_item(data: dict):
                     f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
                 )
             if "brand" in item:
-                item_name = str(item.get("item_name"))
+                item_name = str(item.get("name"))
                 brand_name = item_name.split(" ", 1)[0]
                 update_data["brand"] = (
                     brand_name.capitalize() if brand_name != "FOFOS" else brand_name
