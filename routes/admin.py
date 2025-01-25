@@ -1,15 +1,15 @@
-from fastapi import APIRouter, Body, HTTPException, Query, status
+from fastapi import APIRouter, Body, HTTPException, Query, File, UploadFile, Form
 from fastapi.responses import JSONResponse
-from fastapi.responses import HTMLResponse
-from backend.config.root import connect_to_mongo, parse_data, serialize_mongo_document  # type: ignore
+from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
-from .helpers import validate_file, process_upload, get_access_token
+from .helpers import get_access_token
 from typing import Optional
 import re, requests, os
-from datetime import datetime
 from collections import defaultdict
 from dotenv import load_dotenv
+import boto3
+from botocore.exceptions import BotoCoreError, NoCredentialsError
 
 load_dotenv()
 router = APIRouter()
@@ -19,6 +19,18 @@ products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
+
+AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
+AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
+AWS_S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+AWS_S3_REGION = os.getenv("S3_REGION", "ap-south-1")  # Default to ap-south-1
+
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_S3_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
 
 
 def get_product(product_id: str, collection: Collection):
@@ -681,3 +693,39 @@ def delete_customer_special_margin(customer_id: str, special_margin_id: str):
             status_code=404, detail="Special margin not found or already deleted."
         )
     return {"message": "Special margin deleted successfully."}
+
+
+@router.post("/upload-image")
+async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)):
+    # Validate file type
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Invalid file type.")
+
+    try:
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        # Generate a unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{product.get('item_id')}{file_extension}"
+
+        # Upload the file to S3
+        s3_client.upload_fileobj(
+            file.file,
+            AWS_S3_BUCKET_NAME,
+            unique_filename,
+            ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+        )
+
+        # Construct the S3 URL
+        s3_url = f"https://{AWS_S3_BUCKET_NAME}.s3.{AWS_S3_REGION}.amazonaws.com/product_images/{unique_filename}"
+        if s3_url:
+            products_collection.update_one(
+                {"_id": ObjectId(product_id)}, {"$set": {"image_url": s3_url}}
+            )
+            return {"image_url": s3_url}
+
+    except NoCredentialsError:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured.")
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail="Error uploading file to S3.")
+    finally:
+        file.file.close()
