@@ -7,6 +7,7 @@ from .helpers import validate_file, process_upload, get_access_token
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
+from typing import Optional
 
 router = APIRouter()
 
@@ -40,18 +41,20 @@ def get_all_brands():
 @router.get("")
 def get_products(
     role: str = "salesperson",
-    page: int = Query(1, ge=1),  # Page number, default to 1
-    per_page: int = Query(25, ge=1, le=100),  # Items per page, default to 25
-    brand: str = Query(None),  # Optional brand filter
+    page: int = Query(1, ge=1, description="Page number, starting from 1"),
+    per_page: int = Query(25, ge=1, le=100, description="Number of items per page"),
+    brand: Optional[str] = Query(None, description="Filter by brand"),
+    search: Optional[str] = Query(None, description="Search term for name or SKU code"),
 ):
     """
-    Retrieves paginated products for a specific brand or all brands.
+    Retrieves paginated products with optional brand and search filters.
 
     Args:
         role (str): Role of the requester. Defaults to "salesperson".
         page (int): Page number for pagination.
         per_page (int): Number of products per page.
-        brand (str): Optional brand filter.
+        brand (str, optional): Optional brand filter.
+        search (str, optional): Optional search term to filter by name or SKU code.
 
     Returns:
         dict: A dictionary containing paginated list of products.
@@ -63,12 +66,36 @@ def get_products(
     if brand:
         query["brand"] = brand
 
+    # Add search filter
+    if search:
+        regex = {"$regex": search, "$options": "i"}  # Case-insensitive search
+        query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
+
     # Add additional condition for salespeople
     if role == "salesperson":
         query["status"] = "active"
 
-    # Fetch products based on the constructed query
-    all_products = [serialize_mongo_document(doc) for doc in db.products.find(query)]
+    # Calculate total products matching the query
+    total_products = db.products.count_documents(query)
+
+    # Calculate total pages
+    total_pages = (total_products + per_page - 1) // per_page
+
+    # Validate page number
+    if page > total_pages and total_pages != 0:
+        raise HTTPException(status_code=400, detail="Page number out of range")
+
+    # Fetch products with pagination
+    cursor = (
+        db.products.find(query)
+        .sort("created_at", -1)
+        .skip((page - 1) * per_page)
+        .limit(per_page)
+    )
+    fetched_products = list(cursor)
+
+    # Serialize products
+    all_products = [serialize_mongo_document(doc) for doc in fetched_products]
 
     # Define the threshold date (three months ago)
     three_months_ago = datetime.now() - relativedelta(months=3)
@@ -78,32 +105,29 @@ def get_products(
         created_at_str = product.get("created_at")
         if created_at_str:
             try:
-                created_at = parser.parse(created_at_str)
+                created_at = datetime.fromisoformat(created_at_str)
                 product["new"] = created_at >= three_months_ago
             except Exception as e:
                 print(
                     f"Error parsing created_at for item_id {product.get('item_id')}: {e}"
                 )
                 product["new"] = False
+        else:
+            product["new"] = False
 
     # Sort the products: new products first
     sorted_products = sorted(
         all_products, key=lambda x: x.get("new", False), reverse=True
     )
 
-    # Pagination logic
-    total_products = len(sorted_products)
-    start_index = (page - 1) * per_page
-    end_index = start_index + per_page
-    paginated_products = sorted_products[start_index:end_index]
-
     return {
-        "products": paginated_products,
+        "products": sorted_products,
         "total": total_products,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total_products + per_page - 1) // per_page,
+        "total_pages": total_pages,
         "brand": brand,
+        "search": search,
     }
 
 
