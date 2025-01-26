@@ -6,7 +6,7 @@ from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-import requests, os, json, httpx
+import re, os, json, httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -197,6 +197,7 @@ def update_order(
                     "quantity": product.get("quantity", 1),
                     "name": product.get("item_name", ""),
                     "image_url": product.get("image_url", ""),
+                    "margin": product.get("margin", ""),
                     "price": product.get("rate", 0),
                     "added_by": product.get("added_by", ""),
                 }
@@ -444,9 +445,34 @@ async def finalise(order_dict: dict):
     gst_type = order.get("gst_type", "")
     products = order.get("products", [])
     total_amount = order.get("total_amount")
+
+    # Fetch SPecial Margins
+    customer_id = order.get("customer_id")
+    special_margins_cursor = db.special_margins.find(
+        {"customer_id": ObjectId(customer_id)}
+    )
+    special_margin_dict = {
+        str(sm["product_id"]): sm["margin"] for sm in special_margins_cursor
+    }
+
     line_items = []
     for idx, product in enumerate(products):
         item = db.products.find_one({"_id": ObjectId(product.get("product_id"))})
+        product_id_str = str(
+            product.get("product_id")
+        )  # Convert to string for dictionary lookup
+
+        # Retrieve the special margin if it exists; otherwise, use the product's default margin
+        special_margin = special_margin_dict.get(
+            product_id_str, product.get("margin", "40%")
+        )
+
+        # Optional: Validate the format of special_margin
+        if isinstance(special_margin, str) and re.match(r"^\d+%$", special_margin):
+            discount_value = special_margin
+        else:
+            discount_value = customer.get("cf_margin", "40%")
+
         obj = {
             "item_order": idx + 1,
             "item_id": item.get("item_id"),
@@ -454,7 +480,7 @@ async def finalise(order_dict: dict):
             "name": item.get("name"),
             "description": "",
             "quantity": product.get("quantity"),
-            "discount": customer.get("cf_margin", "40%"),
+            "discount": discount_value,
             "tax_id": (
                 item.get("item_tax_preferences", [{}])[1].get("tax_id", 0)
                 if place_of_supply == "MH" or place_of_supply == ""
@@ -608,7 +634,7 @@ async def finalise(order_dict: dict):
                 {"_id": ObjectId(order_id)},
                 {
                     "$set": {
-                        "status": "sent",
+                        "status": f"{str(status).capitalize()}",
                         "estimate_created": True,
                         "estimate_id": estimate_id,
                         "estimate_number": estimate_number,
