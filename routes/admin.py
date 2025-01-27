@@ -24,6 +24,7 @@ AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
 AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
 AWS_S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AWS_S3_REGION = os.getenv("S3_REGION", "ap-south-1")  # Default to ap-south-1
+AWS_S3_URL = os.getenv("S3_URL")
 
 s3_client = boto3.client(
     "s3",
@@ -706,7 +707,7 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         product = products_collection.find_one({"_id": ObjectId(product_id)})
         # Generate a unique filename
         file_extension = os.path.splitext(file.filename)[1]
-        unique_filename = f"{product.get('item_id')}{file_extension}"
+        unique_filename = f"product_images/{product.get('item_id')}{file_extension}"
 
         # Upload the file to S3
         s3_client.upload_fileobj(
@@ -717,7 +718,7 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         )
 
         # Construct the S3 URL
-        s3_url = f"https://{AWS_S3_BUCKET_NAME}.s3.{AWS_S3_REGION}.amazonaws.com/product_images/{unique_filename}"
+        s3_url = f"{AWS_S3_URL}/{unique_filename}"
         if s3_url:
             products_collection.update_one(
                 {"_id": ObjectId(product_id)}, {"$set": {"image_url": s3_url}}
