@@ -52,4 +52,4 @@ async def custom_404_handler(_, __):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, max_body_size=10000000)

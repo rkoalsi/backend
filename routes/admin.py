@@ -697,7 +697,7 @@ def delete_customer_special_margin(customer_id: str, special_margin_id: str):
     return {"message": "Special margin deleted successfully."}
 
 
-MAX_FILE_SIZE_MB = 3
+MAX_FILE_SIZE_MB = 10
 
 
 @router.post("/upload-image")
