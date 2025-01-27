@@ -102,6 +102,7 @@ def get_products(
     limit: int = Query(10, ge=1),
     search: Optional[str] = None,
     brand: Optional[str] = None,
+    active_products: Optional[bool] = False,
 ):
     """
     Retrieve products with optional search and brand filtering.
@@ -109,11 +110,9 @@ def get_products(
     """
     try:
         # Base query: only products with stock > 0 and not marked as deleted
-        query = {
-            "status": "active"
-            # "stock": {"$gt": 0},
-            # "is_deleted": {"$exists": False},
-        }
+        query = {}
+        if active_products:
+            query["status"] = "active"
         # If there's a search string, match name or cf_sku_code (case-insensitive)
         if search and search != "":
             regex = {"$regex": search, "$options": "i"}

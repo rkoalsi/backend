@@ -121,6 +121,7 @@ def get_products(
                 "sub_category": ASCENDING,
                 "series": ASCENDING,
                 "rate": ASCENDING,
+                "name": ASCENDING,
             }
         },
         {"$skip": (page - 1) * per_page},
