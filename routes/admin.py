@@ -697,12 +697,24 @@ def delete_customer_special_margin(customer_id: str, special_margin_id: str):
     return {"message": "Special margin deleted successfully."}
 
 
+MAX_FILE_SIZE_MB = 3
+
+
 @router.post("/upload-image")
 async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)):
     # Validate file type
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type.")
+    # Validate file size
+    file.file.seek(0, 2)  # Move the cursor to the end of the file
+    file_size = file.file.tell()  # Get the current position (file size in bytes)
+    file.file.seek(0)  # Reset the cursor to the beginning of the file
 
+    if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File is too large. Maximum allowed size is {MAX_FILE_SIZE_MB} MB.",
+        )
     try:
         product = products_collection.find_one({"_id": ObjectId(product_id)})
         # Generate a unique filename
