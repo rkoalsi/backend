@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from backend.config.root import connect_to_mongo, parse_data, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
+from pymongo import ASCENDING, DESCENDING
 from .helpers import validate_file, process_upload, get_access_token
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -38,26 +39,42 @@ def get_all_brands():
         raise HTTPException(status_code=500, detail="Failed to fetch brands.")
 
 
+@router.get("/categories", response_model=dict)
+def get_categories_for_brand(brand: str):
+    """
+    Retrieve a list of all distinct categories for a given brand.
+
+    - **brand**: The name of the brand to fetch categories for.
+    """
+    try:
+        # Fetch distinct categories for the specified brand
+        categories = products_collection.distinct(
+            "category",
+            {"brand": brand, "stock": {"$gt": 0}, "is_deleted": {"$exists": False}},
+        )
+
+        # Remove empty or null categories
+        categories = [category for category in categories if category]
+
+        return {"categories": categories}
+    except Exception as e:
+        # Log the exception details (ensure logging is set up in your application)
+        print(f"Error fetching categories for brand '{brand}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch categories.")
+
+
 @router.get("")
 def get_products(
     role: str = "salesperson",
     page: int = Query(1, ge=1, description="Page number, starting from 1"),
     per_page: int = Query(25, ge=1, le=100, description="Number of items per page"),
     brand: Optional[str] = Query(None, description="Filter by brand"),
+    category: Optional[str] = Query(None, description="Filter by category"),
     search: Optional[str] = Query(None, description="Search term for name or SKU code"),
 ):
     """
-    Retrieves paginated products with optional brand and search filters.
-
-    Args:
-        role (str): Role of the requester. Defaults to "salesperson".
-        page (int): Page number for pagination.
-        per_page (int): Number of products per page.
-        brand (str, optional): Optional brand filter.
-        search (str, optional): Optional search term to filter by name or SKU code.
-
-    Returns:
-        dict: A dictionary containing paginated list of products.
+    Retrieves paginated products with optional brand, category, and search filters,
+    sorted such that new products appear first within each brand.
     """
     # Define base query
     query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
@@ -65,6 +82,10 @@ def get_products(
     # Add brand filter
     if brand:
         query["brand"] = brand
+
+    # Add category filter
+    if category:
+        query["category"] = category  # Adjust if 'category' is nested
 
     # Add search filter
     if search:
@@ -75,58 +96,71 @@ def get_products(
     if role == "salesperson":
         query["status"] = "active"
 
+    # Define the threshold date (three months ago)
+    three_months_ago = datetime.now() - relativedelta(months=3)
+
+    # Aggregation Pipeline
+    pipeline = [
+        {"$match": query},
+        {
+            "$addFields": {
+                "new": {
+                    "$cond": [
+                        {"$gte": ["$created_at", three_months_ago]},
+                        True,
+                        False,
+                    ]
+                }
+            }
+        },
+        {
+            "$sort": {
+                "brand": ASCENDING,
+                "new": DESCENDING,  # New products first within each brand
+                "category": ASCENDING,
+                "sub_category": ASCENDING,
+                "series": ASCENDING,
+                "rate": ASCENDING,
+            }
+        },
+        {"$skip": (page - 1) * per_page},
+        {"$limit": per_page},
+    ]
+
+    # Execute Aggregation Pipeline
+    try:
+        fetched_products = list(db.products.aggregate(pipeline))
+    except Exception as e:
+        print(f"Error during aggregation: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    # Serialize products
+    all_products = [serialize_mongo_document(doc) for doc in fetched_products]
+
     # Calculate total products matching the query
-    total_products = db.products.count_documents(query)
+    try:
+        total_products = db.products.count_documents(query)
+    except Exception as e:
+        print(f"Error counting documents: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     # Calculate total pages
-    total_pages = (total_products + per_page - 1) // per_page
+    total_pages = (
+        (total_products + per_page - 1) // per_page if total_products > 0 else 1
+    )
 
     # Validate page number
     if page > total_pages and total_pages != 0:
         raise HTTPException(status_code=400, detail="Page number out of range")
 
-    # Fetch products with pagination
-    cursor = (
-        db.products.find(query)
-        .sort("created_at", -1)
-        .skip((page - 1) * per_page)
-        .limit(per_page)
-    )
-    fetched_products = list(cursor)
-
-    # Serialize products
-    all_products = [serialize_mongo_document(doc) for doc in fetched_products]
-
-    # Define the threshold date (three months ago)
-    three_months_ago = datetime.now() - relativedelta(months=3)
-
-    # Mark new products
-    for product in all_products:
-        created_at_str = product.get("created_at")
-        if created_at_str:
-            try:
-                created_at = datetime.fromisoformat(created_at_str)
-                product["new"] = created_at >= three_months_ago
-            except Exception as e:
-                print(
-                    f"Error parsing created_at for item_id {product.get('item_id')}: {e}"
-                )
-                product["new"] = False
-        else:
-            product["new"] = False
-
-    # Sort the products: new products first
-    sorted_products = sorted(
-        all_products, key=lambda x: x.get("new", False), reverse=True
-    )
-
     return {
-        "products": sorted_products,
+        "products": all_products,
         "total": total_products,
         "page": page,
         "per_page": per_page,
         "total_pages": total_pages,
         "brand": brand,
+        "category": category,  # Include category in the response if needed
         "search": search,
     }
 

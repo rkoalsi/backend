@@ -183,7 +183,7 @@ def update_order(
     if "products" in order_update:
         updated_products = []
         for product in order_update.get("products", []):
-            product_id = ObjectId(product["product_id"])
+            product_id = ObjectId(product["_id"])
             updated_products.append(
                 {
                     "product_id": product_id,

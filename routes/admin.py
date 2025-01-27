@@ -109,6 +109,7 @@ def get_products(
     try:
         # Base query: only products with stock > 0 and not marked as deleted
         query = {
+            "status": "active"
             # "stock": {"$gt": 0},
             # "is_deleted": {"$exists": False},
         }
