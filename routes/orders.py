@@ -445,7 +445,8 @@ async def finalise(order_dict: dict):
     gst_type = order.get("gst_type", "")
     products = order.get("products", [])
     total_amount = order.get("total_amount")
-
+    created_by = order.get("created_by")
+    user = users_collection.find_one({"_id": ObjectId(created_by)})
     # Fetch SPecial Margins
     customer_id = order.get("customer_id")
     special_margins_cursor = db.special_margins.find(
@@ -537,6 +538,7 @@ async def finalise(order_dict: dict):
                 "tax_exemption_code": "",
                 "tax_authority_name": "",
                 "pricebook_id": "",
+                "salesperson_id": user.get("salesperson_id", ""),
                 # "template_id": "3220178000000075080",
                 "payment_options": {"payment_gateways": []},
                 "documents": [],
@@ -604,6 +606,7 @@ async def finalise(order_dict: dict):
                 "tax_exemption_code": "",
                 "tax_authority_name": "",
                 "pricebook_id": "",
+                "salesperson_id": user.get("salesperson_id", ""),
                 # "template_id": "3220178000000075080",
                 "payment_options": {"payment_gateways": []},
                 "documents": [],
