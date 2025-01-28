@@ -52,7 +52,7 @@ def find_user_by_email(email: str):
 
 
 def authenticate_user(email: str, password: str):
-    user = db.users.find_one({"email": email})
+    user = db.users.find_one({"email": email, "status": "active"})
     if not user or not verify_password(password, user["password"]):
         return False
     return parse_data(user)
