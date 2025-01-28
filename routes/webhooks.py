@@ -2,9 +2,10 @@ from fastapi import APIRouter, BackgroundTasks
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
-import datetime, json, os, requests, asyncio
-import httpx
+import datetime, json, os, requests, time
 from dateutil.parser import parse
+from pymongo import UpdateOne
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -148,97 +149,184 @@ def get_cached_access_token():
         or _access_token_cache["expires_at"] < datetime.datetime.utcnow()
     ):
         access_token = get_access_token("inventory")
+        print("Access token obtained:", access_token)
         _access_token_cache["token"] = access_token
         _access_token_cache["expires_at"] = (
             datetime.datetime.utcnow() + datetime.timedelta(hours=1)
         )
+        print("Access token refreshed.")
+    else:
+        print("Using cached access token.")
     return _access_token_cache["token"]
 
 
-async def fetch_with_retries(client, url, headers, retries=3, timeout=10):
+def fetch_with_retries(url, headers, retries=3, timeout=10, page_number=None):
     """
     Fetch data from a URL with retry logic and timeout.
     """
-    for attempt in range(retries):
+    for attempt in range(1, retries + 1):
         try:
-            response = await client.get(url, headers=headers, timeout=timeout)
+            response = requests.get(url, headers=headers, timeout=timeout)
             response.raise_for_status()  # Raise an exception for HTTP errors
+            print(f"Page {page_number}: Successfully fetched.")
             return response
-        except httpx.RequestError as e:
-            if attempt < retries - 1:
-                print(f"Retry {attempt + 1}/{retries} for URL: {url}")
-                await asyncio.sleep(1)  # Exponential backoff can be implemented here
+        except requests.RequestException as e:
+            if attempt < retries:
+                wait_time = 2**attempt
+                print(
+                    f"Page {page_number}: Attempt {attempt} failed. Retrying in {wait_time} seconds..."
+                )
+                time.sleep(wait_time)  # Exponential backoff
             else:
-                print(f"Request failed after {retries} attempts: {e}")
-                raise
+                print(
+                    f"Page {page_number}: Failed after {retries} attempts. Error: {e}"
+                )
+                return None
 
 
-async def get_zoho_stock(day=now.day, month=now.month, year=now.year):
+def get_zoho_stock(day=None, month=None, year=None):
     """
-    Fetch stock data from Zoho Inventory in an asynchronous manner with retries and timeout handling.
+    Fetch stock data from Zoho Inventory with retries and timeout handling.
+    Fetches multiple pages concurrently to optimize performance.
     """
-    print(f"Fetching stock for {now.replace(month=month).strftime('%b')}-{year}")
-    to_date = now.replace(month=month, day=day).date()
+    # Set the date
+    if day and month and year:
+        try:
+            now_date = datetime.datetime(year, month, day)
+        except ValueError as e:
+            print(f"Invalid date provided: {e}")
+            return []
+    else:
+        now_date = datetime.datetime.utcnow()
+    to_date = now_date.date()
+    print(f"Fetching stock for {now_date.strftime('%b-%Y')} with date {to_date}")
+
     warehouse_stock = []
     access_token = get_cached_access_token()
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    async with httpx.AsyncClient() as client:
-        # Fetch the total number of pages
-        try:
-            response = await fetch_with_retries(
-                client,
-                url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
-                headers=headers,
-            )
-            total_pages = (
-                int(response.json().get("page_context", {}).get("total_pages", 0)) + 1
-            )
-
-            # Fetch all pages in parallel
-            tasks = [
-                fetch_with_retries(
-                    client,
-                    url=WAREHOUSE_URL.format(page=i, date1=to_date, org_id=org_id),
-                    headers=headers,
-                )
-                for i in range(1, total_pages + 1)
-            ]
-            responses = await asyncio.gather(*tasks)
-
-            for resp in responses:
-                warehouse_stock.extend(resp.json().get("warehouse_stock_info", []))
-
-        except Exception as e:
-            print(f"Failed to fetch stock data: {e}")
+    # Fetch the total number of pages
+    try:
+        response = fetch_with_retries(
+            url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
+            headers=headers,
+            retries=3,
+            timeout=10,
+            page_number="Total Pages",
+        )
+        if response is None:
+            print("Failed to retrieve the total number of pages.")
             return []
+
+        total_pages = int(response.json().get("page_context", {}).get("total_pages", 1))
+        print(f"Total pages to fetch: {total_pages}")
+
+        # Define the maximum number of concurrent threads
+        max_workers = 5  # Adjust based on API rate limits and performance
+        failed_pages = []
+
+        def fetch_page(page_number):
+            page_url = WAREHOUSE_URL.format(
+                page=page_number, date1=to_date, org_id=org_id
+            )
+            response = fetch_with_retries(
+                url=page_url,
+                headers=headers,
+                retries=3,
+                timeout=10,
+                page_number=page_number,
+            )
+            if response is not None:
+                try:
+                    page_data = response.json()
+                    warehouse_stock_info = page_data.get("warehouse_stock_info", [])
+                    return warehouse_stock_info
+                except json.JSONDecodeError as e:
+                    print(f"Page {page_number}: JSON decode error: {e}")
+                    return None
+            else:
+                return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all page fetch tasks
+            future_to_page = {
+                executor.submit(fetch_page, i): i for i in range(1, total_pages + 1)
+            }
+            for future in as_completed(future_to_page):
+                page = future_to_page[future]
+                try:
+                    data = future.result()
+                    if data is not None:
+                        warehouse_stock.extend(data)
+                    else:
+                        failed_pages.append(page)
+                except Exception as exc:
+                    print(f"Page {page} generated an exception: {exc}")
+                    failed_pages.append(page)
+
+        # Retry failed pages
+        if failed_pages:
+            print(f"Retrying failed pages: {failed_pages}")
+            for page in failed_pages:
+                data = fetch_page(page)
+                if data is not None:
+                    warehouse_stock.extend(data)
+                else:
+                    print(f"Page {page}: Failed to fetch on retry.")
+
+    except Exception as e:
+        print(f"Failed to fetch total pages or initial data: {e}")
+        return []
+
+    print(f"Total warehouse stock items fetched: {len(warehouse_stock)}")
 
     # Filter and process warehouse stock data
     arr = []
+    target_warehouse = "pupscribe enterprises private limited".strip().lower()
     for item in warehouse_stock:
-        for w in item["warehouses"]:
-            if (
-                w["warehouse_name"].strip().lower()
-                == "pupscribe enterprises private limited".lower()
-            ):
-                arr.append(
-                    {
-                        "name": item["item_name"].strip().lower(),
-                        "stock": int(w["quantity_available"]),
-                    }
-                )
-    print("Got Stock")
+        item_name = item.get("item_name", "").strip().lower()
+        warehouses = item.get("warehouses", [])
+        for w in warehouses:
+            warehouse_name = w.get("warehouse_name", "").strip().lower()
+            if warehouse_name == target_warehouse:
+                try:
+                    stock_quantity = int(w.get("quantity_available", 0))
+                    arr.append(
+                        {
+                            "name": item_name,
+                            "stock": stock_quantity,
+                        }
+                    )
+                    print(f"Added stock for '{item_name}': {stock_quantity}")
+                except ValueError:
+                    print(
+                        f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available')}"
+                    )
+    print(f"Total stock items after filtering: {len(arr)}")
+    print("Data fetching complete. Proceeding to update the database.")
     return arr
 
 
-async def update_stock():
+def update_stock():
     """
-    Update the stock field in active products based on their name (async).
+    Update the stock field in active products based on their name (synchronous).
     """
     # Fetch active products
-    active_products = list(collection.find({}, {"_id": 1, "name": 1}))
-    stock_data = await get_zoho_stock()
+    try:
+        active_products = list(collection.find({}, {"_id": 1, "name": 1}))
+        print(f"Fetched {len(active_products)} active products from the database.")
+    except Exception as e:
+        print(f"Failed to fetch active products from the database: {e}")
+        return
+
+    # Fetch stock data from Zoho
+    stock_data = get_zoho_stock()
+    if not stock_data:
+        print("No stock data fetched from Zoho.")
+        return
+
     stock_dict = {item["name"]: item["stock"] for item in stock_data}
+    print(f"Stock data contains {len(stock_dict)} items.")
 
     # Prepare bulk updates
     updates = []
@@ -247,10 +335,10 @@ async def update_stock():
         stock = stock_dict.get(product_name)
         if stock is not None:
             updates.append(
-                {
-                    "filter": {"_id": product["_id"]},
-                    "update": {"$set": {"stock": stock}},
-                }
+                UpdateOne(
+                    {"_id": product["_id"]},
+                    {"$set": {"stock": stock}},
+                )
             )
             print(f"Prepared update for '{product_name}' with stock: {stock}")
         else:
@@ -258,20 +346,23 @@ async def update_stock():
 
     # Execute bulk updates
     if updates:
-        from pymongo import UpdateOne
-
-        collection.bulk_write([UpdateOne(u["filter"], u["update"]) for u in updates])
-        print(f"Total products updated with stock: {len(updates)}")
+        try:
+            result = collection.bulk_write(updates)
+            print(f"Total products updated with stock: {result.modified_count}")
+        except Exception as e:
+            print(f"Failed to execute bulk updates: {e}")
     else:
         print("No updates required.")
 
 
 def run_update_stock():
     """
-    Runs the async `update_stock` inside a sync function
-    so it can be scheduled as a background task in FastAPI.
+    Runs the `update_stock` function.
     """
-    asyncio.run(update_stock())
+    try:
+        update_stock()
+    except Exception as e:
+        print(f"Error running update_stock: {e}")
 
 
 @router.post("/update/stock")
