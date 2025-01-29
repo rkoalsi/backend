@@ -378,6 +378,31 @@ def update_stock_webhook(data: dict, background_tasks: BackgroundTasks):
     return {"message": "Stock update has been scheduled in the background."}
 
 
+def handle_invoice(data: dict):
+    invoice = data.get("invoice")
+    invoice_id = invoice.get("invoice_id", "")
+    if invoice_id != "":
+        exists = serialize_mongo_document(
+            db.invoices.find_one({"invoice_id": invoice_id})
+        )
+        if not exists:
+            db.invoices.insert_one(
+                {
+                    **invoice,
+                    "created_at": datetime.datetime.now(),
+                }
+            )
+        else:
+            print("Invoice Exists")
+            db.invoices.update_one(
+                {"invoice_id": invoice_id},
+                {"$set": {**invoice, "updated_at": datetime.datetime.now()}},
+            )
+            print("New Invoice Data Updated")
+    else:
+        print("Invoice Does Not Exist. Webhook Received")
+
+
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
     print("Estimate", json.dumps(estimate, indent=4, default=str))  # <-- default=str
@@ -396,6 +421,10 @@ def handle_estimate(data: dict):
         else:
             print("Estimate Exists", json.dumps(exists, indent=4, default=str))
             print("New Estimate Data", json.dumps(data, indent=4, default=str))
+            db.invoices.update_one(
+                {"estimate_id": estimate_id},
+                {"$set": {**invoice, "updated_at": datetime.datetime.now()}},
+            )
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
@@ -594,6 +623,13 @@ def estimate(data: dict):
     return "Estimate Webhook Received Successfully"
 
 
+@router.post("/invoice")
+def invoice(data: dict):
+    print(json.dumps(data, indent=4))
+    handle_invoice(data)
+    return "Invoice Webhook Received Successfully"
+
+
 @router.post("/customer")
 def customer(data: dict):
     print(json.dumps(data, indent=4))
@@ -602,7 +638,8 @@ def customer(data: dict):
 
 
 @router.post("/item")
-def item(data: dict):
+def item(data: dict, background_tasks: BackgroundTasks):
     print(json.dumps(data, indent=4))
     handle_item(data)
+    background_tasks.add_task(run_update_stock)
     return "Item Webhook Received Successfully"

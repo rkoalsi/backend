@@ -102,28 +102,55 @@ def get_products(
     limit: int = Query(10, ge=1),
     search: Optional[str] = None,
     brand: Optional[str] = None,
-    active_products: Optional[bool] = False,
+    # New query params
+    status: Optional[str] = None,  # e.g. 'active' or 'inactive'
+    stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
+    new_arrivals: Optional[bool] = None,
 ):
     """
-    Retrieve products with optional search and brand filtering.
-    Always applies pagination.
+    Retrieve products with optional search, brand, status, stock, and new_arrivals filtering.
     """
+
     try:
-        # Base query: only products with stock > 0 and not marked as deleted
         query = {}
-        if active_products:
+
+        # 1) Status Filter
+        if status == "active":
             query["status"] = "active"
-        # If there's a search string, match name or cf_sku_code (case-insensitive)
-        if search and search != "":
-            regex = {"$regex": search, "$options": "i"}
+        elif status == "inactive":
+            query["status"] = "inactive"
+
+        # 2) Stock Filter
+        if stock == "zero":
+            # products where stock = 0
+            query["stock"] = 0
+        elif stock == "gt_zero":
+            # products where stock > 0
+            query["stock"] = {"$gt": 0}
+
+        # 3) New Arrivals (depending on how you define "new")
+        if new_arrivals:
+            # If your DB has a boolean field `is_new`
+            # query["is_new"] = True
+
+            # Or if it's based on creation date (last 30 days, etc.)
+            from datetime import datetime, timedelta
+
+            ninty_days_ago = datetime.utcnow() - timedelta(days=90)
+            query["created_at"] = {"$gte": ninty_days_ago}
+
+        # 4) Search Filter
+        if search and search.strip() != "":
+            regex = {"$regex": search.strip(), "$options": "i"}
             query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
 
-        # If brand filter is applied, add it to the query
+        # 5) Brand Filter
         if brand and brand.lower() != "all":
-            query["brand"] = {"$regex": f"^{re.escape(brand)}$", "$options": "i"}
+            query["brand"] = {"$regex": f"^{brand}$", "$options": "i"}
 
-        # Always apply pagination
+        # Pagination
         skip = page * limit
+
         docs_cursor = (
             products_collection.find(query)
             .sort([("status", 1), ("name", 1)])
@@ -131,12 +158,11 @@ def get_products(
             .limit(limit)
         )
 
-        # Count how many total match the query
         total_count = products_collection.count_documents(query)
-
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
 
         return JSONResponse({"products": products, "total_count": total_count})
+
     except Exception as e:
         print(e)
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
