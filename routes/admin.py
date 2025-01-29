@@ -256,6 +256,10 @@ def read_all_orders(
                 "billing_address": 1,
                 "customer_id": 1,
                 "customer_name": 1,
+                "estimate_url": 1,
+                "estimate_created": 1,
+                "estimate_number": 1,
+                "estimate_id": 1,
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
                 "created_at": {
