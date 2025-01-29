@@ -474,6 +474,9 @@ async def finalise(order_dict: dict):
         else:
             discount_value = customer.get("cf_margin", "40%")
 
+        if not discount_value.endswith("%"):
+            discount_value = f"{discount_value}%"
+
         obj = {
             "item_order": idx + 1,
             "item_id": item.get("item_id"),
