@@ -407,7 +407,7 @@ def handle_estimate(data: dict):
     estimate = data.get("estimate")
     print("Estimate", json.dumps(estimate, indent=4, default=str))  # <-- default=str
     estimate_id = estimate.get("estimate_id", "")
-    estimate_status = estimate.get("estimate_status", "")
+    estimate_status = estimate.get("status", "")
     if estimate_id != "":
         exists = serialize_mongo_document(
             db.estimates.find_one({"estimate_id": estimate_id})
