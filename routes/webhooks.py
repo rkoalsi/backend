@@ -407,6 +407,7 @@ def handle_estimate(data: dict):
     estimate = data.get("estimate")
     print("Estimate", json.dumps(estimate, indent=4, default=str))  # <-- default=str
     estimate_id = estimate.get("estimate_id", "")
+    estimate_status = estimate.get("estimate_status", "")
     if estimate_id != "":
         exists = serialize_mongo_document(
             db.estimates.find_one({"estimate_id": estimate_id})
@@ -421,9 +422,12 @@ def handle_estimate(data: dict):
         else:
             print("Estimate Exists", json.dumps(exists, indent=4, default=str))
             print("New Estimate Data", json.dumps(data, indent=4, default=str))
-            db.invoices.update_one(
+            db.estimates.update_one(
                 {"estimate_id": estimate_id},
                 {"$set": {**invoice, "updated_at": datetime.datetime.now()}},
+            )
+            db.orders.update_one(
+                {"estimate_id": estimate_id}, {"$set": {"status": estimate_status}}
             )
     else:
         print("Estimate Does Not Exist. Webhook Received")
