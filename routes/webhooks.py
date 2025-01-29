@@ -424,7 +424,7 @@ def handle_estimate(data: dict):
             print("New Estimate Data", json.dumps(data, indent=4, default=str))
             db.estimates.update_one(
                 {"estimate_id": estimate_id},
-                {"$set": {**invoice, "updated_at": datetime.datetime.now()}},
+                {"$set": {**estimate, "updated_at": datetime.datetime.now()}},
             )
             db.orders.update_one(
                 {"estimate_id": estimate_id}, {"$set": {"status": estimate_status}}
