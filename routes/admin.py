@@ -353,13 +353,7 @@ def read_all_orders(
         {
             "$project": {
                 # Keep the original fields (except created_by_info is now an object)
-                "created_at": {
-                    "$dateToString": {
-                        "date": "$created_at",
-                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
-                        "timezone": "Asia/Kolkata",
-                    }
-                },
+                "created_at": 1,
                 "total": 1,
                 "due_date": 1,
                 "balance": 1,
