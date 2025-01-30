@@ -160,8 +160,19 @@ def get_products(
 
         total_count = products_collection.count_documents(query)
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
-
-        return JSONResponse({"products": products, "total_count": total_count})
+        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+        # Validate page number
+        if page > total_pages and total_pages != 0:
+            raise HTTPException(status_code=400, detail="Page number out of range")
+        return JSONResponse(
+            {
+                "products": products,
+                "total_count": total_count,
+                "page": page,
+                "per_page": limit,
+                "total_pages": total_pages,
+            }
+        )
 
     except Exception as e:
         print(e)
@@ -203,8 +214,18 @@ def get_customers(
         )
 
         customers = [serialize_mongo_document(doc) for doc in cursor]
+        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+        # Validate page number
+        if page > total_pages and total_pages != 0:
+            raise HTTPException(status_code=400, detail="Page number out of range")
 
-        return {"customers": customers, "total_count": total_count}
+        return {
+            "customers": customers,
+            "total_count": total_count,
+            "page": page,
+            "per_page": limit,
+            "total_pages": total_pages,
+        }
     except Exception as e:
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
@@ -292,8 +313,87 @@ def read_all_orders(
 
     # Convert each Mongo document to JSON-serializable Python dict
     orders_with_user_info = [serialize_mongo_document(doc) for doc in orders_cursor]
+    total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+    # Validate page number
+    if page > total_pages and total_pages != 0:
+        raise HTTPException(status_code=400, detail="Page number out of range")
 
-    return {"orders": orders_with_user_info, "total_count": total_count}
+    return {
+        "orders": orders_with_user_info,
+        "total_count": total_count,
+        "page": page,
+        "per_page": limit,
+        "total_pages": total_pages,
+    }
+
+
+@router.get("/payments_due")
+def read_all_orders(
+    page: int = Query(0, ge=0, description="0-based page index"),
+    limit: int = Query(10, ge=1, description="Number of items per page"),
+):
+    """
+    Retrieve all invoices for admin, with pagination, converting created_at to IST in Mongo.
+    page:  0-based page index
+    limit: number of invoices per page
+    """
+    query = {"status": "overdue"}
+    # Basic query to match all invoices
+    match_stage = {"$match": query}
+
+    # Count total invoices (for the frontend) without pagination
+    total_count = db.invoices.count_documents(query)
+
+    # Now build our aggregation pipeline
+    pipeline = [
+        match_stage,
+        {"$skip": page * limit},  # skip
+        {"$limit": limit},  # limit
+        # Convert created_at (UTC) to a string in IST
+        {
+            "$project": {
+                # Keep the original fields (except created_by_info is now an object)
+                "created_at": {
+                    "$dateToString": {
+                        "date": "$created_at",
+                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+                "total": 1,
+                "due_date": 1,
+                "balance": 1,
+                "status": 1,
+                "cf_sales_person": 1,
+                "created_by_name": 1,
+                "salesperson_name": 1,
+                "customer_id": 1,
+                "customer_name": 1,
+                "invoice_url": 1,
+                "invoice_number": 1,
+                "invoice_id": 1,
+            }
+        },
+        {"$sort": {"created_at": -1}},  # sort descending by created_at
+    ]
+
+    # Execute the pipeline
+    invoices_cursor = db.invoices.aggregate(pipeline)
+
+    # Convert each Mongo document to JSON-serializable Python dict
+    inv = [serialize_mongo_document(doc) for doc in invoices_cursor]
+    total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+    # Validate page number
+    if page > total_pages and total_pages != 0:
+        raise HTTPException(status_code=400, detail="Page number out of range")
+
+    return {
+        "invoices": inv,
+        "total_count": total_count,
+        "page": page,
+        "per_page": limit,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/salespeople")

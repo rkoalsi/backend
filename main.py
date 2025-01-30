@@ -1,10 +1,13 @@
+import logging
+
+logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.routing import APIRoute
-from contextlib import asynccontextmanager
 from .routes.api import router
 from .config.root import connect_to_mongo, disconnect_on_exit
+from .config.scheduler import scheduler_startup, scheduler_shutdown
 import uvicorn
 
 origins = [
@@ -33,7 +36,9 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 # Add shutdown handler for MongoDB
+app.add_event_handler("startup", scheduler_startup)
 app.add_event_handler("shutdown", disconnect_on_exit(client))
+app.add_event_handler("shutdown", scheduler_shutdown)
 
 
 @app.get("/")

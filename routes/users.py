@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import HTMLResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document, parse_data  # type: ignore
+from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
@@ -55,7 +55,7 @@ def authenticate_user(email: str, password: str):
     user = db.users.find_one({"email": email, "status": "active"})
     if not user or not verify_password(password, user["password"]):
         return False
-    return parse_data(user)
+    return serialize_mongo_document(user)
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -154,7 +154,8 @@ async def login_user(user: UserLogin):
     access_token = create_access_token(data={"data": user})
     return {
         "message": "Login successful",
-        "user_id": user["_id"]["$oid"],
+        "user_id": user["_id"],
+        "user": user,
         "access_token": access_token,
     }
 

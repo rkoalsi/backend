@@ -1,5 +1,4 @@
-import os, json
-from bson import json_util
+import os
 from bson.objectid import ObjectId
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -35,10 +34,6 @@ def disconnect_on_exit(client):
     """
 
     client.close()
-
-
-def parse_data(data):
-    return json.loads(json_util.dumps(data))
 
 
 def serialize_mongo_document(document):
