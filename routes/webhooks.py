@@ -557,8 +557,6 @@ def handle_estimate(data: dict):
                 }
             )
         else:
-            print("Estimate Exists", json.dumps(exists, indent=4, default=str))
-            print("New Estimate Data", json.dumps(data, indent=4, default=str))
             db.estimates.update_one(
                 {"estimate_id": estimate_id},
                 {"$set": {**estimate, "updated_at": datetime.datetime.now()}},

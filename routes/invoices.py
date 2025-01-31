@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from typing import Optional
 from bson import ObjectId
+import re
 
 router = APIRouter()
 
@@ -37,12 +38,23 @@ def get_invoices(
     forbidden_keywords = (
         "(Company customers|defaulters|Amazon|staff purchase|marketing inv's)"
     )
+    escaped_sales_person = re.escape(code)
     query = {
         "status": "overdue",
         # Must match 'code' in either cf_sales_person or salesperson_name
         "$or": [
-            {"cf_sales_person": {"$regex": code, "$options": "i"}},
-            {"salesperson_name": {"$regex": code, "$options": "i"}},
+            {
+                "cf_sales_person": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
+            {
+                "salesperson_name": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
         ],
         # Exclude if cf_sales_person contains any forbidden keywords
         "cf_sales_person": {

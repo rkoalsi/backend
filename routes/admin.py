@@ -185,6 +185,18 @@ def get_customers(
     page: int = Query(1, ge=1, description="1-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
     sort: Optional[str] = None,
+    status: Optional[str] = Query(
+        None, description="Filter by customer status: active or inactive"
+    ),
+    sales_person: Optional[str] = Query(
+        None, description="Filter by sales person name"
+    ),
+    unassigned: Optional[bool] = Query(
+        None, description="Filter for unassigned customers"
+    ),
+    gst_type: Optional[str] = Query(
+        None, description="Filter by customer type: exclusive or inclusive"
+    ),
 ):
     """
     Returns a paginated list of customers, optionally filtered by name.
@@ -204,15 +216,57 @@ def get_customers(
         if sort and sort.lower() == "desc":
             sort_order = [("status", -1)]
 
-        # Count total matching documents for pagination
-        total_count = customers_collection.count_documents(query)
+        # Filter by status if provided
+        if status:
+            if status.lower() not in ["active", "inactive"]:
+                raise HTTPException(
+                    status_code=400, detail="Invalid status filter value"
+                )
+            query["status"] = status.lower()
 
+        # Filter by sales_person if provided
+        if sales_person:
+            escaped_sales_person = re.escape(sales_person)
+            query["$or"] = [
+                {
+                    "cf_sales_person": {
+                        "$regex": f"^{escaped_sales_person}$",
+                        "$options": "i",
+                    }
+                },
+                {
+                    "salesperson_name": {
+                        "$regex": f"^{escaped_sales_person}$",
+                        "$options": "i",
+                    }
+                },
+            ]
+
+        # Filter for unassigned customers if true
+        if unassigned:
+            query["$or"] = [
+                {"cf_sales_person": {"$exists": False}},
+                {"cf_sales_person": ""},
+                {"cf_sales_person": None},
+            ]
+        if gst_type:
+            if str(gst_type).capitalize() == "Inclusive":
+                query["$and"] = [
+                    {"cf_in_ex": {"$exists": True}},
+                    {"cf_in_ex": "Inclusive"},
+                ]
+            else:
+                query["$or"] = [
+                    {"cf_in_ex": {"$exists": False}},
+                    {"cf_in_ex": "Exclusive"},
+                ]
         # Calculate skip based on 1-based indexing
         skip = (page - 1) * limit
         cursor = (
             customers_collection.find(query).sort(sort_order).skip(skip).limit(limit)
         )
-
+        # Count total matching documents for pagination
+        total_count = customers_collection.count_documents(query)
         customers = [serialize_mongo_document(doc) for doc in cursor]
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
         # Validate page number
@@ -534,13 +588,14 @@ def salesperson(salesperson_id: str):
     sales_person_code = sales_person.get("code")
 
     if sales_person_code:
+        escaped_sales_person = re.escape(sales_person_code)
         # Fetch customers assigned to the salesperson
         customers_cursor = db.customers.find(
             {
                 "$or": [
                     {
                         "cf_sales_person": {
-                            "$regex": f"\\b{sales_person_code}\\b",
+                            "$regex": f"^{escaped_sales_person}$",
                             "$options": "i",
                         }
                     },
