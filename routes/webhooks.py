@@ -384,6 +384,7 @@ FORBIDDEN_KEYWORDS = [
     "Amazon",
     "staff purchase",
     "marketing inv's",
+    "Company clients (all rohit's customers & distributors))",
 ]
 
 
