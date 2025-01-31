@@ -418,7 +418,7 @@ def get_sales_people():
     sales_people_cursor = users_collection.find(
         {"role": "sales_person"}, {"code": 1, "_id": 0}
     )
-    sales_people = [f"{user["code"]}" for user in sales_people_cursor]
+    sales_people = [f"{user['code']}" for user in sales_people_cursor]
     return {"sales_people": sales_people}
 
 
