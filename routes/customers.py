@@ -194,7 +194,6 @@ def get_customers(
     return {"customers": customers}
 
 
-@router.get("/salesperson")
 @router.get("/customers/salesperson")
 def get_customers_for_sales_person(
     code: Optional[str] = None,
