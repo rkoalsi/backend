@@ -234,18 +234,33 @@ def get_customers(
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
+    sales_person: Optional[str] = Query(
+        None, description="Filter by sales person name"
+    ),
+    status: Optional[str] = Query(None, description="Filter by order status"),
+    estimate_created: Optional[bool] = Query(
+        None, description="Filter by whether estimate was created"
+    ),
 ):
     """
-    Retrieve all orders for admin, with pagination, converting created_at to IST in Mongo.
-    page:  0-based page index
-    limit: number of orders per page
+    Retrieve all orders for admin, with pagination and optional filters,
+    converting created_at to IST in MongoDB.
     """
-    # Basic query to match all orders
+    # Build the match stage based on filters
     match_stage = {"$match": {}}
+    second_match_stage = {"$match": {}}
 
-    # Count total orders (for the frontend) without pagination
-    total_count = orders_collection.count_documents({})
+    if status:
+        match_stage["$match"]["status"] = status.lower()
 
+    if estimate_created is not None:
+        match_stage["$match"]["estimate_created"] = estimate_created
+
+    if sales_person:
+        # Assuming 'created_by_info.name' is the field to filter
+        second_match_stage["$match"]["created_by_info.code"] = sales_person
+    # Count total orders (for the frontend) without pagination but with filters
+    total_count = orders_collection.count_documents(match_stage["$match"])
     # Now build our aggregation pipeline
     pipeline = [
         match_stage,
@@ -301,11 +316,13 @@ def read_all_orders(
                 "created_by_info.id": {"$toString": "$created_by_info._id"},
                 "created_by_info.name": "$created_by_info.name",
                 "created_by_info.email": "$created_by_info.email",
+                "created_by_info.code": "$created_by_info.code",
                 # Or keep the entire object if you prefer:
                 # "created_by_info": 1
                 # but then you'd still need to convert _id to string, if you want
             }
         },
+        second_match_stage,
     ]
 
     # Execute the pipeline
@@ -389,6 +406,20 @@ def read_all_orders(
         "per_page": limit,
         "total_pages": total_pages,
     }
+
+
+@router.get("/sales-people")
+def get_sales_people():
+    """
+    Retrieve a list of sales people from the users collection.
+    Assuming users have a role or designation that identifies them as sales people.
+    """
+    # Replace 'sales' with the actual role identifier
+    sales_people_cursor = users_collection.find(
+        {"role": "sales_person"}, {"code": 1, "_id": 0}
+    )
+    sales_people = [f"{user["code"]}" for user in sales_people_cursor]
+    return {"sales_people": sales_people}
 
 
 @router.get("/salespeople")

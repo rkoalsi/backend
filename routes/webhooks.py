@@ -39,7 +39,6 @@ def parse_datetime(value):
 
 def handle_item(data: dict):
     item = data.get("item")
-    print("Item", json.dumps(item, indent=4, default=str))  # <-- default=str
     item_id = item.get("item_id", "")
     if item_id != "":
         exists = serialize_mongo_document(db.products.find_one({"item_id": item_id}))
@@ -488,7 +487,7 @@ def handle_invoice(data: dict):
         for sp in all_salespeople:
             user = db.users.find_one({"code": sp})
             valid_salespeople.append(
-                {"email": "rkoalsi2000@gmail.com", "name": user.get("name")}
+                {"email": user.get("email"), "name": user.get("name")}
             )
 
         # 3) Schedule one job for each valid (unique) salesperson
@@ -538,7 +537,6 @@ def handle_invoice(data: dict):
 
 def handle_estimate(data: dict):
     estimate = data.get("estimate")
-    print("Estimate", json.dumps(estimate, indent=4, default=str))  # <-- default=str
     estimate_id = estimate.get("estimate_id", "")
     estimate_status = estimate.get("status", "")
     if estimate_id != "":
@@ -755,28 +753,24 @@ def handle_customer(data: dict):
 
 @router.post("/estimate")
 def estimate(data: dict):
-    print(json.dumps(data, indent=4))
     handle_estimate(data)
     return "Estimate Webhook Received Successfully"
 
 
 @router.post("/invoice")
 def invoice(data: dict):
-    print(json.dumps(data, indent=4))
     handle_invoice(data)
     return "Invoice Webhook Received Successfully"
 
 
 @router.post("/customer")
 def customer(data: dict):
-    print(json.dumps(data, indent=4))
     handle_customer(data)
     return "Customer Webhook Received Successfully"
 
 
 @router.post("/item")
 def item(data: dict, background_tasks: BackgroundTasks):
-    print(json.dumps(data, indent=4))
     handle_item(data)
     background_tasks.add_task(run_update_stock)
     return "Item Webhook Received Successfully"
