@@ -510,7 +510,9 @@ def handle_invoice(data: dict):
             if one_week_before > datetime.datetime.now():
                 email_params["type"] = "one_week_before"
                 schedule_job(
-                    email_params, run_date=one_week_before, job_suffix="one_week_before"
+                    email_params,
+                    run_date=one_week_before + datetime.timedelta(hours=10),
+                    job_suffix="one_week_before",
                 )
                 print(
                     f"Scheduled one-week-before email for invoice {invoice_number} to {email} at {one_week_before}."
@@ -523,7 +525,11 @@ def handle_invoice(data: dict):
             # Schedule email on due_date
             if due_date > datetime.datetime.now():
                 email_params["type"] = "due_date"
-                schedule_job(email_params, run_date=due_date, job_suffix="due_date")
+                schedule_job(
+                    email_params,
+                    run_date=due_date + datetime.timedelta(hours=10),
+                    job_suffix="due_date",
+                )
                 print(
                     f"Scheduled due-date email for invoice {invoice_number} to {email} at {due_date}."
                 )
