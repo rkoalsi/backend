@@ -8,8 +8,9 @@ from typing import Optional
 import re, requests, os
 from collections import defaultdict
 from dotenv import load_dotenv
-import boto3
+import boto3, datetime
 from botocore.exceptions import BotoCoreError, NoCredentialsError
+from pytz import timezone
 
 load_dotenv()
 router = APIRouter()
@@ -44,36 +45,68 @@ def get_product(product_id: str, collection: Collection):
 @router.get("/stats")
 async def get_stats():
     try:
-
-        active_stock_products = db["products"].count_documents(
-            {
-                "stock": {"$gt": 0},
-            }
-        )
+        # Products Statistics
+        active_stock_products = db["products"].count_documents({"stock": {"$gt": 0}})
         inactive_products = db["products"].count_documents({"status": "inactive"})
         total_products = db["products"].count_documents({})
         active_products = db["products"].count_documents({"status": "active"})
+        out_of_stock_products = db["products"].count_documents({"stock": {"$lte": 0}})
+
+        # Customers Statistics
+        assigned_customers = db["customers"].count_documents(
+            {"cf_sales_person": {"$exists": True, "$ne": "", "$ne": None}}
+        )
+        unassigned_customers = db["customers"].count_documents(
+            {
+                "$or": [
+                    {"cf_sales_person": {"$exists": False}},
+                    {"cf_sales_person": ""},
+                    {"cf_sales_person": None},
+                ]
+            }
+        )
         active_customers = db["customers"].count_documents({"status": "active"})
+        inactive_customers = db["customers"].count_documents({"status": "inactive"})
+
+        # Sales People Statistics
         active_sales_people = db["users"].count_documents(
             {"status": "active", "role": "sales_person"}
         )
+        inactive_sales_people = db["users"].count_documents(
+            {"status": "inactive", "role": "sales_person"}
+        )
+        total_sales_people = active_sales_people + inactive_sales_people
 
+        # Orders Statistics
         orders_draft = db["orders"].count_documents({"status": "draft"})
         orders_accepted = db["orders"].count_documents({"status": "accepted"})
-        orders_sent = db["orders"].count_documents({"status": "sent"})
         orders_declined = db["orders"].count_documents({"status": "declined"})
+        orders_invoiced = db["orders"].count_documents({"status": "invoiced"})
+        ist = timezone("Asia/Kolkata")
+        now_ist = datetime.datetime.now(ist)
+        start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        recent_orders = db["orders"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
 
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
             "inactive_products": inactive_products,
             "total_products": total_products,
+            "out_of_stock_products": out_of_stock_products,
+            "assigned_customers": assigned_customers,
+            "unassigned_customers": unassigned_customers,
             "active_customers": active_customers,
+            "inactive_customers": inactive_customers,
             "active_sales_people": active_sales_people,
+            "inactive_sales_people": inactive_sales_people,
+            "total_sales_people": total_sales_people,
             "orders_draft": orders_draft,
-            "orders_sent": orders_sent,
             "orders_accepted": orders_accepted,
             "orders_declined": orders_declined,
+            "orders_invoiced": orders_invoiced,
+            "recent_orders": recent_orders,
         }
 
     except Exception as e:
@@ -123,7 +156,7 @@ def get_products(
         # 2) Stock Filter
         if stock == "zero":
             # products where stock = 0
-            query["stock"] = 0
+            query["stock"] = {"$lte": 0}
         elif stock == "gt_zero":
             # products where stock > 0
             query["stock"] = {"$gt": 0}
