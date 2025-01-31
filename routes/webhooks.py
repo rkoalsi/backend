@@ -1,6 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
-from backend.config.scheduler import schedule_job  # type: ignore
+from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, time
@@ -405,6 +405,13 @@ def handle_invoice(data: dict):
     invoice_status = invoice.get("status", "")
     invoice_sales_person = invoice.get("cf_sales_person", "")
     salesperson = invoice.get("salesperson_name", "")
+    created_at = invoice.get("date")
+    invoice_due_date_str = invoice.get("due_date")
+    customer_name = invoice.get("customer_name")
+    total = invoice.get("total")
+    balance = invoice.get("balance")
+    invoice_number = invoice.get("invoice_number")
+    due_date = datetime.datetime.strptime(invoice_due_date_str, "%Y-%m-%d")
     if invoice_id != "":
         exists = serialize_mongo_document(
             db.invoices.find_one({"invoice_id": invoice_id})
@@ -423,58 +430,107 @@ def handle_invoice(data: dict):
                 {"$set": {**invoice, "updated_at": datetime.datetime.now()}},
             )
             print("New Invoice Data Updated")
-        if invoice_status == "overdue":
-            # 1) Gather and de-duplicate salespeople from both fields
-            all_salespeople = set()
-            print("Custom Field Invoice Sales Person", invoice_sales_person)
-            print("Invoice Sales Person", salesperson)
-            if invoice_sales_person:
-                for name in invoice_sales_person.split(","):
-                    name = name.strip()
-                    if name:
-                        all_salespeople.add(name)
+        if invoice_status == "paid":
+            print(
+                f"Invoice {invoice_id} is marked as 'paid'. Removing all scheduled jobs."
+            )
+            remove_scheduled_jobs(invoice_id)
+            return
+        # 1) Gather and de-duplicate salespeople from both fields
+        all_salespeople = set()
+        print("Custom Field Invoice Sales Person", invoice_sales_person)
+        print("Invoice Sales Person", salesperson)
+        if invoice_sales_person:
+            for name in invoice_sales_person.split(","):
+                name = name.strip()
+                if name:
+                    all_salespeople.add(name)
 
-            if salesperson:
-                for name in salesperson.split(","):
-                    name = name.strip()
-                    if name:
-                        all_salespeople.add(name)
-            print("All Sales People:", all_salespeople)
-            # 2) Filter out any forbidden names
-            valid_salespeople = []
-            if any(is_forbidden(sp.strip()) for sp in all_salespeople):
-                print(
-                    "At least one salesperson is forbidden. Skip scheduling entirely."
-                )
-                return
-
-            for sp in all_salespeople:
-                user = db.users.find_one({"code": sp})
-                valid_salespeople.append(
-                    {"email": "rkoalsi2000@gmail.com", "name": user.get("name")}
-                )
-
-            # 3) Schedule one job for each valid (unique) salesperson
-            for sp in valid_salespeople:
-                name = sp.get("name")
-                email = sp.get("email")
-                created_at = invoice.get("date")
-                due_date = invoice.get("due_date")
-                customer_name = invoice.get("customer_name")
-                total = invoice.get("total")
-                balance = invoice.get("balance")
-                invoice_number = invoice.get("invoice_number")
+        if salesperson:
+            for name in salesperson.split(","):
+                name = name.strip()
+                if name:
+                    all_salespeople.add(name)
+        print("All Sales People:", all_salespeople)
+        # 2) Filter out any forbidden names
+        valid_salespeople = []
+        if any(is_forbidden(sp.strip()) for sp in all_salespeople):
+            # Check if due_date is today (date only, ignoring time)
+            today = datetime.datetime.utcnow().date()
+            due_date_only = due_date.date()
+            if due_date_only == today and invoice_status == "overdue":
+                email_params = {
+                    "to": "rkoalsi2000@gmail.com",
+                    "invoice_number": invoice.get("invoice_number", ""),
+                    "created_at": invoice.get("date", ""),
+                    "due_date": due_date.strftime("%Y-%m-%d"),
+                    "customer_name": invoice.get("customer_name", ""),
+                    "total": invoice.get("total", ""),
+                    "balance": invoice.get("balance", ""),
+                    "salesperson_name": "Admin",
+                    "invoice_id": invoice_id,
+                }
                 schedule_job(
-                    {
-                        "to": email,
-                        "invoice_number": invoice_number,
-                        "created_at": created_at,
-                        "due_date": due_date,
-                        "customer_name": customer_name,
-                        "total": total,
-                        "balance": balance,
-                        "salesperson_name": name,
-                    }
+                    email_params,
+                    run_date=datetime.datetime.now() + datetime.timedelta(minutes=1),
+                    job_suffix="due_date",
+                )
+                print(
+                    "At least one salesperson is forbidden. Scheduled admin notification email."
+                )
+            else:
+                print(
+                    "At least one salesperson is forbidden. Skipping admin notification email."
+                )
+            # Do not schedule emails for salespeople since at least one is forbidden
+            return
+
+        for sp in all_salespeople:
+            user = db.users.find_one({"code": sp})
+            valid_salespeople.append(
+                {"email": "rkoalsi2000@gmail.com", "name": user.get("name")}
+            )
+
+        # 3) Schedule one job for each valid (unique) salesperson
+        for sp in valid_salespeople:
+            name = sp.get("name")
+            email = sp.get("email")
+
+            email_params = {
+                "to": "rkoalsi2000@gmail.com",
+                "invoice_number": invoice_number,
+                "created_at": created_at,
+                "due_date": due_date,
+                "customer_name": customer_name,
+                "total": total,
+                "balance": balance,
+                "salesperson_name": name,
+                "invoice_id": invoice_id,
+            }
+            one_week_before = due_date - datetime.timedelta(weeks=1)
+            if one_week_before > datetime.datetime.now():
+                email_params["type"] = "one_week_before"
+                schedule_job(
+                    email_params, run_date=one_week_before, job_suffix="one_week_before"
+                )
+                print(
+                    f"Scheduled one-week-before email for invoice {invoice_number} to {email} at {one_week_before}."
+                )
+            else:
+                print(
+                    f"One week before due_date {one_week_before} is in the past. Skipping one-week-before email for invoice {invoice_number} to {email}."
+                )
+
+            # Schedule email on due_date
+            if due_date > datetime.datetime.now():
+                email_params["type"] = "due_date"
+                schedule_job(email_params, run_date=due_date, job_suffix="due_date")
+                print(
+                    f"Scheduled due-date email for invoice {invoice_number} to {email} at {due_date}."
+                )
+            else:
+                print(
+                    f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {email}."
                 )
     else:
         print("Invoice Does Not Exist. Webhook Received")

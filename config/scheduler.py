@@ -1,5 +1,5 @@
 # scheduler.py
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging, os, smtplib
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -8,29 +8,25 @@ from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dotenv import load_dotenv
 from email.mime.text import MIMEText
 
-load_dotenv()  # ensure .env is loaded (if needed for the MONGO_URI)
+load_dotenv()  # ensure .env is loaded
 
 RESET_EMAIL_SENDER = os.getenv("RESET_EMAIL_SENDER")
 SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = os.getenv("SMTP_PORT")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-# ----------------------------------------------------------------------
-# 1) Configure job stores
-# ----------------------------------------------------------------------
-# APScheduler >= 4.0 has built-in MongoDB support using "type": "mongodb".
+
+# Job stores configuration remains the same
 jobstores = {
     "default": {
         "type": "mongodb",
-        # Here, "host" can be a full MongoDB URI (including credentials, if needed).
-        "host": os.getenv("MONGO_URI"),  # e.g. "mongodb://user:pass@mongo:27017"
+        "host": os.getenv("MONGO_URI"),
         "port": 27017,
-        "database": os.getenv("DB_NAME"),  # adjust as needed
-        "collection": "scheduled_jobs",  # adjust as needed
+        "database": os.getenv("DB_NAME"),
+        "collection": "scheduled_jobs",
     }
 }
 
-# Configure the scheduler to store jobs in Mongo and operate in UTC.
 scheduler = AsyncIOScheduler(jobstores=jobstores)
 
 
@@ -53,7 +49,7 @@ def scheduler_shutdown():
     scheduler.shutdown()
 
 
-# Helper function to send reset email
+# Helper function to send overdue email
 def send_overdue_email(obj: dict):
     to = obj.get("to")
     invoice_number = obj.get("invoice_number")
@@ -63,11 +59,12 @@ def send_overdue_email(obj: dict):
     total = obj.get("total")
     balance = obj.get("balance")
     salesperson_name = obj.get("salesperson_name")
+    email_type = obj.get("type")
     subject = f"Payment Collection Reminder - {invoice_number}"
     body = f"""
     Hi {salesperson_name},
 
-    This is a Payment Collection Reminder. The following Invoice is Overdue:
+    This is a Payment Collection Reminder. The following Invoice is {'going to be' if email_type == 'one_week_before' else ''} overdue:
 
     Invoice Number: {invoice_number}
     Invoice Created At: {created_at}
@@ -89,34 +86,54 @@ def send_overdue_email(obj: dict):
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.sendmail(RESET_EMAIL_SENDER, [to], msg.as_string())
     except Exception as e:
-        print(f"Error sending email: {e}")
-        raise Exception("Failed to send reset email")
+        logging.error(f"Error sending email to {to}: {e}")
+        raise Exception("Failed to send overdue email")
 
 
 def email_salesperson(obj: dict):
     send_overdue_email(obj)
 
 
-def schedule_job(param: str, delay_seconds: int = 30) -> str:
+def schedule_job(email_params: dict, run_date: datetime, job_suffix: str) -> str:
     """
-    Schedule a one-time job to run my_task(param) delay_seconds from *local* system time.
-    If your machine is set to IST locally, it uses IST.
-    If your server is UTC, it uses UTC there.
+    Schedule a one-time job to send an email at a specific run_date.
+
+    :param email_params: Dictionary containing email details.
+    :param run_date: The datetime when the job should run.
+    :param job_suffix: Suffix to identify the type of job (e.g., 'one_week_before', 'due_date').
+    :return: The job ID.
     """
-    # 2) Use datetime.now() so it's the local machine time
-    run_time = datetime.now() + timedelta(seconds=delay_seconds)
-    job_id = f"job_{param}_{datetime.now().timestamp()}"
-    # 3) (Optional) Add misfire_grace_time if your system might lag
-    # misfire_grace_time means "still run the job if it started slightly late."
+    invoice_id = email_params.get("invoice_id")
+    job_id = f"job_{invoice_id}_{job_suffix}"
+
+    # Remove existing job with the same ID to prevent duplicates
+    (
+        scheduler.remove_job(job_id, jobstore="default")
+        if scheduler.get_job(job_id)
+        else None
+    )
+
     scheduler.add_job(
         func=email_salesperson,
-        trigger=DateTrigger(run_date=run_time),
-        args=[param],
+        trigger=DateTrigger(run_date=run_date),
+        args=[email_params],
         id=job_id,
         replace_existing=True,
-        misfire_grace_time=60,  # e.g. 1 minute grace
+        misfire_grace_time=60,  # 1 minute grace
     )
     logging.info(
-        f"Scheduled job {job_id} at {run_time} (local system time) with param='{param}'"
+        f"Scheduled job {job_id} at {run_date} (UTC) with params='{email_params}'"
     )
     return job_id
+
+
+def remove_scheduled_jobs(invoice_id: str):
+    """
+    Remove all scheduled jobs related to a specific invoice.
+
+    :param invoice_id: The ID of the invoice.
+    """
+    for job in scheduler.get_jobs(jobstore="default"):
+        if job.id.startswith(f"job_{invoice_id}_"):
+            scheduler.remove_job(job.id, jobstore="default")
+            logging.info(f"Removed scheduled job {job.id}")
