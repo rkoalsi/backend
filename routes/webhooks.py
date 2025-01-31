@@ -460,7 +460,7 @@ def handle_invoice(data: dict):
             due_date_only = due_date.date()
             if due_date_only == today and invoice_status == "overdue":
                 email_params = {
-                    "to": "rkoalsi2000@gmail.com",
+                    "to": "rohit@barkbutler.in",
                     "invoice_number": invoice.get("invoice_number", ""),
                     "created_at": invoice.get("date", ""),
                     "due_date": due_date.strftime("%Y-%m-%d"),
@@ -497,7 +497,7 @@ def handle_invoice(data: dict):
             email = sp.get("email")
 
             email_params = {
-                "to": "rkoalsi2000@gmail.com",
+                "to": email,
                 "invoice_number": invoice_number,
                 "created_at": created_at,
                 "due_date": due_date,

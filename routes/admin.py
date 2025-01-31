@@ -366,6 +366,7 @@ def read_all_orders(
                 "invoice_url": 1,
                 "invoice_number": 1,
                 "invoice_id": 1,
+                "line_items": 1,
             }
         },
         {"$sort": {"created_at": -1}},  # sort descending by created_at
