@@ -113,7 +113,11 @@ def get_order(
 
 
 def get_all_orders(
-    role: str, created_by: str, collection: Collection, users_collection: Collection
+    role: str,
+    created_by: str,
+    status: str,
+    collection: Collection,
+    users_collection: Collection,
 ):
     query = {}
 
@@ -122,9 +126,12 @@ def get_all_orders(
         if not created_by:
             raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
+        query["is_deleted"] = {"$exists": False}
+    if status:
+        query["status"] = status
 
     # Fetch orders
-    orders = collection.find(query)
+    orders = collection.find(query).sort({"created_at": -1})
 
     # For admin, populate created_by_info with user information
     orders_with_user_info = []
@@ -210,11 +217,35 @@ def update_order(
 
 
 # Delete an order
-def delete_order(user_id: str, collection: Collection):
+def delete_order(order_id: str, collection: Collection):
+    order = collection.find_one({"_id": ObjectId(order_id)})
+    if not order.get("estimate_created", False):
+        collection.update_one(
+            {"_id": order.get("_id")},
+            {
+                "$set": {
+                    "status": "deleted",
+                    "is_deleted": True,
+                    "deleted_at": datetime.now(),
+                }
+            },
+        )
+
+
+def clear_empty_orders(user_id: str, collection: Collection):
     orders = collection.find({"created_by": ObjectId(user_id)})
     for order in orders:
         if not order.get("customer_id"):
-            collection.delete_one({"_id": order.get("_id")})
+            collection.delete_one(
+                {"_id": order.get("_id")},
+                {
+                    "$set": {
+                        "status": "deleted",
+                        "is_deleted": True,
+                        "deleted_at": datetime.now(),
+                    }
+                },
+            )
 
 
 async def email_estimate(
@@ -327,13 +358,15 @@ def read_order(order_id: str):
 
 # Get all orders
 @router.get("")
-def read_all_orders(role: str = "salesperson", created_by: str = ""):
+def read_all_orders(role: str = "salesperson", created_by: str = "", status: str = ""):
     """
     Retrieve all orders.
     If role is 'admin', return all orders.
     If role is 'salesperson', return only orders created by the specified user.
     """
-    orders = get_all_orders(role, created_by, orders_collection, users_collection)
+    orders = get_all_orders(
+        role, created_by, status, orders_collection, users_collection
+    )
     return orders
 
 
@@ -353,12 +386,21 @@ def update_existing_order(order_id: str, order_update: dict):
 
 
 # Delete an order
-@router.delete("/{user_id}")
-def delete_existing_order(user_id: str):
+@router.delete("/clear/{user_id}")
+def clear_existing_order(user_id: str):
     """
     Deletes all orders by a given user who has created it if there is no customer information
     """
-    delete_order(user_id, orders_collection)
+    clear_empty_orders(user_id, orders_collection)
+    return {"detail": "Orders deleted successfully"}
+
+
+@router.delete("/{order_id}")
+def delete_existing_order(order_id: str):
+    """
+    Deletes all orders by a given user who has created it if there is no customer information
+    """
+    delete_order(order_id, orders_collection)
     return {"detail": "Orders deleted successfully"}
 
 
