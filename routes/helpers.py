@@ -9,11 +9,6 @@ from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SENDER_EMAIL = "useremailaddy78@gmail.com"  # Use your email
-SENDER_PASSWORD = "nuymwywuhecelhho"  # Use your email app password
-
 
 load_dotenv()
 org_id = os.getenv("ORG_ID")
@@ -27,6 +22,10 @@ clientSecret = os.getenv("CLIENT_SECRET")
 grantType = os.getenv("GRANT_TYPE")
 inventory_refresh_token = os.getenv("INVENTORY_REFRESH_TOKEN")
 books_refresh_token = os.getenv("BOOKS_REFRESH_TOKEN")
+SMTP_SERVER = os.getenv("SMTP_SERVER")
+SMTP_PORT = os.getenv("SMTP_PORT")
+SENDER_EMAIL = os.getenv("SMTP_USERNAME")  # Use your email
+SENDER_PASSWORD = os.getenv("SMTP_PASSWORD")  # Use your email app password
 
 
 def validate_file(file) -> dict:
@@ -76,7 +75,6 @@ def send_email(subject, body, email, cc):
     msg["Subject"] = subject
     if cc:
         msg["Cc"] = cc  # Add CC header to the email
-
     msg.attach(MIMEText(body, "plain"))
 
     # Combine primary recipient and CC recipients for sending
