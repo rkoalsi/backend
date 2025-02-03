@@ -2,17 +2,19 @@ from types import NoneType
 from pymongo.collection import Collection
 from datetime import datetime
 from typing import List
-from .helpers import get_access_token
+from .helpers import get_access_token, send_email
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-import re, os, json, httpx
+import re, os, json, httpx, requests
 from dotenv import load_dotenv
+from fastapi.responses import Response
 
 load_dotenv()
 
 org_id = os.getenv("ORG_ID")
 ESTIMATE_URL = os.getenv("ESTIMATE_URL")
+PDF_URL = os.getenv("PDF_URL")
 
 
 # Connect to MongoDB
@@ -230,6 +232,11 @@ def delete_order(order_id: str, collection: Collection):
                 }
             },
         )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Order With Estimate Created Cannot Be Marked As Deleted",
+        )
 
 
 def clear_empty_orders(user_id: str, collection: Collection):
@@ -400,8 +407,11 @@ def delete_existing_order(order_id: str):
     """
     Deletes all orders by a given user who has created it if there is no customer information
     """
-    delete_order(order_id, orders_collection)
-    return {"detail": "Orders deleted successfully"}
+    try:
+        delete_order(order_id, orders_collection)
+        return {"detail": "Orders deleted successfully"}
+    except Exception as e:
+        raise e
 
 
 # Update an order
@@ -414,7 +424,7 @@ def clear_order_cart(order_id: str):
     return updated_order
 
 
-def validate_order(order_id: str, status: str):
+def validate_order(order_id: str):
     order = db.orders.find_one({"_id": ObjectId(order_id)})
 
     if not order:
@@ -471,7 +481,7 @@ async def finalise(order_dict: dict):
     status = str(order_dict.get("status")).lower()
     try:
         # Perform order validation
-        validate_order(order_id, status)
+        validate_order(order_id)
     except HTTPException as e:
         # Return validation error message if validation fails
         return {"status": "error", "message": e.detail}
@@ -549,6 +559,7 @@ async def finalise(order_dict: dict):
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
     estimate_data = {}
+
     if not estimate_created:
         async with httpx.AsyncClient() as client:
             y = await client.get(
@@ -621,7 +632,7 @@ async def finalise(order_dict: dict):
                 {"_id": ObjectId(order_id)},
                 {
                     "$set": {
-                        "status": "draft",
+                        "status": status,
                         "estimate_created": True,
                         "estimate_id": estimate_id,
                         "estimate_number": estimate_number,
@@ -678,17 +689,17 @@ async def finalise(order_dict: dict):
             estimate_number = estimate_data.get("estimate_number")
             estimate_url = estimate_data.get("estimate_url")
             message = f"Estimate has been updated - {estimate_number} with Status : {str(status).capitalize()}\n"
+            update_fields = {
+                "status": f"{str(status).capitalize()}",
+                "estimate_created": True,
+                "estimate_id": estimate_id,
+                "estimate_number": estimate_number,
+                "estimate_url": estimate_url,
+            }
+
             db.orders.update_one(
                 {"_id": ObjectId(order_id)},
-                {
-                    "$set": {
-                        "status": f"{str(status).capitalize()}",
-                        "estimate_created": True,
-                        "estimate_id": estimate_id,
-                        "estimate_number": estimate_number,
-                        "estimate_url": estimate_url,
-                    }
-                },
+                {"$set": update_fields},
             )
     await email_estimate(
         status,
@@ -700,3 +711,94 @@ async def finalise(order_dict: dict):
         headers,
     )
     return {"status": "success", "message": message}
+
+
+@router.get("/download_pdf/{order_id}")
+async def download_pdf(order_id: str = ""):
+    print(order_id)
+    try:
+        # Check if the order exists in the database
+        order = db.orders.find_one(
+            {"_id": ObjectId(order_id), "estimate_created": True}
+        )
+        if order is None:
+            raise HTTPException(status_code=404, detail="Draft Estimate Not Created")
+
+        # Get the estimate_id and make the request to Zoho
+        estimate_id = order.get("estimate_id", "")
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        response = requests.get(
+            url=PDF_URL.format(org_id=org_id, estimate_id=estimate_id),
+            headers=headers,
+            allow_redirects=False,  # Prevent automatic redirects
+        )
+
+        # Check if the response from Zoho is successful (200)
+        if response.status_code == 200:
+            # Return the PDF content
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=order_{order_id}.pdf"
+                },
+            )
+        elif response.status_code == 307:
+            raise HTTPException(
+                status_code=307,
+                detail="Redirect encountered. Check Zoho endpoint or token.",
+            )
+        else:
+            # Raise an exception if Zoho's API returns an error
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch PDF: {response.text}",
+            )
+
+    except HTTPException as e:
+        print(f"HTTP Exception: {e.detail}")
+        raise e
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/notify")
+async def notify(order_dict: dict):
+    try:
+        order_id = order_dict.get("order_id", "")
+        if not order_id:
+            raise HTTPException(status_code=404, detail="Order Id is neccesary")
+        order = db.orders.find_one({"_id": ObjectId(order_id)})
+        customer_name = order.get("customer_name")
+        estimate_created = order.get("estimate_created", False)
+        estimate_number = order.get("estimate_number", False)
+        created_by = order.get("created_by", "")
+        sales_person = db.users.find_one({"_id": ObjectId(created_by)})
+        sales_person_email = sales_person.get("email")
+        salesperson_name = sales_person.get("name")
+        subject = f"{customer_name} updated order {estimate_number if estimate_created else order_id[-6:]}"
+        body = f"""
+            Hi {salesperson_name},
+
+            This is a notification email that Customer : {customer_name} has edited the order {estimate_number if estimate_created else order_id[-6:] }. 
+
+            Please find the details given in the link below
+
+            https://orderform.pupscribe.in/orders/new/{order_id}
+
+            Thanks,
+            Pupscribe Team
+            """
+        email = f"rkoalsi2000@gmail.com"
+        # cc = "pupscribeinvoicee@gmail.com,events@barkbutler.in"
+        cc = "rkoalsi2175@gmail.com,rohankalsi.dev@gmail.com"
+        print(
+            json.dumps(
+                {"subject": subject, "body": body, "email": email, "cc": cc}, indent=4
+            )
+        )
+        send_email(subject=subject, body=body, email=email, cc=cc)
+        return
+    except Exception as e:
+        raise e

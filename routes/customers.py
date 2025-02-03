@@ -194,7 +194,7 @@ def get_customers(
     return {"customers": customers}
 
 
-@router.get("/customers/salesperson")
+@router.get("/salesperson")
 def get_customers_for_sales_person(
     code: Optional[str] = None,
     page: int = Query(1, ge=1),

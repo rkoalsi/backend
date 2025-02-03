@@ -7,6 +7,7 @@ import datetime, json, os, requests, time
 from dateutil.parser import parse
 from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from .helpers import send_email
 
 load_dotenv()
 
@@ -75,6 +76,27 @@ def handle_item(data: dict):
                     "created_at": parse_datetime(item.get("created_time")),
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
+            )
+            body = f"""
+            Hi Admin,
+
+            This is a notification reminder that a new product has been added to the order form. 
+            
+            The following product information has been added and marked as inactive :
+
+            Product Name: {item_name}
+            Brand: {brand_name}
+
+            Please fill in the required details before making it active (image, series, sub-category and category)
+
+            Thanks,
+            Pupscribe Team
+            """
+            send_email(
+                subject=f"New Item Addded",
+                body=body,
+                email="rushil@barkbutler.in",
+                cc="rkoalsi2000@gmail.com",
             )
         else:
             print("Item Exists")
@@ -538,6 +560,7 @@ def handle_invoice(data: dict):
                 print(
                     f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {email}."
                 )
+
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
@@ -763,8 +786,9 @@ def estimate(data: dict):
 
 
 @router.post("/invoice")
-def invoice(data: dict):
+def invoice(data: dict, background_tasks: BackgroundTasks):
     handle_invoice(data)
+    background_tasks.add_task(run_update_stock)
     return "Invoice Webhook Received Successfully"
 
 

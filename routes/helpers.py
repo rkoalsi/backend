@@ -68,6 +68,32 @@ def validate_file(file) -> dict:
         return {"status": "error", "message": f"An error occurred: {str(e)}"}
 
 
+def send_email(subject, body, email, cc):
+    """Send email with multiple in-memory attachments and CC."""
+    msg = MIMEMultipart()
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = email
+    msg["Subject"] = subject
+    if cc:
+        msg["Cc"] = cc  # Add CC header to the email
+
+    msg.attach(MIMEText(body, "plain"))
+
+    # Combine primary recipient and CC recipients for sending
+    recipient_list = [email] + [cc_email.strip() for cc_email in cc.split(",")]
+
+    # Send the email
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()  # Encrypt connection
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, recipient_list, msg.as_string())
+        server.quit()
+        print(f"Email sent to {email} with CC: {cc}")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+
 def send_email_with_attachments_in_memory(workbook, subject, body, filename, email):
     """Send email with multiple in-memory attachments."""
     msg = MIMEMultipart()
