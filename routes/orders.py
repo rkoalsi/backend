@@ -790,9 +790,8 @@ async def notify(order_dict: dict):
             Thanks,
             Pupscribe Team
             """
-        email = f"rkoalsi2000@gmail.com"
-        # cc = "pupscribeinvoicee@gmail.com,events@barkbutler.in"
-        cc = "rkoalsi2175@gmail.com,rohankalsi.dev@gmail.com"
+        email = f"{sales_person_email}"
+        cc = "pupscribeinvoicee@gmail.com,events@barkbutler.in"
         print(
             json.dumps(
                 {"subject": subject, "body": body, "email": email, "cc": cc}, indent=4
