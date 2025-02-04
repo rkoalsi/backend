@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from .users import router as users
 from .customers import router as customers
 from .products import router as products
@@ -8,6 +8,7 @@ from .util import router as util
 from .admin import router as admin
 from .invoices import router as invoices
 from .webhooks import router as webhooks
+from backend.config.auth import JWTBearer  # type: ignore
 
 router = APIRouter()
 
@@ -16,7 +17,9 @@ router.include_router(customers, prefix="/customers", tags=["Customer"])
 router.include_router(products, prefix="/products", tags=["Product"])
 router.include_router(zoho, prefix="/zoho", tags=["Zoho"])
 router.include_router(orders, prefix="/orders", tags=["Orders"])
-router.include_router(admin, prefix="/admin", tags=["Admin"])
+router.include_router(
+    admin, prefix="/admin", tags=["Admin"], dependencies=[Depends(JWTBearer())]
+)
 router.include_router(util, prefix="/util", tags=["Util"])
 router.include_router(invoices, prefix="/invoices", tags=["Invoice"])
 router.include_router(webhooks, prefix="/zoho/webhooks", tags=["Zoho"])

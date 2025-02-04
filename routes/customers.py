@@ -453,3 +453,16 @@ async def update_customer(customer_id: str, product: dict):
         raise HTTPException(status_code=404, detail="Customer not found")
 
     return {"message": "Customer updated"}
+
+
+@router.get("/special_margins/{customer_id}")
+def get_customer_special_margins(customer_id: str):
+    """
+    Retrieve all special margin products for the given customer.
+    """
+    special_margins = [
+        serialize_mongo_document(doc)
+        for doc in db.special_margins.find({"customer_id": ObjectId(customer_id)})
+    ]
+    # Convert ObjectIds to strings for JSON serializability
+    return {"products": special_margins}
