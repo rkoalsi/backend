@@ -95,8 +95,8 @@ def handle_item(data: dict):
             send_email(
                 subject=f"New Item Addded",
                 body=body,
-                email="rushil@barkbutler.in",
-                cc="rkoalsi2000@gmail.com",
+                email=os.getenv("ITEM_EMAIL_TO"),
+                cc=os.getenv("ITEM_EMAIL_CC"),
             )
         else:
             print("Item Exists")
@@ -482,7 +482,7 @@ def handle_invoice(data: dict):
             due_date_only = due_date.date()
             if due_date_only == today and invoice_status == "overdue":
                 email_params = {
-                    "to": "rohit@barkbutler.in",
+                    "to": os.getenv("OVERDUE_EMAIL_TO"),
                     "invoice_number": invoice.get("invoice_number", ""),
                     "created_at": invoice.get("date", ""),
                     "due_date": due_date.strftime("%Y-%m-%d"),

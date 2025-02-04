@@ -9,6 +9,7 @@ from bson.objectid import ObjectId
 import re, os, json, httpx, requests
 from dotenv import load_dotenv
 from fastapi.responses import Response
+from backend.config.constants import terms, STATE_CODES  # type: ignore
 
 load_dotenv()
 
@@ -24,45 +25,6 @@ customers_collection = db["customers"]
 users_collection = db["users"]
 
 router = APIRouter()
-
-STATE_CODES = {
-    "Andhra Pradesh": "AP",
-    "Arunachal Pradesh": "AR",
-    "Assam": "AS",
-    "Bihar": "BR",
-    "Chhattisgarh": "CG",
-    "Goa": "GA",
-    "Gujarat": "GJ",
-    "Haryana": "HR",
-    "Himachal Pradesh": "HP",
-    "Jharkhand": "JH",
-    "Karnataka": "KA",
-    "Kerala": "KL",
-    "Madhya Pradesh": "MP",
-    "Maharashtra": "MH",
-    "Manipur": "MN",
-    "Meghalaya": "ML",
-    "Mizoram": "MZ",
-    "Nagaland": "NL",
-    "Odisha": "OD",
-    "Punjab": "PB",
-    "Rajasthan": "RJ",
-    "Sikkim": "SK",
-    "Tamil Nadu": "TN",
-    "Telangana": "TG",
-    "Tripura": "TR",
-    "Uttar Pradesh": "UP",
-    "Uttarakhand": "UK",
-    "West Bengal": "WB",
-    "Andaman and Nicobar Islands": "AN",
-    "Chandigarh": "CH",
-    "Dadra and Nagar Haveli and Daman and Diu": "DD",
-    "Delhi": "DL",
-    "Jammu and Kashmir": "JK",
-    "Ladakh": "LA",
-    "Lakshadweep": "LD",
-    "Puducherry": "PY",
-}
 
 
 # Create a new order
@@ -103,8 +65,6 @@ def check_if_order_exists(
 def get_order(
     order_id: str,
     orders_collection: Collection,
-    customers_collection: Collection,
-    products_collection: Collection,
 ):
     result = orders_collection.find_one({"_id": ObjectId(order_id)})
     if result:
@@ -288,21 +248,6 @@ async def email_estimate(
                     }
                 },
             )
-        # if status == "accepted":
-        #     body = {
-        #         "send_from_org_email_id": True,
-        #         "to_mail_ids": ["rkoalsi2000@gmail.com"],
-        #         "cc_mail_ids": ["rushil@barkbutler.in", "rohit@barkbutler.in"],
-        #         "subject": f"Estimate {estimate_number} Accepted",
-        #         "body": f"Dear Customer,\n\nThe estimate {estimate_number} has been accepted.\n\nRegards,\nPupscribe Enterprises Pvt Ltd",
-        #     }
-        #     resp = await client.post(
-        #         url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/email?organization_id={org_id}",
-        #         headers=headers,
-        #         json=body,
-        #     )
-        #     resp.raise_for_status()
-        #     print(resp.json())
 
 
 def clear_cart(order_id: str, orders_collection: Collection):
@@ -310,118 +255,6 @@ def clear_cart(order_id: str, orders_collection: Collection):
         {"_id": ObjectId(order_id)}, {"$set": {"products": []}}
     )
     return order.did_upsert
-
-
-# API Endpoints
-
-
-# Create a new order
-@router.post("/")
-def create_new_order(order: dict):
-    """
-    Create a new order with raw dictionary data.
-    """
-    try:
-        order_id = create_order(order, orders_collection)
-        order["_id"] = order_id  # Add the generated ID back to the response
-        return serialize_mongo_document(order)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.post("/check")
-def check_order_status(order: dict):
-    """
-    Create a new order with raw dictionary data.
-    """
-    try:
-        created_by = order.get("created_by", "")
-        if not created_by:
-            raise HTTPException(status_code=400, detail="created_by is required")
-        order = check_if_order_exists(created_by, orders_collection)
-        if order:
-            return {
-                **serialize_mongo_document(order),
-                "message": "Existing Draft Order Found",
-                "can_create": False,
-            }
-        else:
-            return {"message": "Existing Draft Order Not Found", "can_create": True}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# Get an order by ID
-@router.get("/{order_id}")
-def read_order(order_id: str):
-    """
-    Retrieve an order by its ID.
-    """
-    order = get_order(order_id, orders_collection, db["customers"], db["products"])
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return order
-
-
-# Get all orders
-@router.get("")
-def read_all_orders(role: str = "salesperson", created_by: str = "", status: str = ""):
-    """
-    Retrieve all orders.
-    If role is 'admin', return all orders.
-    If role is 'salesperson', return only orders created by the specified user.
-    """
-    orders = get_all_orders(
-        role, created_by, status, orders_collection, users_collection
-    )
-    return orders
-
-
-# Update an order
-@router.put("/{order_id}")
-def update_existing_order(order_id: str, order_update: dict):
-    """
-    Update an existing order with raw dictionary data.
-    """
-    update_order(order_id, order_update, orders_collection, customers_collection)
-    updated_order = get_order(
-        order_id, orders_collection, db["customers"], db["products"]
-    )
-    if not updated_order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return updated_order
-
-
-# Delete an order
-@router.delete("/clear/{user_id}")
-def clear_existing_order(user_id: str):
-    """
-    Deletes all orders by a given user who has created it if there is no customer information
-    """
-    clear_empty_orders(user_id, orders_collection)
-    return {"detail": "Orders deleted successfully"}
-
-
-@router.delete("/{order_id}")
-def delete_existing_order(order_id: str):
-    """
-    Deletes all orders by a given user who has created it if there is no customer information
-    """
-    try:
-        delete_order(order_id, orders_collection)
-        return {"detail": "Orders deleted successfully"}
-    except Exception as e:
-        raise e
-
-
-# Update an order
-@router.put("/clear/{order_id}")
-def clear_order_cart(order_id: str):
-    """
-    Update an existing order with raw dictionary data.
-    """
-    updated_order = clear_cart(order_id, orders_collection)
-    return updated_order
 
 
 def validate_order(order_id: str):
@@ -469,6 +302,116 @@ def validate_order(order_id: str):
         raise HTTPException(status_code=400, detail="Total amount is missing")
 
     return True
+
+
+# API Endpoints
+
+
+# Create a new order
+@router.post("/")
+def create_new_order(order: dict):
+    """
+    Create a new order with raw dictionary data.
+    """
+    try:
+        order_id = create_order(order, orders_collection)
+        order["_id"] = order_id  # Add the generated ID back to the response
+        return serialize_mongo_document(order)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/check")
+def check_order_status(order: dict):
+    """
+    Create a new order with raw dictionary data.
+    """
+    try:
+        created_by = order.get("created_by", "")
+        if not created_by:
+            raise HTTPException(status_code=400, detail="created_by is required")
+        order = check_if_order_exists(created_by, orders_collection)
+        if order:
+            return {
+                **serialize_mongo_document(order),
+                "message": "Existing Draft Order Found",
+                "can_create": False,
+            }
+        else:
+            return {"message": "Existing Draft Order Not Found", "can_create": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# Get an order by ID
+@router.get("/{order_id}")
+def read_order(order_id: str):
+    """
+    Retrieve an order by its ID.
+    """
+    order = get_order(order_id, orders_collection)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return order
+
+
+# Get all orders
+@router.get("")
+def read_all_orders(role: str = "salesperson", created_by: str = "", status: str = ""):
+    """
+    Retrieve all orders.
+    If role is 'admin', return all orders.
+    If role is 'salesperson', return only orders created by the specified user.
+    """
+    orders = get_all_orders(
+        role, created_by, status, orders_collection, users_collection
+    )
+    return orders
+
+
+# Update an order
+@router.put("/{order_id}")
+def update_existing_order(order_id: str, order_update: dict):
+    """
+    Update an existing order with raw dictionary data.
+    """
+    update_order(order_id, order_update, orders_collection, customers_collection)
+    updated_order = get_order(order_id, orders_collection)
+    if not updated_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return updated_order
+
+
+# Delete an order
+@router.delete("/clear/{user_id}")
+def clear_existing_order(user_id: str):
+    """
+    Deletes all orders by a given user who has created it if there is no customer information
+    """
+    clear_empty_orders(user_id, orders_collection)
+    return {"detail": "Orders deleted successfully"}
+
+
+@router.delete("/{order_id}")
+def delete_existing_order(order_id: str):
+    """
+    Deletes all orders by a given user who has created it if there is no customer information
+    """
+    try:
+        delete_order(order_id, orders_collection)
+        return {"detail": "Orders deleted successfully"}
+    except Exception as e:
+        raise e
+
+
+# Update an order
+@router.put("/clear/{order_id}")
+def clear_order_cart(order_id: str):
+    """
+    Update an existing order with raw dictionary data.
+    """
+    updated_order = clear_cart(order_id, orders_collection)
+    return updated_order
 
 
 # Finalise an order (Create Estimate)
@@ -555,7 +498,7 @@ async def finalise(order_dict: dict):
         }
         line_items.append(obj)
     print(line_items)
-    terms = """1. All disputes are subject to jurisdiction in Mumbai only. \n2. Payment terms: \n2.a. First 5 orders will be upfront payment.\n2.b. As business and regular orders come through option of 2-4 week Cheque / post-dated cheque (PDC) will be offered.\n2.c. For payments made via NEFT, IMPS, RTGS or cheque's directly deposited, Kindly send us the receipt on our WhatsApp no.+91 9930623544 / +91 9372236448 or info@barkbutler.in.\n2d. Incase of cheque bounce or payment default we will be allowed to take any goods available in your premises to cover our invoice amount, damages, interest rate on defaulted payments (mentioned below), lawyer fees (if involved) and expenses for transportation of goods from your premises to ours. If you, your team members or staff behave rudelyf we will involve the police if required. \n3. Customer will be informed before the PDC is deposited.\n4. On delivery of goods our courier partner will take the authority person's signature on the courier bill. This implies that the goods have been received and accepted by you and the Invoice sent in your package or via whatsapp is now your liability. We wont take a signed copy of the invoice as there will further charges and delay to send it back to us. \n5. Bills not cleared by the due date will attract 24% interest p.a.\n6. Our responsibility shall cease after the goods are handed over to the carrier.\n7. Returns & Replacements \n7.a. On receipt of the order, you have 5 days to lodge any complaint regarding missing/damaged items. 6.b. In case the retailer's customer receives a damaged product the item will be replaced.\n7.c In case the retailer’s customer damages/destroys the products within 3 days, the item will be replaced. Kindly note, returns are only applicable if the right-sized product (as mentioned on the packaging) is sold to the right sized dog. \n8. Items not sold within 8-12 weeks shall be sold via a discount scheme or replaced with better-suited items for that particular retail store.\n9. Logistics charges can be applicable for goods sold and returned.  \n10. A non-negotiable penalty of ₹1000 will be levied for dishonoured cheque"""
+
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
     estimate_data = {}
@@ -715,7 +658,6 @@ async def finalise(order_dict: dict):
 
 @router.get("/download_pdf/{order_id}")
 async def download_pdf(order_id: str = ""):
-    print(order_id)
     try:
         # Check if the order exists in the database
         order = db.orders.find_one(
@@ -791,7 +733,7 @@ async def notify(order_dict: dict):
             Pupscribe Team
             """
         email = f"{sales_person_email}"
-        cc = "pupscribeinvoicee@gmail.com,events@barkbutler.in"
+        cc = os.getenv("NOTIFY_EMAIL_CC")
         print(
             json.dumps(
                 {"subject": subject, "body": body, "email": email, "cc": cc}, indent=4

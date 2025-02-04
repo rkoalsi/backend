@@ -1,6 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import JSONResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from backend.config.constants import GST_STATE_CODES, STATE_CODES  # type: ignore
 import re, requests, os, json, time
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
@@ -24,85 +25,6 @@ S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 S3_REGION = os.getenv("S3_REGION")
 # Dictionary to map GST state codes to state names
-GST_STATE_CODES = {
-    "01": "JK",
-    "02": "HP",
-    "03": "PB",
-    "04": "CH",
-    "05": "UT",
-    "06": "HR",
-    "07": "DL",
-    "08": "RJ",
-    "09": "UP",
-    "10": "BR",
-    "11": "SK",
-    "12": "AR",
-    "13": "NL",
-    "14": "MN",
-    "15": "MZ",
-    "16": "TR",
-    "17": "ML",
-    "18": "AS",
-    "19": "WB",
-    "20": "JH",
-    "21": "OR",
-    "22": "CT",
-    "23": "MP",
-    "24": "GJ",
-    "25": "DD",
-    "26": "DN",
-    "27": "MH",
-    "28": "AP",
-    "29": "KA",
-    "30": "GA",
-    "31": "LD",
-    "32": "KL",
-    "33": "TN",
-    "34": "PY",
-    "35": "AN",
-    "36": "TG",
-    "37": "AP",
-    "38": "LD",
-}
-
-STATE_CODES = {
-    "Andhra Pradesh": "AP",
-    "Arunachal Pradesh": "AR",
-    "Assam": "AS",
-    "Bihar": "BR",
-    "Chhattisgarh": "CG",
-    "Goa": "GA",
-    "Gujarat": "GJ",
-    "Haryana": "HR",
-    "Himachal Pradesh": "HP",
-    "Jharkhand": "JH",
-    "Karnataka": "KA",
-    "Kerala": "KL",
-    "Madhya Pradesh": "MP",
-    "Maharashtra": "MH",
-    "Manipur": "MN",
-    "Meghalaya": "ML",
-    "Mizoram": "MZ",
-    "Nagaland": "NL",
-    "Odisha": "OD",
-    "Punjab": "PB",
-    "Rajasthan": "RJ",
-    "Sikkim": "SK",
-    "Tamil Nadu": "TN",
-    "Telangana": "TG",
-    "Tripura": "TR",
-    "Uttar Pradesh": "UP",
-    "Uttarakhand": "UK",
-    "West Bengal": "WB",
-    "Andaman and Nicobar Islands": "AN",
-    "Chandigarh": "CH",
-    "Dadra and Nagar Haveli and Daman and Diu": "DD",
-    "Delhi": "DL",
-    "Jammu and Kashmir": "JK",
-    "Ladakh": "LA",
-    "Lakshadweep": "LD",
-    "Puducherry": "PY",
-}
 
 
 def validate_gst_number(gst_number: str):
@@ -359,94 +281,6 @@ async def signature_upload(
         raise HTTPException(
             status_code=500, detail=f"An error occurred: {error_message}"
         )
-
-
-# payload = {
-#     "contact_name": "Mr. Rohan Kalsi",
-#     "company_name": "",
-#     "contact_type": "customer",
-#     "currency_id": "3220178000000000099",
-#     "payment_terms": 0,
-#     "payment_terms_label": "Due On Receipt",
-#     "payment_terms_id": "",
-#     "credit_limit": 0,
-#     "billing_address": {
-#         "attention": "Home",
-#         "address": "Imperial Heights, Goregaon West",
-#         "country": "India",
-#         "street2": "",
-#         "city": "Mumbai",
-#         "state": "Maharashtra",
-#         "zip": "400104",
-#         "phone": "8104298709",
-#     },
-#     "shipping_address": {
-#         "attention": "Home",
-#         "address": "Imperial Heights, Goregaon West",
-#         "country": "India",
-#         "street2": "",
-#         "city": "Mumbai",
-#         "state": "Maharashtra",
-#         "zip": "400104",
-#         "phone": "8104298709",
-#     },
-#     "contact_persons": [
-#         {
-#             "first_name": "Rohan",
-#             "last_name": "Kalsi",
-#             "mobile": "08104298709",
-#             "phone": "08104298709",
-#             "email": "rkoalsi2000@gmail.com",
-#             "salutation": "Mr.",
-#             "is_primary_contact": True,
-#         }
-#     ],
-#     "default_templates": {},
-#     "custom_fields": [
-#         {"customfield_id": "3220178000000075176", "value": "2025-01-15"},
-#         {"customfield_id": "3220178000000075170", "value": "rkoalsi2000@gmail.com"},
-#         {"customfield_id": "3220178000000075172", "value": "8104298709"},
-#         {"customfield_id": "3220178000000075174", "value": "55"},
-#         {"customfield_id": "3220178000000075188", "value": ""},
-#         {"customfield_id": "3220178000000075208", "value": "Retail"},
-#         {"customfield_id": "3220178000194368001", "value": "1"},
-#         {"customfield_id": "3220178000152684465", "value": ""},
-#         {"customfield_id": "3220178000171113003", "value": "no"},
-#         {"customfield_id": "3220178000196241001", "value": ["Pupscribe"]},
-#         {"customfield_id": "3220178000000075214", "value": "NET 30"},
-#         {"customfield_id": "3220178000000075212", "value": ["Inclusive"]},
-#         {
-#             "customfield_id": "3220178000221198007",
-#             "value": ["Company customers", "SP2"],
-#         },
-#         {"customfield_id": "3220178000241613643", "value": "No"},
-#     ],
-#     "is_taxable": True,
-#     "language_code": "en",
-#     "tags": [
-#         {"tag_id": "3220178000000000337", "tag_option_id": ""},
-#         {"tag_id": "3220178000000000333", "tag_option_id": ""},
-#         {"tag_id": "3220178000000000335", "tag_option_id": ""},
-#         {"tag_id": "3220178000000000339", "tag_option_id": ""},
-#     ],
-#     "gst_no": "27AAAAP0267H2ZN",
-#     "gst_treatment": "business_gst",
-#     "place_of_contact": "MH",
-#     "pan_no": "AAAAP0267H",
-#     "customer_sub_type": "business",
-#     "opening_balances": [
-#         {
-#             "opening_balance_amount": "",
-#             "exchange_rate": 1,
-#             "location_id": "3220178000143298047",
-#         }
-#     ],
-#     "legal_name": "GP PARSIK SAHAKARI BANK LIMITED",
-#     "trader_name": "GP PARSIK SAHAKARI BANK LIMITED",
-#     "documents": [],
-#     "msme_type": "",
-#     "udyam_reg_no": "",
-# }
 
 
 @router.post("")
