@@ -15,13 +15,12 @@ client, db = connect_to_mongo()
 
 @router.get("/")
 def index():
-    users = serialize_mongo_document(list(db.users.find()))
-    return {"users": users}
+    return "Application Running Successfully"
 
 
 @router.get("/hello")
 def hello_world():
-    return {"data": "Hello, Users!"}
+    return {"data": "Hello, World!"}
 
 
 @router.post("/upload")
