@@ -609,13 +609,13 @@ async def finalise(order_dict: dict):
                 "is_tcs_amount_in_percent": True,
                 "client_computation": {"total": total_amount},
             }
-            print(json.dumps(payload, indent=4))
             estimate_response = await client.post(
                 url=ESTIMATE_URL.format(org_id=org_id)
                 + "&ignore_auto_number_generation=true",
                 headers=headers,
                 json=payload,
             )
+            print("Estimate Response:", estimate_response.json())
             estimate_response.raise_for_status()
 
             estimate_data = estimate_response.json()["estimate"]
