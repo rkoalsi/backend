@@ -4,7 +4,6 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import os
 from dotenv import load_dotenv
-from jwt.exceptions import PyJWTError
 
 load_dotenv()
 
@@ -46,7 +45,7 @@ class JWTBearer(HTTPBearer):
             payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
             # Optionally: validate additional fields (e.g., expiration, audience, etc.)
             return True
-        except PyJWTError as e:
+        except Exception as e:
             print(f"JWT verification failed: {e}")
             return False
 
@@ -56,7 +55,7 @@ def get_current_user(token: str = Depends(JWTBearer())):
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         return payload  # or construct a user object based on payload data
-    except PyJWTError:
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Could not validate credentials",
