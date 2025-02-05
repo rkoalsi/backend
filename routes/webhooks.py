@@ -38,7 +38,7 @@ def parse_datetime(value):
         return datetime.datetime.now()
 
 
-def handle_item(data: dict):
+def handle_item(data: dict, background_tasks: BackgroundTasks):
     item = data.get("item")
     item_id = item.get("item_id", "")
     if item_id != "":
@@ -98,6 +98,7 @@ def handle_item(data: dict):
                 email=os.getenv("ITEM_EMAIL_TO"),
                 cc=os.getenv("ITEM_EMAIL_CC"),
             )
+            background_tasks.add_task(run_update_stock)
         else:
             print("Item Exists")
             update_data = {}
@@ -786,9 +787,8 @@ def estimate(data: dict):
 
 
 @router.post("/invoice")
-def invoice(data: dict, background_tasks: BackgroundTasks):
+def invoice(data: dict):
     handle_invoice(data)
-    background_tasks.add_task(run_update_stock)
     return "Invoice Webhook Received Successfully"
 
 
@@ -800,6 +800,5 @@ def customer(data: dict):
 
 @router.post("/item")
 def item(data: dict, background_tasks: BackgroundTasks):
-    handle_item(data)
-    background_tasks.add_task(run_update_stock)
+    handle_item(data, background_tasks)
     return "Item Webhook Received Successfully"
