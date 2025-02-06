@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import boto3, datetime
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
+from datetime import date
 
 load_dotenv()
 router = APIRouter()
@@ -437,31 +438,44 @@ def read_all_orders(
     limit: int = Query(10, ge=1, description="Number of items per page"),
 ):
     """
-    Retrieve all invoices for admin, with pagination, converting created_at to IST in Mongo.
+    Retrieve all invoices past their due_date with pagination.
     page:  0-based page index
     limit: number of invoices per page
     """
-    query = {"status": "overdue"}
-    # Basic query to match all invoices
+    # Get today’s date in ISO format (YYYY-MM-DD)
+    today_str = date.today().isoformat()
+
+    # Query to match invoices with a due_date less than today
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    # If you also want to ensure the invoice has a specific status (e.g., "overdue"),
+    # you can combine conditions like this:
+    # query = {"due_date": {"$lt": today_str}, "status": "overdue"}
+
+    # Basic query stage for the aggregation pipeline
     match_stage = {"$match": query}
 
-    # Count total invoices (for the frontend) without pagination
+    # Count total invoices matching the query (for frontend pagination)
     total_count = db.invoices.count_documents(query)
 
-    # Now build our aggregation pipeline
+    # Build the aggregation pipeline
     pipeline = [
         match_stage,
-        {"$skip": page * limit},  # skip
-        {"$limit": limit},  # limit
-        # Convert created_at (UTC) to a string in IST
+        {"$skip": page * limit},  # Skip the appropriate number of documents
+        {"$limit": limit},  # Limit the number of documents returned
+        # Project only the necessary fields
         {
             "$project": {
-                # Keep the original fields (except created_by_info is now an object)
                 "created_at": 1,
                 "total": 1,
                 "due_date": 1,
                 "balance": 1,
-                "status": 1,
+                "status": {
+                    "$cond": {
+                        "if": {"$eq": ["$status", "partially_paid"]},
+                        "then": "partially paid",
+                        "else": "$status",
+                    }
+                },
                 "cf_sales_person": 1,
                 "created_by_name": 1,
                 "salesperson_name": 1,
@@ -471,17 +485,25 @@ def read_all_orders(
                 "invoice_number": 1,
                 "invoice_id": 1,
                 "line_items": 1,
+                "overdue_by_days": {
+                    "$dateDiff": {
+                        "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                        "endDate": "$$NOW",
+                        "unit": "day",
+                    }
+                },
             }
         },
-        {"$sort": {"created_at": -1}},  # sort descending by created_at
+        {"$sort": {"due_date": -1}},  # Sort descending by created_at
     ]
 
-    # Execute the pipeline
+    # Execute the aggregation pipeline
     invoices_cursor = db.invoices.aggregate(pipeline)
 
-    # Convert each Mongo document to JSON-serializable Python dict
+    # Convert each Mongo document to a JSON-serializable Python dict
     inv = [serialize_mongo_document(doc) for doc in invoices_cursor]
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+
     # Validate page number
     if page > total_pages and total_pages != 0:
         raise HTTPException(status_code=400, detail="Page number out of range")

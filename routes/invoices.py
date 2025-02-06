@@ -3,6 +3,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from typing import Optional
 from bson import ObjectId
 import re
+from datetime import date
 
 router = APIRouter()
 
@@ -28,19 +29,26 @@ def get_invoices(
     # search: Optional[str] = Query(None, description="Search term for name or SKU code"),
 ):
     """
-    Retrieves paginated products with optional brand, category, and search filters,
-    sorted such that new products appear first within each brand.
+    Retrieves paginated invoices with optional filters.
+    It also includes the number of days an invoice is overdue, calculated as the difference between today's date and the due_date.
     """
+    # Retrieve the user document
     user = db.users.find_one({"_id": ObjectId(created_by)})
-    # salesperson_id = user.get("salesperson_id", "")
     code = user.get("code", "")
-    # # Define base query
+
+    # Define forbidden keywords for salesperson fields
     forbidden_keywords = (
         "(Company customers|defaulters|Amazon|staff purchase|marketing inv's)"
     )
+
+    # Today's date in ISO format (YYYY-MM-DD)
+    today_str = date.today().isoformat()
     escaped_sales_person = re.escape(code)
+
+    # Build the query to match invoices past their due date and not marked as paid.
     query = {
-        "status": "overdue",
+        "due_date": {"$lt": today_str},
+        "status": {"$nin": ["paid"]},
         # Must match 'code' in either cf_sales_person or salesperson_name
         "$or": [
             {
@@ -56,20 +64,23 @@ def get_invoices(
                 }
             },
         ],
-        # Exclude if cf_sales_person contains any forbidden keywords
-        "cf_sales_person": {
-            "$not": {"$regex": forbidden_keywords, "$options": "i"}  # case-insensitive
-        },
-        # Exclude if salesperson_name contains any forbidden keywords
+        # Exclude documents if cf_sales_person or salesperson_name contains any forbidden keywords
+        "cf_sales_person": {"$not": {"$regex": forbidden_keywords, "$options": "i"}},
         "salesperson_name": {"$not": {"$regex": forbidden_keywords, "$options": "i"}},
     }
 
-    # 4. Define projection
+    # Define the projection, including a new field to calculate the overdue days.
     project = {
         "_id": 1,
         "invoice_id": 1,
         "invoice_number": 1,
-        "status": 1,
+        "status": {
+            "$cond": {
+                "if": {"$eq": ["$status", "partially_paid"]},
+                "then": "partially paid",
+                "else": "$status",
+            }
+        },
         "date": 1,
         "due_date": 1,
         "customer_id": 1,
@@ -79,26 +90,33 @@ def get_invoices(
         "cf_sales_person": 1,
         "salesperson_name": 1,
         "created_at": 1,
+        "overdue_by_days": {
+            "$dateDiff": {
+                "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                "endDate": "$$NOW",
+                "unit": "day",
+            }
+        },
     }
 
-    # 5. Construct the aggregation pipeline
+    # Construct the aggregation pipeline
     pipeline = [
         {"$match": query},
         {"$sort": {"created_at": -1}},  # Latest first
         {"$project": project},
     ]
 
-    # 6. Execute pipeline with skip & limit
+    # Execute the pipeline
     try:
         fetched_invoices = list(db.invoices.aggregate(pipeline))
     except Exception as e:
         print(f"Error during aggregation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    # 7. Serialize documents
+    # Serialize the documents
     all_invoices = [serialize_mongo_document(doc) for doc in fetched_invoices]
 
-    # 8. Count total matching documents
+    # Count total matching documents
     try:
         total_invoices = db.invoices.count_documents(query)
     except Exception as e:
@@ -106,7 +124,7 @@ def get_invoices(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     print(total_invoices)
-    # 11. Return paginated response
+    # Return the response
     return {
         "invoices": all_invoices,
         "total": total_invoices,
