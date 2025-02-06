@@ -42,7 +42,7 @@ GST_STATE_CODES = {
 }
 
 STATE_CODES = {
-    "Andhra Pradesh": "AP",
+    "Andhra Pradesh": "AD",
     "Arunachal Pradesh": "AR",
     "Assam": "AS",
     "Bihar": "BR",
@@ -77,5 +77,7 @@ STATE_CODES = {
     "Jammu and Kashmir": "JK",
     "Ladakh": "LA",
     "Lakshadweep": "LD",
+    "Dadra & Nagar Haveli and Daman & Diu": "DN",
     "Puducherry": "PY",
+    "Other Territory": "OT",
 }
