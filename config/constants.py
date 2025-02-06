@@ -65,7 +65,7 @@ STATE_CODES = {
     "Rajasthan": "RJ",
     "Sikkim": "SK",
     "Tamil Nadu": "TN",
-    "Telangana": "TG",
+    "Telangana": "TS",
     "Tripura": "TR",
     "Uttar Pradesh": "UP",
     "Uttarakhand": "UK",
