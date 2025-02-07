@@ -491,7 +491,6 @@ def read_all_orders(
         {"$skip": page * limit},  # Skip the appropriate number of documents
         {"$limit": limit},  # Limit the number of documents returned
     ]
-    print(json.dumps(pipeline, indent=4))
     # Execute the aggregation pipeline
     invoices_cursor = db.invoices.aggregate(pipeline)
 
