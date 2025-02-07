@@ -8,7 +8,7 @@ from typing import Optional
 import re, requests, os
 from collections import defaultdict
 from dotenv import load_dotenv
-import boto3, datetime
+import boto3, datetime, json
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
 from datetime import date
@@ -460,14 +460,12 @@ def read_all_orders(
     # Build the aggregation pipeline
     pipeline = [
         match_stage,
-        {"$skip": page * limit},  # Skip the appropriate number of documents
-        {"$limit": limit},  # Limit the number of documents returned
         # Project only the necessary fields
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                "due_date": 1,
+                "due_date": {"$dateFromString": {"dateString": "$due_date"}},
                 "balance": 1,
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
@@ -488,9 +486,12 @@ def read_all_orders(
                 },
             }
         },
-        {"$sort": {"due_date": -1}},  # Sort descending by created_at
+        # Now sort by the converted due_date
+        {"$sort": {"due_date": -1}},
+        {"$skip": page * limit},  # Skip the appropriate number of documents
+        {"$limit": limit},  # Limit the number of documents returned
     ]
-
+    print(json.dumps(pipeline, indent=4))
     # Execute the aggregation pipeline
     invoices_cursor = db.invoices.aggregate(pipeline)
 
