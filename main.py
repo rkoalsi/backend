@@ -36,9 +36,9 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 # Add shutdown handler for MongoDB
-app.add_event_handler("startup", scheduler_startup)
+# app.add_event_handler("startup", scheduler_startup)
 app.add_event_handler("shutdown", disconnect_on_exit(client))
-app.add_event_handler("shutdown", scheduler_shutdown)
+# app.add_event_handler("shutdown", scheduler_shutdown)
 
 
 @app.get("/")
