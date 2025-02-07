@@ -469,13 +469,7 @@ def read_all_orders(
                 "total": 1,
                 "due_date": 1,
                 "balance": 1,
-                "status": {
-                    "$cond": {
-                        "if": {"$eq": ["$status", "partially_paid"]},
-                        "then": "partially paid",
-                        "else": "$status",
-                    }
-                },
+                "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
                 "created_by_name": 1,
                 "salesperson_name": 1,

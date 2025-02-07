@@ -3,7 +3,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
-import datetime, json, os, requests, time
+import datetime, json, os, requests, time, threading
 from dateutil.parser import parse
 from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +22,8 @@ org_id = os.getenv("ORG_ID")
 collection = db["products"]
 
 _access_token_cache = {"token": None, "expires_at": None}
+
+update_stock_lock = threading.Lock()
 
 
 def parse_datetime(value):
@@ -382,10 +384,14 @@ def run_update_stock():
     """
     Runs the `update_stock` function.
     """
-    try:
-        update_stock()
-    except Exception as e:
-        print(f"Error running update_stock: {e}")
+    if update_stock_lock.locked():
+        print("Update stock is already running. Skipping new call.")
+        return
+    with update_stock_lock:
+        try:
+            update_stock()
+        except Exception as e:
+            print(f"Error running update_stock: {e}")
 
 
 @router.post("/update/stock")

@@ -74,13 +74,7 @@ def get_invoices(
         "_id": 1,
         "invoice_id": 1,
         "invoice_number": 1,
-        "status": {
-            "$cond": {
-                "if": {"$eq": ["$status", "partially_paid"]},
-                "then": "partially paid",
-                "else": "$status",
-            }
-        },
+        "status": {"$toString": "overdue"},
         "date": 1,
         "due_date": 1,
         "customer_id": 1,
@@ -102,7 +96,7 @@ def get_invoices(
     # Construct the aggregation pipeline
     pipeline = [
         {"$match": query},
-        {"$sort": {"created_at": -1}},  # Latest first
+        {"$sort": {"due_date": -1}},  # Latest first
         {"$project": project},
     ]
 
