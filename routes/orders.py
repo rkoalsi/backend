@@ -124,7 +124,6 @@ def update_order(
     customer_collection: Collection,
 ):
     order_update["updated_at"] = datetime.utcnow()
-
     # Handle customer updates
     if "customer_id" in order_update:
         customer_id = order_update.get("customer_id")
@@ -173,7 +172,7 @@ def update_order(
             )
         # Replace the product list in the update payload
         order_update["products"] = updated_products
-
+    print(order_update)
     # Perform the update in MongoDB
     order_collection.update_one({"_id": ObjectId(order_id)}, {"$set": order_update})
 
@@ -442,6 +441,7 @@ async def finalise(order_dict: dict):
     total_amount = order.get("total_amount")
     created_by = order.get("created_by")
     user = users_collection.find_one({"_id": ObjectId(created_by)})
+    reference_number = order.get("reference_number", "")
     # Fetch SPecial Margins
     customer_id = order.get("customer_id")
     special_margins_cursor = db.special_margins.find(
@@ -551,6 +551,7 @@ async def finalise(order_dict: dict):
                 "place_of_supply": place_of_supply,
                 "is_tcs_amount_in_percent": True,
                 "client_computation": {"total": total_amount},
+                "reference_number": reference_number,
             }
             estimate_response = await client.post(
                 url=ESTIMATE_URL.format(org_id=org_id)
@@ -619,6 +620,7 @@ async def finalise(order_dict: dict):
                 "place_of_supply": place_of_supply,
                 "is_tcs_amount_in_percent": True,
                 "client_computation": {"total": total_amount},
+                "reference_number": reference_number,
             }
 
             y = await client.put(

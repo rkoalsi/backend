@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body, HTTPException, Query, File, UploadFile, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
@@ -8,7 +8,7 @@ from typing import Optional
 import re, requests, os
 from collections import defaultdict
 from dotenv import load_dotenv
-import boto3, datetime
+import boto3, datetime, io, csv
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
 from datetime import date
@@ -436,13 +436,14 @@ def read_all_orders(
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
+    sales_person: str = Query(None, description="Filter by sales person"),
 ):
     """
     Retrieve all invoices past their due_date with pagination.
     page:  0-based page index
     limit: number of invoices per page
     """
-    # Get today’s date in ISO format (YYYY-MM-DD)
+    # Get today's date in ISO format (YYYY-MM-DD)
     today_str = date.today().isoformat()
 
     # Query to match invoices with a due_date less than today
@@ -450,6 +451,22 @@ def read_all_orders(
     # If you also want to ensure the invoice has a specific status (e.g., "overdue"),
     # you can combine conditions like this:
     # query = {"due_date": {"$lt": today_str}, "status": "overdue"}
+    if sales_person:
+        escaped_sales_person = re.escape(sales_person)
+        query["$or"] = [
+            {
+                "cf_sales_person": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
+            {
+                "salesperson_name": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
+        ]
 
     # Basic query stage for the aggregation pipeline
     match_stage = {"$match": query}
@@ -460,14 +477,12 @@ def read_all_orders(
     # Build the aggregation pipeline
     pipeline = [
         match_stage,
-        {"$skip": page * limit},  # Skip the appropriate number of documents
-        {"$limit": limit},  # Limit the number of documents returned
         # Project only the necessary fields
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                "due_date": 1,
+                "due_date": {"$dateFromString": {"dateString": "$due_date"}},
                 "balance": 1,
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
@@ -488,9 +503,11 @@ def read_all_orders(
                 },
             }
         },
-        {"$sort": {"due_date": -1}},  # Sort descending by created_at
+        # Now sort by the converted due_date
+        {"$sort": {"due_date": -1}},
+        {"$skip": page * limit},  # Skip the appropriate number of documents
+        {"$limit": limit},  # Limit the number of documents returned
     ]
-
     # Execute the aggregation pipeline
     invoices_cursor = db.invoices.aggregate(pipeline)
 
@@ -509,6 +526,102 @@ def read_all_orders(
         "per_page": limit,
         "total_pages": total_pages,
     }
+
+
+@router.get("/payments_due/download_csv")
+def download_payments_due_csv(sales_person: str):
+    """
+    Download all invoices past their due_date (and not paid) as a CSV file.
+    """
+    today_str = date.today().isoformat()
+
+    # Query to match invoices with a due_date less than today and status not in ["paid"]
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    if sales_person:
+        query["$or"] = [
+            {"cf_sales_person": sales_person},
+            {"salesperson_name": sales_person},
+        ]
+    match_stage = {"$match": query}
+
+    # Build the aggregation pipeline similar to the table data route
+    pipeline = [
+        match_stage,
+        {
+            "$project": {
+                "created_at": 1,
+                "total": 1,
+                "due_date": {"$dateFromString": {"dateString": "$due_date"}},
+                "balance": 1,
+                # For CSV purposes, you may output the status directly if needed
+                "status": {"$toString": "overdue"},
+                "cf_sales_person": 1,
+                "created_by_name": 1,
+                "salesperson_name": 1,
+                "customer_id": 1,
+                "customer_name": 1,
+                "invoice_url": 1,
+                "invoice_number": 1,
+                "invoice_id": 1,
+                "line_items": 1,
+                "overdue_by_days": {
+                    "$dateDiff": {
+                        "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                        "endDate": "$$NOW",
+                        "unit": "day",
+                    }
+                },
+            }
+        },
+        {"$sort": {"due_date": -1}},
+    ]
+
+    # Execute the aggregation pipeline
+    invoices_cursor = db.invoices.aggregate(pipeline)
+    invoices = [serialize_mongo_document(doc) for doc in invoices_cursor]
+
+    # Create a CSV in memory
+    output = io.StringIO()
+    fieldnames = [
+        "Created At",
+        "Due Date",
+        "Invoice Number",
+        "Overdue by Days",
+        "Customer Name",
+        "Status",
+        "CF Sales Person",
+        "Invoice Sales Person",
+        "Created By",
+        "Total",
+        "Balance",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for invoice in invoices:
+        writer.writerow(
+            {
+                "Created At": invoice.get("created_at"),
+                "Due Date": invoice.get("due_date"),
+                "Invoice Number": invoice.get("invoice_number"),
+                "Overdue by Days": invoice.get("overdue_by_days"),
+                "Customer Name": invoice.get("customer_name"),
+                "Status": invoice.get("status"),
+                "CF Sales Person": invoice.get("cf_sales_person")
+                or invoice.get("salesperson_name", "-"),
+                "Invoice Sales Person": invoice.get("salesperson_name"),
+                "Created By": invoice.get("created_by_name"),
+                "Total": invoice.get("total"),
+                "Balance": invoice.get("balance"),
+            }
+        )
+
+    csv_data = output.getvalue()
+
+    # Return CSV file as attachment
+    response = Response(content=csv_data, media_type="text/csv")
+    response.headers["Content-Disposition"] = "attachment; filename=payments_due.csv"
+    return response
 
 
 @router.get("/sales-people")

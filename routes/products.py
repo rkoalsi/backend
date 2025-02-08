@@ -7,6 +7,7 @@ from pymongo import ASCENDING, DESCENDING
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import Optional
+import os
 
 router = APIRouter()
 
@@ -30,7 +31,19 @@ def get_all_brands():
         brands = products_collection.distinct(
             "brand", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
         )
-        brands = [brand for brand in brands if brand]  # Remove empty or null brands
+        brands = [
+            {
+                "brand": brand,
+                "url": f"{os.getenv('S3_URL')}/product_images/{(
+                    brand.lower().replace(" ", "_")
+                    if len(brand.split()) == 2
+                    else brand.lower()
+                )}.jpeg",
+            }
+            for brand in brands
+            if brand
+        ]  # Remove empty or null brands
+
         return {"brands": brands}
     except Exception as e:
         print(e)
