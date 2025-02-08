@@ -34,11 +34,7 @@ def get_all_brands():
         brands = [
             {
                 "brand": brand,
-                "url": f"{os.getenv('S3_URL')}/product_images/{(
-                    brand.lower().replace(" ", "_")
-                    if len(brand.split()) == 2
-                    else brand.lower()
-                )}.jpeg",
+                "url": f"""{os.getenv('S3_URL')}/product_images/{(brand.lower().replace(" ", "_") if len(brand.split()) == 2 else brand.lowe())}.jpeg""",
             }
             for brand in brands
             if brand
