@@ -1180,6 +1180,32 @@ def delete_catalogue(catalogue_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.post("/catalogues")
+def create_catalouge(catalogue: dict):
+    """
+    Update the catalogue with the provided fields.
+    Only the fields sent in the request will be updated.
+    """
+    try:
+        # Build a dictionary of fields to update (skip any that are None)
+        update_data = {k: v for k, v in catalogue.items() if v is not None}
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No update data provided")
+
+        result = db.catalogues.insert_one({**update_data})
+
+        if result:
+            # Fetch and return the updated document.
+            return "Document Created"
+        else:
+            # It’s possible that the document was not found or that no changes were made.
+            raise HTTPException(
+                status_code=404, detail="Catalogue not found or no changes applied"
+            )
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.put("/catalogues/{catalogue_id}")
 def update_catalogue(catalogue_id: str, catalogue: dict):
     """
