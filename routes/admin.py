@@ -8,7 +8,7 @@ from typing import Optional
 import re, requests, os
 from collections import defaultdict
 from dotenv import load_dotenv
-import boto3, datetime, io, csv
+import boto3, datetime, io, csv, uuid
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
 from datetime import date
@@ -384,6 +384,7 @@ def read_all_orders(
                 "estimate_created": 1,
                 "estimate_number": 1,
                 "estimate_id": 1,
+                "reference_number": 1,
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
                 "created_at": {
@@ -1115,3 +1116,124 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         raise HTTPException(status_code=500, detail="Error uploading file to S3.")
     finally:
         file.file.close()
+
+
+@router.get("/catalogues")
+def get_catalogues(
+    page: int = Query(0, ge=0, description="0-based page index"),
+    limit: int = Query(10, ge=1, description="Number of items per page"),
+):
+    try:
+        match_statement = {}
+        pipeline = [
+            {"$match": match_statement},
+            {"$skip": page * limit},
+            {"$limit": limit},
+        ]
+        total_count = db.catalogues.count_documents(match_statement)
+        cursor = db.catalogues.aggregate(pipeline)
+        cat = [serialize_mongo_document(doc) for doc in cursor]
+        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+
+        # Validate page number
+        if page > total_pages and total_pages != 0:
+            raise HTTPException(status_code=400, detail="Page number out of range")
+        return {
+            "catalogues": cat,
+            "total_count": total_count,
+            "page": page,
+            "per_page": limit,
+            "total_pages": total_pages,
+        }
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/catalogues/{catalogue_id}")
+def delete_catalogue(catalogue_id: str):
+    """
+    Delete a catalogue by its ID.
+    This example performs a hard delete.
+    For a soft delete (mark as inactive), you can update the document instead.
+    """
+    try:
+        # Convert the string ID to a Mongo ObjectId.
+        # result = db.catalogues.delete_one({"_id": ObjectId(catalogue_id)})
+        # if result.deleted_count == 1:
+        #     return {"detail": "Catalogue deleted successfully"}
+        # else:
+        #     raise HTTPException(status_code=404, detail="Catalogue not found")
+
+        # --- OR ---
+        # For a soft delete, you might do:
+        doc = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
+        result = db.catalogues.update_one(
+            {"_id": ObjectId(catalogue_id)},
+            {"$set": {"is_active": not doc.get("is_active")}},
+        )
+        if result.modified_count == 1:
+            return {"detail": "Catalogue deleted successfully (soft delete)"}
+        else:
+            raise HTTPException(status_code=404, detail="Catalogue not found")
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.put("/catalogues/{catalogue_id}")
+def update_catalogue(catalogue_id: str, catalogue: dict):
+    """
+    Update the catalogue with the provided fields.
+    Only the fields sent in the request will be updated.
+    """
+    try:
+        # Build a dictionary of fields to update (skip any that are None)
+        update_data = {k: v for k, v in catalogue.items() if v is not None}
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No update data provided")
+
+        result = db.catalogues.update_one(
+            {"_id": ObjectId(catalogue_id)}, {"$set": update_data}
+        )
+
+        if result.modified_count == 1:
+            # Fetch and return the updated document.
+            updated_catalogue = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
+            return serialize_mongo_document(updated_catalogue)
+        else:
+            # It’s possible that the document was not found or that no changes were made.
+            raise HTTPException(
+                status_code=404, detail="Catalogue not found or no changes applied"
+            )
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/catalogues/upload")
+async def upload_catalogue(file: UploadFile = File(...)):
+    """
+    Stream a large catalogue file directly to an S3 bucket.
+    The file is uploaded in a memory‑efficient way using boto3's upload_fileobj.
+    """
+    try:
+        # Create a unique key for the file in the bucket
+        file_extension = file.filename.split(".")[-1]
+        if file_extension.lower() != "pdf":
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
+        file_key = f"catalogues/{uuid.uuid4()}.pdf"
+
+        # Upload the file using the file's file-like object.
+        # This streams the file without reading it fully into memory.
+        s3_client.upload_fileobj(
+            file.file,
+            AWS_S3_BUCKET_NAME,
+            file_key,
+            ExtraArgs={"ContentType": "application/pdf"},
+        )
+
+        # Construct the file URL. This URL pattern depends on your S3 configuration.
+        file_url = f"{AWS_S3_URL}/{file_key}"
+        return {"file_url": file_url}
+    except Exception as e:
+        # Log the exception as needed
+        raise HTTPException(status_code=500, detail=str(e))
