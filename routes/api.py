@@ -6,6 +6,7 @@ from .zoho import router as zoho
 from .orders import router as orders
 from .util import router as util
 from .admin import router as admin
+from .catalogues import router as catalogues
 from .invoices import router as invoices
 from .webhooks import router as webhooks
 from backend.config.auth import JWTBearer  # type: ignore
@@ -13,6 +14,7 @@ from backend.config.auth import JWTBearer  # type: ignore
 router = APIRouter()
 
 router.include_router(users, prefix="/users", tags=["User"])
+router.include_router(catalogues, prefix="/catalogues", tags=["Catalogues"])
 router.include_router(customers, prefix="/customers", tags=["Customer"])
 router.include_router(products, prefix="/products", tags=["Product"])
 router.include_router(zoho, prefix="/zoho", tags=["Zoho"])
