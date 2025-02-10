@@ -25,12 +25,6 @@ jobs:
       #     username: ${{ secrets.DOCKER_USERNAME }}
       #     password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Step 3: Build the backend Docker image.
-      - name: Build Backend Docker Image
-        working-directory: ./backend
-        run: |
-          docker build -t my-backend:latest .
-
       # (Optional) If you’re pushing your image to a registry for your server to pull it:
       # - name: Push Docker Image
       #   working-directory: ./backend
