@@ -457,21 +457,16 @@ async def finalise(order_dict: dict):
         product_id_str = str(
             product.get("product_id")
         )  # Convert to string for dictionary lookup
-
         # Retrieve the special margin if it exists; otherwise, use the product's default margin
         special_margin = special_margin_dict.get(
-            product_id_str, product.get("margin", "40%")
+            product_id_str, customer.get("cf_margin", "40%")
         )
-
         # Optional: Validate the format of special_margin
         if isinstance(special_margin, str) and re.match(r"^\d+%$", special_margin):
             discount_value = special_margin
-        else:
-            discount_value = customer.get("cf_margin", "40%")
 
         if not discount_value.endswith("%"):
             discount_value = f"{discount_value}%"
-
         obj = {
             "item_order": idx + 1,
             "item_id": item.get("item_id"),
@@ -497,7 +492,7 @@ async def finalise(order_dict: dict):
             "unit_conversion_id": "",
         }
         line_items.append(obj)
-    print(line_items)
+    print(json.dumps(line_items, indent=4))
 
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
