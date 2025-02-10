@@ -26,6 +26,8 @@ users_collection = db["users"]
 
 router = APIRouter()
 
+timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
+
 
 # Create a new order
 def create_order(order: dict, collection: Collection) -> str:
@@ -222,8 +224,9 @@ async def email_estimate(
     estimate_url: str,
     message: str,
     headers: dict,
+    timeout: any,
 ):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         if status in {"accepted", "declined"}:
             await client.post(
                 url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}/status/sent?organization_id={org_id}",
@@ -499,7 +502,7 @@ async def finalise(order_dict: dict):
     estimate_data = {}
 
     if not estimate_created:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             y = await client.get(
                 url=ESTIMATE_URL.format(org_id=org_id)
                 + "&filter_by=Status.All&per_page=200&sort_column=estimate_number&sort_order=D",
@@ -581,7 +584,7 @@ async def finalise(order_dict: dict):
             )
             message = f"Estimate has been created - {estimate_data['estimate_number']} with Status : {str(status).capitalize()}\n"
     else:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             payload = {
                 "location_id": "3220178000143298047",
                 "contact_persons": [],
@@ -649,6 +652,7 @@ async def finalise(order_dict: dict):
         estimate_data["estimate_url"],
         message,
         headers,
+        timeout,
     )
     return {"status": "success", "message": message}
 
