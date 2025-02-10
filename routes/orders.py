@@ -437,9 +437,8 @@ async def finalise(order_dict: dict):
     shipping_address_id = order.get("shipping_address", {}).get("address_id", "")
     billing_address_id = order.get("billing_address", {}).get("address_id", "")
     customer = db.customers.find_one({"_id": ObjectId(order.get("customer_id"))})
-    place_of_supply = STATE_CODES[
-        str(order.get("shipping_address", {}).get("state", "")).capitalize()
-    ]
+    state_str = str(order.get("shipping_address", {}).get("state", ""))
+    place_of_supply = STATE_CODES.get(state_str.title())
     gst_type = order.get("gst_type", "")
     products = order.get("products", [])
     total_amount = order.get("total_amount")
