@@ -1,0 +1,49 @@
+name: Deploy Backend to Staging
+
+on:
+  push:
+    branches:
+      - uat # Change this to your staging branch
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository.
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Docker Buildx (if you need advanced features).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # (Optional) Log in to your Docker registry if you plan to push the image.
+      # - name: Login to Docker Hub
+      #   uses: docker/login-action@v2
+      #   with:
+      #     username: ${{ secrets.DOCKER_USERNAME }}
+      #     password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Step 3: Build the backend Docker image.
+      - name: Build Backend Docker Image
+        working-directory: ./backend
+        run: |
+          docker build -t my-backend:latest .
+
+      # (Optional) If you’re pushing your image to a registry for your server to pull it:
+      # - name: Push Docker Image
+      #   working-directory: ./backend
+      #   run: docker push my-backend:latest
+
+      # Step 4: Deploy to the staging server via SSH.
+      - name: Deploy to Staging Server
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_SERVER_HOST }}
+          username: ${{ secrets.STAGING_SERVER_USER }}
+          key: ${{ secrets.STAGING_SERVER_SSH_KEY }}
+          script: |
+            cd /home/ubuntu
+            # The deploy.sh script uses the -b flag to deploy backend only.
+            sudo ./deploy.sh -b
