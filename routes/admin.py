@@ -329,6 +329,7 @@ def read_all_orders(
     estimate_created: Optional[bool] = Query(
         None, description="Filter by whether estimate was created"
     ),
+    amount: Optional[str] = Query(None, description="Filter by amount"),
 ):
     """
     Retrieve all orders for admin, with pagination and optional filters,
@@ -343,6 +344,9 @@ def read_all_orders(
 
     if estimate_created is not None:
         match_stage["$match"]["estimate_created"] = estimate_created
+
+    if amount:
+        match_stage["$match"]["total_amount"] = {"$gt": 0}
 
     if sales_person:
         # Assuming 'created_by_info.name' is the field to filter
