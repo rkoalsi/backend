@@ -284,9 +284,8 @@ def validate_order(order_id: str):
 
     # Check if place of supply is missing or invalid
     place_of_supply = order.get("shipping_address", {}).get("state_code")
-    place_of_supply_backup = STATE_CODES[
-        str(order.get("shipping_address", {}).get("state", "")).capitalize()
-    ]
+    state_str = str(order.get("shipping_address", {}).get("state", ""))
+    place_of_supply_backup = STATE_CODES.get(state_str.title())
     if not place_of_supply and not place_of_supply_backup:
         raise HTTPException(status_code=400, detail="Place of supply is missing")
 
