@@ -20,7 +20,7 @@ def index():
 
 @router.get("/hello")
 def hello_world():
-    return {"data": "Hello, Puppers!"}
+    return {"data": "Hello, World!"}
 
 
 @router.post("/upload")
