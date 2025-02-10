@@ -91,6 +91,7 @@ def get_all_orders(
             raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
         query["is_deleted"] = {"$exists": False}
+        query["total_amount"] = {"$gt": 0}
     if status:
         query["status"] = status
 
