@@ -10,6 +10,7 @@ import re, os, json, httpx, requests
 from dotenv import load_dotenv
 from fastapi.responses import Response
 from backend.config.constants import terms, STATE_CODES  # type: ignore
+from backend.config.whatsapp import send_whatsapp  # type:ignore
 
 load_dotenv()
 
@@ -719,29 +720,20 @@ async def notify(order_dict: dict):
         estimate_number = order.get("estimate_number", False)
         created_by = order.get("created_by", "")
         sales_person = db.users.find_one({"_id": ObjectId(created_by)})
-        sales_person_email = sales_person.get("email")
+        sales_person_phone = sales_person.get("phone")
         salesperson_name = sales_person.get("name")
-        subject = f"{customer_name} updated order {estimate_number if estimate_created else order_id[-6:]}"
-        body = f"""
-            Hi {salesperson_name},
-
-            This is a notification email that Customer : {customer_name} has edited the order {estimate_number if estimate_created else order_id[-6:] }. 
-
-            Please find the details given in the link below
-
-            https://orderform.pupscribe.in/orders/new/{order_id}
-
-            Thanks,
-            Pupscribe Team
-            """
-        email = f"{sales_person_email}"
-        cc = os.getenv("NOTIFY_EMAIL_CC")
-        print(
-            json.dumps(
-                {"subject": subject, "body": body, "email": email, "cc": cc}, indent=4
-            )
-        )
-        send_email(subject=subject, body=body, email=email, cc=cc)
+        template = db.templates.find_one({"name": "customer_order_edit"})
+        template_doc = {**template}
+        params = {
+            "salesperson_name": salesperson_name,
+            "customer_name": customer_name,
+            "estimate_number": estimate_number if estimate_created else order_id[-6:],
+            "button_url": f"{os.getenv('URL')}/orders/new/{order_id}",
+        }
+        cc1 = os.getenv("NOTIFY_EMAIL_CC")
+        cc2 = os.getenv("NOTIFY_EMAIL_CC")
+        for num in [sales_person_phone, cc1, cc2]:
+            send_whatsapp(to=num, template_doc=template_doc, params=params)
         return
     except Exception as e:
         raise e

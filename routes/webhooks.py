@@ -489,14 +489,14 @@ def handle_invoice(data: dict):
             due_date_only = due_date.date()
             if due_date_only == today and invoice_status == "overdue":
                 email_params = {
-                    "to": os.getenv("OVERDUE_EMAIL_TO"),
+                    "to": os.getenv("OVERDUE_ADMIN_TO"),
                     "invoice_number": invoice.get("invoice_number", ""),
                     "created_at": invoice.get("date", ""),
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "customer_name": invoice.get("customer_name", ""),
                     "total": invoice.get("total", ""),
                     "balance": invoice.get("balance", ""),
-                    "salesperson_name": "Admin",
+                    "salesperson_name": os.getenv("OVERDUE_ADMIN_NAME"),
                     "invoice_id": invoice_id,
                 }
                 schedule_job(
@@ -517,16 +517,20 @@ def handle_invoice(data: dict):
         for sp in all_salespeople:
             user = db.users.find_one({"code": sp})
             valid_salespeople.append(
-                {"email": user.get("email"), "name": user.get("name")}
+                {
+                    "email": user.get("email"),
+                    "name": user.get("name"),
+                    "phone": user.get("phone"),
+                }
             )
 
         # 3) Schedule one job for each valid (unique) salesperson
         for sp in valid_salespeople:
             name = sp.get("name")
             email = sp.get("email")
-
+            phone = sp.get("phone")
             email_params = {
-                "to": email,
+                "to": phone,
                 "invoice_number": invoice_number,
                 "created_at": created_at,
                 "due_date": due_date,
