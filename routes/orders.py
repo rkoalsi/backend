@@ -728,10 +728,19 @@ async def notify(order_dict: dict):
             "estimate_number": estimate_number if estimate_created else order_id[-6:],
             "button_url": f"{os.getenv('URL')}/orders/new/{order_id}",
         }
-        cc1 = os.getenv("NOTIFY_EMAIL_CC")
-        cc2 = os.getenv("NOTIFY_EMAIL_CC")
-        for num in [sales_person_phone, cc1, cc2]:
-            send_whatsapp(to=num, template_doc=template_doc, params=params)
+        for item in [
+            {"name": salesperson_name, "phone": sales_person_phone},
+            {
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+            },
+            {
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC2_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+            },
+        ]:
+            params["salesperson_name"] = item["name"]
+            send_whatsapp(to=item["phone"], template_doc=template_doc, params=params)
         return
     except Exception as e:
         raise e
