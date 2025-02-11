@@ -8,7 +8,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
-
+from backend.config.whatsapp import send_whatsapp  # type:ignore
 
 load_dotenv()
 org_id = os.getenv("ORG_ID")
@@ -430,3 +430,28 @@ def process_upload(input_file, email):
     body = "Please find the attached CI and PL verification files."
     send_email_with_attachments_in_memory(workbook, subject, body, filename, email)
     return 1
+
+
+def notify_all_salespeople(db, template, params):
+    all_salespeople = db.users.find({"status": "active", "role": "sales_person"})
+    for salesperson in all_salespeople:
+        phone = salesperson.get("phone")
+        name = salesperson.get("first_name")
+        template_doc = {**template}
+        parameters = {"name": name, **params}
+        if phone != "":
+            x = send_whatsapp(phone, template_doc, parameters)
+            print(x)
+    pass
+
+
+def notify_all_sales_admins(db, template, params):
+    all_sales_admins = db.users.find({"status": "active", "role": "sales_admin"})
+    for sales_admin in all_sales_admins:
+        phone = sales_admin.get("phone")
+        name = sales_admin.get("first_name")
+        template_doc = {**template}
+        parameters = {"name": name, **params}
+        if phone != "":
+            send_whatsapp(phone, template_doc, parameters)
+    pass

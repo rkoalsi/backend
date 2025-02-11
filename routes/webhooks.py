@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
+from backend.config.whatsapp import send_whatsapp  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
@@ -79,27 +80,32 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
             )
-            body = f"""
-            Hi Admin,
-
-            This is a notification reminder that a new product has been added to the order form. 
-            
-            The following product information has been added and marked as inactive :
-
-            Product Name: {item_name}
-            Brand: {brand_name}
-
-            Please fill in the required details before making it active (image, series, sub-category and category)
-
-            Thanks,
-            Pupscribe Team
-            """
-            send_email(
-                subject=f"New Item Addded",
-                body=body,
-                email=os.getenv("ITEM_EMAIL_TO"),
-                cc=os.getenv("ITEM_EMAIL_CC"),
+            template = serialize_mongo_document(
+                dict(db.templates.find_one({"name": "item_creation_update"}))
             )
+            to_notify = [
+                {
+                    "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
+                    "phone": os.getenv("NOTIFY_NUMBER_TO_CC1"),
+                },
+                {
+                    "name": os.getenv("NOTIFY_NUMBER_TO_CC3_NAME"),
+                    "phone": os.getenv("NOTIFY_NUMBER_TO_CC3"),
+                },
+            ]
+            for person in to_notify:
+                params = {
+                    "name": person["name"],
+                    "item_name": item.get("name", ""),
+                    "brand": (
+                        brand_name.capitalize() if brand_name != "FOFOS" else brand_name
+                    ),
+                }
+                send_whatsapp(
+                    to=person["phone"],
+                    template_doc=template,
+                    params=params,
+                )
             background_tasks.add_task(run_update_stock)
         else:
             print("Item Exists")
@@ -488,19 +494,19 @@ def handle_invoice(data: dict):
             today = datetime.datetime.utcnow().date()
             due_date_only = due_date.date()
             if due_date_only == today and invoice_status == "overdue":
-                email_params = {
-                    "to": os.getenv("OVERDUE_EMAIL_TO"),
+                msg_params = {
+                    "to": os.getenv("OVERDUE_ADMIN_TO"),
                     "invoice_number": invoice.get("invoice_number", ""),
                     "created_at": invoice.get("date", ""),
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "customer_name": invoice.get("customer_name", ""),
                     "total": invoice.get("total", ""),
                     "balance": invoice.get("balance", ""),
-                    "salesperson_name": "Admin",
+                    "salesperson_name": os.getenv("OVERDUE_ADMIN_NAME"),
                     "invoice_id": invoice_id,
                 }
                 schedule_job(
-                    email_params,
+                    msg_params,
                     run_date=datetime.datetime.now() + datetime.timedelta(minutes=1),
                     job_suffix="due_date",
                 )
@@ -517,19 +523,23 @@ def handle_invoice(data: dict):
         for sp in all_salespeople:
             user = db.users.find_one({"code": sp})
             valid_salespeople.append(
-                {"email": user.get("email"), "name": user.get("name")}
+                {
+                    "email": user.get("email"),
+                    "name": user.get("name"),
+                    "phone": user.get("phone"),
+                }
             )
 
         # 3) Schedule one job for each valid (unique) salesperson
         for sp in valid_salespeople:
             name = sp.get("name")
             email = sp.get("email")
-
-            email_params = {
-                "to": email,
+            phone = sp.get("phone")
+            msg_params = {
+                "to": phone,
                 "invoice_number": invoice_number,
                 "created_at": created_at,
-                "due_date": due_date,
+                "due_date": due_date.strftime("%Y-%m-%d"),
                 "customer_name": customer_name,
                 "total": total,
                 "balance": balance,
@@ -538,9 +548,9 @@ def handle_invoice(data: dict):
             }
             one_week_before = due_date - datetime.timedelta(weeks=1)
             if one_week_before > datetime.datetime.now():
-                email_params["type"] = "one_week_before"
+                msg_params["type"] = "one_week_before"
                 schedule_job(
-                    email_params,
+                    msg_params,
                     run_date=one_week_before + datetime.timedelta(hours=10),
                     job_suffix="one_week_before",
                 )
@@ -553,10 +563,24 @@ def handle_invoice(data: dict):
                 )
 
             # Schedule email on due_date
-            if due_date > datetime.datetime.now():
-                email_params["type"] = "due_date"
+            current_dt = datetime.datetime.now()
+            current_date = current_dt.date()
+            if due_date.date() == current_date:
+                # If due_date is today, execute now (or schedule immediately)
+                msg_params["type"] = "due_date"
                 schedule_job(
-                    email_params,
+                    msg_params,
+                    run_date=current_dt,  # execute immediately
+                    job_suffix="due_date",
+                )
+                print(
+                    f"Scheduled due-date email for invoice {invoice_number} to {email} to run immediately since due_date {due_date} is today."
+                )
+            elif due_date > current_dt:
+                # due_date is in the future (and not today), schedule as before
+                msg_params["type"] = "due_date"
+                schedule_job(
+                    msg_params,
                     run_date=due_date + datetime.timedelta(hours=10),
                     job_suffix="due_date",
                 )
@@ -567,7 +591,6 @@ def handle_invoice(data: dict):
                 print(
                     f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {email}."
                 )
-
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
@@ -786,6 +809,23 @@ def handle_customer(data: dict):
             print("No updates required for the customer.")
 
 
+def handle_accepted_estimate(data: dict):
+    estimate = data.get("estimate")
+    estimate_id = estimate.get("estimate_id", "")
+    estimate_number = estimate.get("estimate_number", "")
+    if estimate_id != "":
+        to = serialize_mongo_document(
+            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
+        )
+        template = serialize_mongo_document(
+            dict(db.templates.find_one({"name": "accepted_estimate"}))
+        )
+        params = {"name": to.get("first_name"), "estimate_number": estimate_number}
+        send_whatsapp(to.get("phone"), {**template}, {**params})
+    else:
+        print("Estimate Does Not Exist. Webhook Received")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -808,3 +848,11 @@ def customer(data: dict):
 def item(data: dict, background_tasks: BackgroundTasks):
     handle_item(data, background_tasks)
     return "Item Webhook Received Successfully"
+
+
+@router.post("/accepted_estimate")
+def accepted_estimate(
+    data: dict,
+):
+    handle_accepted_estimate(data)
+    return "Accepted Estimate Webhook Received Successfully"

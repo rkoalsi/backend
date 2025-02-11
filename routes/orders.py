@@ -10,6 +10,7 @@ import re, os, json, httpx, requests
 from dotenv import load_dotenv
 from fastapi.responses import Response
 from backend.config.constants import terms, STATE_CODES  # type: ignore
+from backend.config.whatsapp import send_whatsapp  # type:ignore
 
 load_dotenv()
 
@@ -91,6 +92,7 @@ def get_all_orders(
             raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
         query["is_deleted"] = {"$exists": False}
+        query["total_amount"] = {"$gt": 0}
     if status:
         query["status"] = status
 
@@ -282,9 +284,8 @@ def validate_order(order_id: str):
 
     # Check if place of supply is missing or invalid
     place_of_supply = order.get("shipping_address", {}).get("state_code")
-    place_of_supply_backup = STATE_CODES[
-        str(order.get("shipping_address", {}).get("state", "")).capitalize()
-    ]
+    state_str = str(order.get("shipping_address", {}).get("state", ""))
+    place_of_supply_backup = STATE_CODES.get(state_str.title())
     if not place_of_supply and not place_of_supply_backup:
         raise HTTPException(status_code=400, detail="Place of supply is missing")
 
@@ -436,9 +437,8 @@ async def finalise(order_dict: dict):
     shipping_address_id = order.get("shipping_address", {}).get("address_id", "")
     billing_address_id = order.get("billing_address", {}).get("address_id", "")
     customer = db.customers.find_one({"_id": ObjectId(order.get("customer_id"))})
-    place_of_supply = STATE_CODES[
-        str(order.get("shipping_address", {}).get("state", "")).capitalize()
-    ]
+    state_str = str(order.get("shipping_address", {}).get("state", ""))
+    place_of_supply = STATE_CODES.get(state_str.title())
     gst_type = order.get("gst_type", "")
     products = order.get("products", [])
     total_amount = order.get("total_amount")
@@ -718,29 +718,29 @@ async def notify(order_dict: dict):
         estimate_number = order.get("estimate_number", False)
         created_by = order.get("created_by", "")
         sales_person = db.users.find_one({"_id": ObjectId(created_by)})
-        sales_person_email = sales_person.get("email")
+        sales_person_phone = sales_person.get("phone")
         salesperson_name = sales_person.get("name")
-        subject = f"{customer_name} updated order {estimate_number if estimate_created else order_id[-6:]}"
-        body = f"""
-            Hi {salesperson_name},
-
-            This is a notification email that Customer : {customer_name} has edited the order {estimate_number if estimate_created else order_id[-6:] }. 
-
-            Please find the details given in the link below
-
-            https://orderform.pupscribe.in/orders/new/{order_id}
-
-            Thanks,
-            Pupscribe Team
-            """
-        email = f"{sales_person_email}"
-        cc = os.getenv("NOTIFY_EMAIL_CC")
-        print(
-            json.dumps(
-                {"subject": subject, "body": body, "email": email, "cc": cc}, indent=4
-            )
-        )
-        send_email(subject=subject, body=body, email=email, cc=cc)
+        template = db.templates.find_one({"name": "customer_order_edit"})
+        template_doc = {**template}
+        params = {
+            "salesperson_name": salesperson_name,
+            "customer_name": customer_name,
+            "estimate_number": estimate_number if estimate_created else order_id[-6:],
+            "button_url": f"{os.getenv('URL')}/orders/new/{order_id}",
+        }
+        for item in [
+            {"name": salesperson_name, "phone": sales_person_phone},
+            {
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+            },
+            {
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC2_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+            },
+        ]:
+            params["salesperson_name"] = item["name"]
+            send_whatsapp(to=item["phone"], template_doc=template_doc, params=params)
         return
     except Exception as e:
         raise e

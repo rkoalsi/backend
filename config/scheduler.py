@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dotenv import load_dotenv
-from email.mime.text import MIMEText
+from .whatsapp import send_whatsapp
 
 load_dotenv()  # ensure .env is loaded
 
@@ -49,8 +49,8 @@ def scheduler_shutdown():
     scheduler.shutdown()
 
 
-# Helper function to send overdue email
-def send_overdue_email(obj: dict):
+# Helper function to send overdue msg
+def send_overdue_msg(obj: dict):
     to = obj.get("to")
     invoice_number = obj.get("invoice_number")
     created_at = obj.get("created_at")
@@ -60,38 +60,32 @@ def send_overdue_email(obj: dict):
     balance = obj.get("balance")
     salesperson_name = obj.get("salesperson_name")
     email_type = obj.get("type")
-    subject = f"Payment Collection Reminder - {invoice_number}"
-    body = f"""
-    Hi {salesperson_name},
-
-    This is a Payment Collection Reminder. The following Invoice is {'going to be' if email_type == 'one_week_before' else ''} overdue:
-
-    Invoice Number: {invoice_number}
-    Invoice Created At: {created_at}
-    Invoice Due Date: {due_date}
-    Customer Name: {customer_name}
-    Total Amount: {total}
-    Balance Amount: {balance}
-
-    Thanks,
-    Pupscribe Team
-    """
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = RESET_EMAIL_SENDER
-    msg["To"] = to
+    template_doc = {
+        "name": (
+            "payment_reminder"
+            if email_type == "one_week_before"
+            else "payment_reminder_due"
+        ),
+        "language": "en_US",
+    }
+    params = {
+        "name": salesperson_name,
+        "invoice_number": invoice_number,
+        "invoice_date": created_at,
+        "invoice_due_date": due_date,
+        "customer_name": customer_name,
+        "amount": total,
+        "balance": balance,
+    }
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(RESET_EMAIL_SENDER, [to], msg.as_string())
+        send_whatsapp(to, template_doc, params)
     except Exception as e:
-        logging.error(f"Error sending email to {to}: {e}")
-        raise Exception("Failed to send overdue email")
+        logging.error(f"Error sending msg to {to}: {e}")
+        raise Exception("Failed to send overdue msg")
 
 
-def email_salesperson(obj: dict):
-    send_overdue_email(obj)
+def notify_salesperson(obj: dict):
+    send_overdue_msg(obj)
 
 
 def schedule_job(email_params: dict, run_date: datetime, job_suffix: str) -> str:
@@ -114,7 +108,7 @@ def schedule_job(email_params: dict, run_date: datetime, job_suffix: str) -> str
     )
 
     scheduler.add_job(
-        func=email_salesperson,
+        func=notify_salesperson,
         trigger=DateTrigger(run_date=run_date),
         args=[email_params],
         id=job_id,
