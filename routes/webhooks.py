@@ -821,7 +821,7 @@ def handle_accepted_estimate(data: dict):
             dict(db.templates.find_one({"name": "accepted_estimate"}))
         )
         params = {"name": to.get("first_name"), "estimate_number": estimate_number}
-        send_whatsapp(to, {**template}, {**params})
+        send_whatsapp(to.get("phone"), {**template}, {**params})
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
