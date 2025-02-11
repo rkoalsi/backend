@@ -81,27 +81,6 @@ def generate_whatsapp_template(template_doc: dict, dynamic_params: dict) -> Temp
     )
 
 
-# Create a Template instance with your template data
-whatsapp_template = Template(
-    **{
-        "name": "item_creation_update",
-        "language": "en",
-        "components": [
-            {
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": "Rohan"},
-                    {"type": "text", "text": "Dogfest Chicken Medallions"},
-                ],
-            }
-        ],
-    }
-)
-
-# template_doc = {"name:": template.get("name"), "language": template.get("language")}
-# params =    {"name": "Rohan","invoice_date": "","invoice_due_date": "","customer_name": "","amount": "","balance": "",  },
-
-
 def send_whatsapp(to: str, template_doc: dict, params: dict):
     try:
         response = client.messages.create(
