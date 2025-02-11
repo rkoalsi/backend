@@ -809,6 +809,23 @@ def handle_customer(data: dict):
             print("No updates required for the customer.")
 
 
+def handle_accepted_estimate(data: dict):
+    estimate = data.get("estimate")
+    estimate_id = estimate.get("estimate_id", "")
+    estimate_number = estimate.get("estimate_number", "")
+    if estimate_id != "":
+        to = serialize_mongo_document(
+            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
+        )
+        template = serialize_mongo_document(
+            dict(db.templates.find_one({"name": "accepted_estimate"}))
+        )
+        params = {"name": to.get("first_name"), "estimate_number": estimate_number}
+        send_whatsapp(to, {**template}, {**params})
+    else:
+        print("Estimate Does Not Exist. Webhook Received")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -831,3 +848,11 @@ def customer(data: dict):
 def item(data: dict, background_tasks: BackgroundTasks):
     handle_item(data, background_tasks)
     return "Item Webhook Received Successfully"
+
+
+@router.post("/accepted_estimate")
+def accepted_estimate(
+    data: dict,
+):
+    handle_accepted_estimate(data)
+    return "Accepted Estimate Webhook Received Successfully"
