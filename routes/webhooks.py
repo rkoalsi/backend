@@ -521,7 +521,7 @@ def handle_invoice(data: dict):
                 "to": phone,
                 "invoice_number": invoice_number,
                 "created_at": created_at,
-                "due_date": due_date,
+                "due_date": due_date.strftime("%Y-%m-%d"),
                 "customer_name": customer_name,
                 "total": total,
                 "balance": balance,
