@@ -1,17 +1,31 @@
-from fastapi import APIRouter, Body, HTTPException, Query, File, UploadFile, Form
+from fastapi import (
+    APIRouter,
+    Body,
+    HTTPException,
+    Query,
+    File,
+    UploadFile,
+    Form,
+    Depends,
+)
 from fastapi.responses import JSONResponse, Response
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
-from .helpers import get_access_token, notify_all_salespeople
+from .helpers import get_access_token
 from typing import Optional
 import re, requests, os
-from collections import defaultdict
 from dotenv import load_dotenv
-import boto3, datetime, io, csv, uuid
+import boto3, datetime, io, csv
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
 from datetime import date
+from .admin_trainings import router as admin_trainings_router
+from .admin_catalogues import router as admin_catalogues_router
+from .admin_salespeople import router as admin_salespeople_router
+from .admin_special_margins import router as admin_special_margins_router
+from .admin_announcements import router as admin_announcements_router
+from backend.config.auth import JWTBearer  # type: ignore
 
 load_dotenv()
 router = APIRouter()
@@ -35,12 +49,7 @@ s3_client = boto3.client(
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
 )
 
-
-def get_product(product_id: str, collection: Collection):
-    product = collection.find_one({"_id": ObjectId(product_id)})
-    if not product:
-        return "Product Not Found"
-    return serialize_mongo_document(product)
+MAX_FILE_SIZE_MB = 10
 
 
 @router.get("/stats")
@@ -89,7 +98,24 @@ async def get_stats():
         recent_orders = db["orders"].count_documents(
             {"created_at": {"$gte": start_of_today_ist}}
         )
+        active_catalogues = db["catalogues"].count_documents({"status": "active"})
+        inactive_catalogues = db["catalogues"].count_documents({"status": "inactive"})
 
+        active_trainings = db["trainings"].count_documents({"status": "active"})
+        inactive_trainings = db["trainings"].count_documents({"status": "inactive"})
+
+        active_announcements = db["announcements"].count_documents({"status": "active"})
+        inactive_announcements = db["announcements"].count_documents(
+            {"status": "inactive"}
+        )
+        today_str = date.today().isoformat()
+
+        total_due_payments = db["invoices"].count_documents(
+            {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+        )
+        total_due_payments_today = db["invoices"].count_documents(
+            {"due_date": {"$eq": today_str}, "status": {"$nin": ["paid"]}}
+        )
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
@@ -108,6 +134,14 @@ async def get_stats():
             "orders_declined": orders_declined,
             "orders_invoiced": orders_invoiced,
             "recent_orders": recent_orders,
+            "active_catalogues": active_catalogues,
+            "inactive_catalogues": inactive_catalogues,
+            "active_trainings": active_trainings,
+            "inactive_trainings": inactive_trainings,
+            "active_announcements": active_announcements,
+            "inactive_announcements": inactive_announcements,
+            "total_due_payments": total_due_payments,
+            "total_due_payments_today": total_due_payments_today,
         }
 
     except Exception as e:
@@ -643,171 +677,6 @@ def get_sales_people():
     return {"sales_people": sales_people}
 
 
-@router.get("/salespeople")
-def home():
-    # 1. Fetch all salespeople and gather their codes
-    sales_people = list(db.users.find({"role": "sales_person"}))
-    sales_people = serialize_mongo_document(sales_people)
-    codes = [sp["code"] for sp in sales_people if sp.get("code")]
-
-    # 2. Build a single regex pattern that includes all codes: \b(CODE1|CODE2)\b
-    if codes:
-        escaped_codes = [re.escape(c) for c in codes]
-        combined_pattern = rf"\b({'|'.join(escaped_codes)})\b"
-    else:
-        combined_pattern = None
-
-    # 3. Single query for all 'active' customers that are either:
-    #    - "Defaulter"
-    #    - "Company customers"
-    #    - or match the combined regex (case-insensitive) in cf_sales_person
-    or_conditions = [
-        {"cf_sales_person": "Defaulter"},
-        {"cf_sales_person": "Company customers"},
-    ]
-    if combined_pattern:
-        or_conditions.append(
-            {"cf_sales_person": {"$regex": combined_pattern, "$options": "i"}}
-        )
-
-    customers_cursor = db.customers.find({"status": "active", "$or": or_conditions})
-    all_customers = serialize_mongo_document(list(customers_cursor))
-
-    # 4. Group customers by salesperson code
-    grouped_by_code = defaultdict(list)
-    defaulters = []
-    company_customers = []
-
-    for cust in all_customers:
-        cf_value = cust.get("cf_sales_person")
-
-        # If exactly "Defaulter" or "Company customers", store in special lists
-        if cf_value == "Defaulter":
-            defaulters.append(cust)
-            continue
-        elif cf_value == "Company customers":
-            company_customers.append(cust)
-            continue
-
-        # Otherwise, cf_sales_person could be a string or array
-        # Normalize to a list so we can handle both in one pass
-        items = cf_value if isinstance(cf_value, list) else [cf_value]
-
-        # Check each item against each code to see if there's a match
-        for item in items:
-            for code in codes:
-                # \b ensures we match code as a separate word or token
-                if re.search(rf"\b{re.escape(code)}\b", str(item), re.IGNORECASE):
-                    grouped_by_code[code].append(cust)
-                    # If a customer can match multiple codes, remove this `break`
-                    break
-
-    # 5. Attach customers to each salesperson
-    for sp in sales_people:
-        code = sp.get("code")
-        if code:
-            # Their specific matches + universal defaulters + company customers
-            sp["customers"] = (
-                grouped_by_code.get(code, []) + defaulters + company_customers
-            )
-        else:
-            sp["customers"] = defaulters + company_customers
-
-    return {"users": sales_people}
-
-
-@router.get("/salespeople/customers")
-def get_salespeople_customers():
-    users_cursor = db.users.find({"role": "sales_person"})
-    users = serialize_mongo_document(list(users_cursor))
-    return {"users": users}
-
-
-@router.post("/salespeople")
-async def create_salesperson(salesperson: dict):
-    # Check if salesperson code or email already exists
-    existing_person = next(
-        (
-            sp
-            for sp in db.users.find({})
-            if sp.get("email") == salesperson.get("email")
-            or sp.get("code") == salesperson.get("code")
-        ),
-        None,
-    )
-    if existing_person:
-        raise HTTPException(
-            status_code=400,
-            detail="Salesperson with this email or code already exists.",
-        )
-
-    # Add salesperson to the collection
-    db.users.insert_one(salesperson)
-    return "Sales Person Created"
-
-
-@router.get("/salespeople/{salesperson_id}")
-def salesperson(salesperson_id: str):
-    users_cursor = db.users.find_one({"_id": ObjectId(salesperson_id)})
-    sales_person = serialize_mongo_document(dict(users_cursor))
-
-    # Prepare the result
-    sales_person_code = sales_person.get("code")
-
-    if sales_person_code:
-        escaped_sales_person = re.escape(sales_person_code)
-        # Fetch customers assigned to the salesperson
-        customers_cursor = db.customers.find(
-            {
-                "$or": [
-                    {
-                        "cf_sales_person": {
-                            "$regex": f"^{escaped_sales_person}$",
-                            "$options": "i",
-                        }
-                    },
-                    {"cf_sales_person": "Defaulter"},
-                    {"cf_sales_person": "Company customers"},
-                ],
-                "status": "active",
-            }
-        )
-        sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
-    else:
-        # Assign customers with "Defaulter" or "Company customers" to all salespeople
-        customers_cursor = db.customers.find(
-            {
-                "$or": [
-                    {"cf_sales_person": "Defaulter"},
-                    {"cf_sales_person": "Company customers"},
-                ],
-                "status": "active",
-            }
-        )
-        sales_person["customers"] = serialize_mongo_document(list(customers_cursor))
-
-    return {"sales_person": sales_person}
-
-
-@router.put("/salespeople/{salesperson_id}")
-def salespeople_id(salesperson_id: str, salesperson: dict):
-    update_data = {k: v for k, v in salesperson.items() if k != "_id" and v is not None}
-
-    if not update_data:
-        raise HTTPException(
-            status_code=400, detail="No valid fields provided for update"
-        )
-
-    # Perform the update
-    result = db.users.update_one(
-        {"_id": ObjectId(salesperson_id)},
-        {"$set": update_data},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Sales Person not found")
-    return {"message": "Sales Person Updated"}
-
-
 @router.put("/customers/bulk-update")
 async def bulk_update_customers(payload: dict):
     """
@@ -930,153 +799,6 @@ async def bulk_update_customers(payload: dict):
     }
 
 
-@router.get("/customer/special_margins/{customer_id}")
-def get_customer_special_margins(customer_id: str):
-    """
-    Retrieve all special margin products for the given customer.
-    """
-    special_margins = [
-        serialize_mongo_document(doc)
-        for doc in db.special_margins.find({"customer_id": ObjectId(customer_id)})
-    ]
-    # Convert ObjectIds to strings for JSON serializability
-    return {"products": special_margins}
-
-
-@router.post("/customer/special_margins/bulk/{customer_id}")
-def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(...)):
-    """
-    Create or update multiple special margin entries in bulk for a given customer using update_many.
-    """
-    if not data:
-        raise HTTPException(status_code=400, detail="Request body cannot be empty.")
-
-    try:
-        if not ObjectId.is_valid(customer_id):
-            raise HTTPException(status_code=400, detail="Invalid customer_id")
-        customer_obj_id = ObjectId(customer_id)
-
-        for item in data:
-            if not all(k in item for k in ("product_id", "name", "margin")):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Each item must have 'product_id', 'name', and 'margin'.",
-                )
-
-            if not ObjectId.is_valid(item["product_id"]):
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid product_id: {item['product_id']}"
-                )
-
-            product_obj_id = ObjectId(item["product_id"])
-
-            # Use update_many to update or insert
-            db.special_margins.update_one(
-                {"customer_id": customer_obj_id, "product_id": product_obj_id},
-                {
-                    "$set": {
-                        "name": item["name"],
-                        "margin": item["margin"],
-                        "customer_id": customer_obj_id,
-                        "product_id": product_obj_id,
-                    }
-                },
-                upsert=True,
-            )
-
-        return {"message": "Bulk operation completed successfully."}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-@router.post("/customer/special_margins/{customer_id}")
-def create_customer_special_margin(customer_id: str, data: dict = Body(...)):
-    """
-    Create a new special margin entry for a given customer.
-    Expects data like:
-      {
-        "product_id": "XYZ123",
-        "name": "Some Product",
-        "margin": "50%"
-      }
-    """
-    if not data.get("product_id") or not data.get("name") or not data.get("margin"):
-        raise HTTPException(
-            status_code=400, detail="product_id, name, and margin are required."
-        )
-    existing = db.special_margins.find_one(
-        {
-            "customer_id": ObjectId(customer_id),
-            "product_id": ObjectId(data["product_id"]),
-        }
-    )
-    if existing:
-        # Already exists -> return 409 conflict
-        return "Product Margin Already Exists"
-
-    # Optionally validate that the passed customer_id & product_id are valid ObjectIds
-    # if not ObjectId.is_valid(customer_id) or not ObjectId.is_valid(data["product_id"]):
-    #     raise HTTPException(status_code=400, detail="Invalid ObjectId")
-
-    # Insert into DB as actual ObjectIds
-    new_margin = {
-        "customer_id": ObjectId(customer_id),
-        "product_id": ObjectId(data["product_id"]),
-        "name": data["name"],
-        "margin": data["margin"],
-    }
-
-    result = db.special_margins.insert_one(new_margin)
-
-    # Convert for the response
-    response_margin = {
-        "_id": str(result.inserted_id),
-        "customer_id": str(customer_id),
-        "product_id": str(data["product_id"]),
-        "name": data["name"],
-        "margin": data["margin"],
-    }
-    return {
-        "message": "Special margin created successfully.",
-        "product": response_margin,
-    }
-
-
-@router.delete("/customer/special_margins/{customer_id}/bulk")
-def delete_all_customer_special_margins(customer_id: str):
-    """
-    Delete all special margin entries for a specific customer.
-    """
-    result = db.special_margins.delete_many({"customer_id": ObjectId(customer_id)})
-    if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="No special margins found for the specified customer or already deleted.",
-        )
-    return {
-        "message": f"Successfully deleted {result.deleted_count} special margin(s)."
-    }
-
-
-@router.delete("/customer/special_margins/{customer_id}/{special_margin_id}")
-def delete_customer_special_margin(customer_id: str, special_margin_id: str):
-    """
-    Delete a specific special margin entry by _id (special_margin_id).
-    """
-    result = db.special_margins.delete_one(
-        {"_id": ObjectId(special_margin_id), "customer_id": ObjectId(customer_id)}
-    )
-    if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=404, detail="Special margin not found or already deleted."
-        )
-    return {"message": "Special margin deleted successfully."}
-
-
-MAX_FILE_SIZE_MB = 10
-
-
 @router.post("/upload-image")
 async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)):
     # Validate file type
@@ -1122,279 +844,33 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         file.file.close()
 
 
-@router.get("/catalogues")
-def get_catalogues(
-    page: int = Query(0, ge=0, description="0-based page index"),
-    limit: int = Query(10, ge=1, description="Number of items per page"),
-):
-    try:
-        match_statement = {}
-        pipeline = [
-            {"$match": match_statement},
-            {"$skip": page * limit},
-            {"$limit": limit},
-        ]
-        total_count = db.catalogues.count_documents(match_statement)
-        cursor = db.catalogues.aggregate(pipeline)
-        cat = [serialize_mongo_document(doc) for doc in cursor]
-        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
-
-        # Validate page number
-        if page > total_pages and total_pages != 0:
-            raise HTTPException(status_code=400, detail="Page number out of range")
-        return {
-            "catalogues": cat,
-            "total_count": total_count,
-            "page": page,
-            "per_page": limit,
-            "total_pages": total_pages,
-        }
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.delete("/catalogues/{catalogue_id}")
-def delete_catalogue(catalogue_id: str):
-    """
-    Delete a catalogue by its ID.
-    This example performs a hard delete.
-    For a soft delete (mark as inactive), you can update the document instead.
-    """
-    try:
-        doc = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
-        result = db.catalogues.update_one(
-            {"_id": ObjectId(catalogue_id)},
-            {"$set": {"is_active": not doc.get("is_active")}},
-        )
-        if result.modified_count == 1:
-            return {"detail": "Catalogue deleted successfully (soft delete)"}
-        else:
-            raise HTTPException(status_code=404, detail="Catalogue not found")
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/catalogues")
-def create_catalouge(catalogue: dict):
-    """
-    Update the catalogue with the provided fields.
-    Only the fields sent in the request will be updated.
-    """
-    try:
-        # Build a dictionary of fields to update (skip any that are None)
-        update_data = {k: v for k, v in catalogue.items() if v is not None}
-        if not update_data:
-            raise HTTPException(status_code=400, detail="No update data provided")
-
-        result = db.catalogues.insert_one({**update_data})
-
-        if result:
-            # Fetch and return the updated document.
-            return "Document Created"
-        else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.put("/catalogues/{catalogue_id}")
-def update_catalogue(catalogue_id: str, catalogue: dict):
-    """
-    Update the catalogue with the provided fields.
-    Only the fields sent in the request will be updated.
-    """
-    try:
-        # Build a dictionary of fields to update (skip any that are None)
-        update_data = {k: v for k, v in catalogue.items() if v is not None}
-        if not update_data:
-            raise HTTPException(status_code=400, detail="No update data provided")
-
-        result = db.catalogues.update_one(
-            {"_id": ObjectId(catalogue_id)}, {"$set": update_data}
-        )
-
-        if result.modified_count == 1:
-            # Fetch and return the updated document.
-            updated_catalogue = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
-            return serialize_mongo_document(updated_catalogue)
-        else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/catalogues/upload")
-async def upload_catalogue(file: UploadFile = File(...)):
-    """
-    Stream a large catalogue file directly to an S3 bucket.
-    The file is uploaded in a memory‑efficient way using boto3's upload_fileobj.
-    """
-    try:
-        # Create a unique key for the file in the bucket
-        file_extension = file.filename.split(".")[-1]
-        if file_extension.lower() != "pdf":
-            raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
-        file_key = f"catalogues/{uuid.uuid4()}.pdf"
-
-        # Upload the file using the file's file-like object.
-        # This streams the file without reading it fully into memory.
-        s3_client.upload_fileobj(
-            file.file,
-            AWS_S3_BUCKET_NAME,
-            file_key,
-            ExtraArgs={"ContentType": "application/pdf"},
-        )
-
-        # Construct the file URL. This URL pattern depends on your S3 configuration.
-        file_url = f"{AWS_S3_URL}/{file_key}"
-        return {"file_url": file_url}
-    except Exception as e:
-        # Log the exception as needed
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/trainings")
-def get_trainings(
-    page: int = Query(0, ge=0, description="0-based page index"),
-    limit: int = Query(10, ge=1, description="Number of items per page"),
-):
-    try:
-        match_statement = {}
-        pipeline = [
-            {"$match": match_statement},
-            {"$skip": page * limit},
-            {"$limit": limit},
-        ]
-        total_count = db.trainings.count_documents(match_statement)
-        cursor = db.trainings.aggregate(pipeline)
-        cat = [serialize_mongo_document(doc) for doc in cursor]
-        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
-
-        # Validate page number
-        if page > total_pages and total_pages != 0:
-            raise HTTPException(status_code=400, detail="Page number out of range")
-        return {
-            "trainings": cat,
-            "total_count": total_count,
-            "page": page,
-            "per_page": limit,
-            "total_pages": total_pages,
-        }
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.delete("/trainings/{training_id}")
-def delete_training(training_id: str):
-    """
-    Delete a training by its ID.
-    This example performs a hard delete.
-    For a soft delete (mark as inactive), you can update the document instead.
-    """
-    try:
-        doc = db.trainings.find_one({"_id": ObjectId(training_id)})
-        result = db.trainings.update_one(
-            {"_id": ObjectId(training_id)},
-            {"$set": {"is_active": not doc.get("is_active")}},
-        )
-        if result.modified_count == 1:
-            return {"detail": "Catalogue deleted successfully (soft delete)"}
-        else:
-            raise HTTPException(status_code=404, detail="Catalogue not found")
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/trainings")
-def create_training(trainings: dict):
-    """
-    Update the catalogue with the provided fields.
-    Only the fields sent in the request will be updated.
-    """
-    try:
-        # Build a dictionary of fields to update (skip any that are None)
-        update_data = {k: v for k, v in trainings.items() if v is not None}
-        if not update_data:
-            raise HTTPException(status_code=400, detail="No update data provided")
-
-        result = db.trainings.insert_one({**update_data})
-
-        if result:
-            # Fetch and return the updated document.
-            template = db.templates.find_one({"name": "training_video_creation"})
-            notify_all_salespeople(db, template, {})
-            return "Document Created"
-        else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.put("/trainings/{training_id}")
-def update_catalogue(training_id: str, training: dict):
-    """
-    Update the training with the provided fields.
-    Only the fields sent in the request will be updated.
-    """
-    try:
-        # Build a dictionary of fields to update (skip any that are None)
-        update_data = {k: v for k, v in training.items() if v is not None}
-        if not update_data:
-            raise HTTPException(status_code=400, detail="No update data provided")
-
-        result = db.trainings.update_one(
-            {"_id": ObjectId(training_id)}, {"$set": update_data}
-        )
-
-        if result.modified_count == 1:
-            # Fetch and return the updated document.
-            updated_catalogue = db.trainings.find_one({"_id": ObjectId(training_id)})
-            return serialize_mongo_document(updated_catalogue)
-        else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/trainings/upload")
-async def upload_training(file: UploadFile = File(...)):
-    """
-    Stream a large training file directly to an S3 bucket.
-    The file is uploaded in a memory‑efficient way using boto3's upload_fileobj.
-    """
-    try:
-        # Create a unique key for the file in the bucket
-        file_extension = file.filename.split(".")[-1]
-        if file_extension.lower() != "mp4":
-            raise HTTPException(status_code=400, detail="Only MP4 files are allowed.")
-        file_key = f"trainings/{uuid.uuid4()}.mp4"
-
-        # Upload the file using the file's file-like object.
-        # This streams the file without reading it fully into memory.
-        s3_client.upload_fileobj(
-            file.file,
-            AWS_S3_BUCKET_NAME,
-            file_key,
-            ExtraArgs={"ContentType": "application/mp4"},
-        )
-
-        # Construct the file URL. This URL pattern depends on your S3 configuration.
-        file_url = f"{AWS_S3_URL}/{file_key}"
-        return {"file_url": file_url}
-    except Exception as e:
-        # Log the exception as needed
-        raise HTTPException(status_code=500, detail=str(e))
+router.include_router(
+    admin_special_margins_router,
+    prefix="/customer/special_margins",
+    tags=["Admin Sales People"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_salespeople_router,
+    prefix="/salespeople",
+    tags=["Admin Sales People"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_catalogues_router,
+    prefix="/catalogues",
+    tags=["Admin Catalogues"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_trainings_router,
+    prefix="/trainings",
+    tags=["Admin Trainings"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_announcements_router,
+    prefix="/announcements",
+    tags=["Admin Announcments"],
+    dependencies=[Depends(JWTBearer())],
+)

@@ -440,7 +440,8 @@ def notify_all_salespeople(db, template, params):
         template_doc = {**template}
         parameters = {"name": name, **params}
         if phone != "":
-            send_whatsapp(phone, template_doc, parameters)
+            x = send_whatsapp(phone, template_doc, parameters)
+            print(x)
     pass
 
 
