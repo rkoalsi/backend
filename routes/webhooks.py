@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
+from backend.config.whatsapp import send_whatsapp  # type: ignore
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
@@ -79,26 +80,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
             )
-            body = f"""
-            Hi Admin,
-
-            This is a notification reminder that a new product has been added to the order form. 
-            
-            The following product information has been added and marked as inactive :
-
-            Product Name: {item_name}
-            Brand: {brand_name}
-
-            Please fill in the required details before making it active (image, series, sub-category and category)
-
-            Thanks,
-            Pupscribe Team
-            """
-            send_email(
-                subject=f"New Item Addded",
-                body=body,
-                email=os.getenv("ITEM_EMAIL_TO"),
-                cc=os.getenv("ITEM_EMAIL_CC"),
+            template = serialize_mongo_document(
+                dict(db.templates.find_one({"name": "item_creation_update"}))
+            )
+            send_whatsapp(
+                to=os.getenv("NOTIFY_NUMBER_TO_CC1"),
+                template_doc=template,
+                params={"name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME")},
             )
             background_tasks.add_task(run_update_stock)
         else:
@@ -488,7 +476,7 @@ def handle_invoice(data: dict):
             today = datetime.datetime.utcnow().date()
             due_date_only = due_date.date()
             if due_date_only == today and invoice_status == "overdue":
-                email_params = {
+                msg_params = {
                     "to": os.getenv("OVERDUE_ADMIN_TO"),
                     "invoice_number": invoice.get("invoice_number", ""),
                     "created_at": invoice.get("date", ""),
@@ -500,7 +488,7 @@ def handle_invoice(data: dict):
                     "invoice_id": invoice_id,
                 }
                 schedule_job(
-                    email_params,
+                    msg_params,
                     run_date=datetime.datetime.now() + datetime.timedelta(minutes=1),
                     job_suffix="due_date",
                 )
@@ -529,7 +517,7 @@ def handle_invoice(data: dict):
             name = sp.get("name")
             email = sp.get("email")
             phone = sp.get("phone")
-            email_params = {
+            msg_params = {
                 "to": phone,
                 "invoice_number": invoice_number,
                 "created_at": created_at,
@@ -542,9 +530,9 @@ def handle_invoice(data: dict):
             }
             one_week_before = due_date - datetime.timedelta(weeks=1)
             if one_week_before > datetime.datetime.now():
-                email_params["type"] = "one_week_before"
+                msg_params["type"] = "one_week_before"
                 schedule_job(
-                    email_params,
+                    msg_params,
                     run_date=one_week_before + datetime.timedelta(hours=10),
                     job_suffix="one_week_before",
                 )
@@ -557,10 +545,24 @@ def handle_invoice(data: dict):
                 )
 
             # Schedule email on due_date
-            if due_date > datetime.datetime.now():
-                email_params["type"] = "due_date"
+            current_dt = datetime.datetime.now()
+            current_date = current_dt.date()
+            if due_date.date() == current_date:
+                # If due_date is today, execute now (or schedule immediately)
+                msg_params["type"] = "due_date"
                 schedule_job(
-                    email_params,
+                    msg_params,
+                    run_date=current_dt,  # execute immediately
+                    job_suffix="due_date",
+                )
+                print(
+                    f"Scheduled due-date email for invoice {invoice_number} to {email} to run immediately since due_date {due_date} is today."
+                )
+            elif due_date > current_dt:
+                # due_date is in the future (and not today), schedule as before
+                msg_params["type"] = "due_date"
+                schedule_job(
+                    msg_params,
                     run_date=due_date + datetime.timedelta(hours=10),
                     job_suffix="due_date",
                 )
@@ -571,7 +573,6 @@ def handle_invoice(data: dict):
                 print(
                     f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {email}."
                 )
-
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
