@@ -86,7 +86,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
             send_whatsapp(
                 to=os.getenv("NOTIFY_NUMBER_TO_CC1"),
                 template_doc=template,
-                params={"name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME")},
+                params={
+                    "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
+                    "item_name": item.get("name", ""),
+                    "brand": (
+                        brand_name.capitalize() if brand_name != "FOFOS" else brand_name
+                    ),
+                },
             )
             background_tasks.add_task(run_update_stock)
         else:

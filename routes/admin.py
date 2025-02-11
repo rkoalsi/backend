@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, Response
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
-from .helpers import get_access_token
+from .helpers import get_access_token, notify_all_salespeople
 from typing import Optional
 import re, requests, os
 from collections import defaultdict
@@ -1314,7 +1314,7 @@ def delete_training(training_id: str):
 
 
 @router.post("/trainings")
-def create_catalouge(trainings: dict):
+def create_training(trainings: dict):
     """
     Update the catalogue with the provided fields.
     Only the fields sent in the request will be updated.
@@ -1329,6 +1329,8 @@ def create_catalouge(trainings: dict):
 
         if result:
             # Fetch and return the updated document.
+            template = db.templates.find_one({"name": "training_video_creation"})
+            notify_all_salespeople(db, template, {})
             return "Document Created"
         else:
             # It’s possible that the document was not found or that no changes were made.
