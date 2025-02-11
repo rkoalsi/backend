@@ -442,3 +442,15 @@ def notify_all_salespeople(db, template, params):
         if phone != "":
             send_whatsapp(phone, template_doc, parameters)
     pass
+
+
+def notify_all_sales_admins(db, template, params):
+    all_sales_admins = db.users.find({"status": "active", "role": "sales_admin"})
+    for sales_admin in all_sales_admins:
+        phone = sales_admin.get("phone")
+        name = sales_admin.get("first_name")
+        template_doc = {**template}
+        parameters = {"name": name, **params}
+        if phone != "":
+            send_whatsapp(phone, template_doc, parameters)
+    pass

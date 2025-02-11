@@ -83,17 +83,29 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
             template = serialize_mongo_document(
                 dict(db.templates.find_one({"name": "item_creation_update"}))
             )
-            send_whatsapp(
-                to=os.getenv("NOTIFY_NUMBER_TO_CC1"),
-                template_doc=template,
-                params={
+            to_notify = [
+                {
                     "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
+                    "phone": os.getenv("NOTIFY_NUMBER_TO_CC1"),
+                },
+                {
+                    "name": os.getenv("NOTIFY_NUMBER_TO_CC3_NAME"),
+                    "phone": os.getenv("NOTIFY_NUMBER_TO_CC3"),
+                },
+            ]
+            for person in to_notify:
+                params = {
+                    "name": person["name"],
                     "item_name": item.get("name", ""),
                     "brand": (
                         brand_name.capitalize() if brand_name != "FOFOS" else brand_name
                     ),
-                },
-            )
+                }
+                send_whatsapp(
+                    to=person["phone"],
+                    template_doc=template,
+                    params=params,
+                )
             background_tasks.add_task(run_update_stock)
         else:
             print("Item Exists")
