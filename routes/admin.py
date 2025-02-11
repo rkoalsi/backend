@@ -98,15 +98,15 @@ async def get_stats():
         recent_orders = db["orders"].count_documents(
             {"created_at": {"$gte": start_of_today_ist}}
         )
-        active_catalogues = db["catalogues"].count_documents({"status": "active"})
-        inactive_catalogues = db["catalogues"].count_documents({"status": "inactive"})
+        active_catalogues = db["catalogues"].count_documents({"is_active": True})
+        inactive_catalogues = db["catalogues"].count_documents({"is_active": False})
 
-        active_trainings = db["trainings"].count_documents({"status": "active"})
-        inactive_trainings = db["trainings"].count_documents({"status": "inactive"})
+        active_trainings = db["trainings"].count_documents({"is_active": True})
+        inactive_trainings = db["trainings"].count_documents({"is_active": False})
 
-        active_announcements = db["announcements"].count_documents({"status": "active"})
+        active_announcements = db["announcements"].count_documents({"is_active": True})
         inactive_announcements = db["announcements"].count_documents(
-            {"status": "inactive"}
+            {"is_active": False}
         )
         today_str = date.today().isoformat()
 
