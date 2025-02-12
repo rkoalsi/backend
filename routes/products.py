@@ -78,10 +78,14 @@ def get_products(
     brand: Optional[str] = Query(None, description="Filter by brand"),
     category: Optional[str] = Query(None, description="Filter by category"),
     search: Optional[str] = Query(None, description="Search term for name or SKU code"),
+    sort: Optional[str] = Query(
+        "default", description="Sort order: default, price_asc, price_desc"
+    ),
 ):
     """
-    Retrieves paginated products with optional brand, category, and search filters,
-    sorted such that new products appear first within each brand.
+    Retrieves paginated products with optional brand, category, and search filters.
+    The default sort shows new products first within each brand.
+    Additional sort orders by price (ascending or descending) are supported.
     """
     # Define base query
     query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
@@ -106,6 +110,25 @@ def get_products(
     # Define the threshold date (three months ago)
     three_months_ago = datetime.now() - relativedelta(months=3)
 
+    # Compute sort stage based on sort parameter
+    if sort == "price_asc":
+        # Sort by price ascending; you can add additional tie-breakers if needed
+        sort_stage = {"rate": ASCENDING}
+    elif sort == "price_desc":
+        # Sort by price descending
+        sort_stage = {"rate": DESCENDING}
+    else:
+        # Default sort: new products first (within each brand) and then by other fields
+        sort_stage = {
+            "brand": ASCENDING,
+            "new": DESCENDING,  # New products first within each brand
+            "category": ASCENDING,
+            "sub_category": ASCENDING,
+            "series": ASCENDING,
+            "rate": ASCENDING,
+            "name": ASCENDING,
+        }
+
     # Aggregation Pipeline
     pipeline = [
         {"$match": query},
@@ -120,17 +143,7 @@ def get_products(
                 }
             }
         },
-        {
-            "$sort": {
-                "brand": ASCENDING,
-                "new": DESCENDING,  # New products first within each brand
-                "category": ASCENDING,
-                "sub_category": ASCENDING,
-                "series": ASCENDING,
-                "rate": ASCENDING,
-                "name": ASCENDING,
-            }
-        },
+        {"$sort": sort_stage},
         {"$skip": (page - 1) * per_page},
         {"$limit": per_page},
     ]
@@ -154,7 +167,7 @@ def get_products(
 
     # Calculate total pages
     total_pages = (
-        (total_products + per_page - 1) // per_page if total_products > 0 else 1
+        ((total_products + per_page - 1) // per_page) if total_products > 0 else 1
     )
 
     # Validate page number
@@ -168,7 +181,7 @@ def get_products(
         "per_page": per_page,
         "total_pages": total_pages,
         "brand": brand,
-        "category": category,  # Include category in the response if needed
+        "category": category,
         "search": search,
     }
 
