@@ -21,7 +21,7 @@ users_collection = db["users"]
 @router.get("")
 def home():
     # 1. Fetch all salespeople and gather their codes
-    sales_people = list(db.users.find({"role": "sales_person"}))
+    sales_people = list(db.users.find({"code": {"$exists": True}}))
     sales_people = serialize_mongo_document(sales_people)
     codes = [sp["code"] for sp in sales_people if sp.get("code")]
 
