@@ -566,6 +566,21 @@ def read_all_orders(
             }
         },
         {
+            "$lookup": {
+                "from": "users",
+                "localField": "invoice_notes.created_by",
+                "foreignField": "_id",
+                "as": "user_created_by",
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$user_created_by",  # note the change from "$note_created_by" to "$user_created_by"
+                "preserveNullAndEmptyArrays": True,
+            }
+        },
+        # Project the necessary fields and replace created_by with the user's first name
+        {
             "$project": {
                 "created_at": 1,
                 "total": 1,
@@ -573,7 +588,6 @@ def read_all_orders(
                 "balance": 1,
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
-                "created_by_name": 1,
                 "salesperson_name": 1,
                 "customer_id": 1,
                 "customer_name": 1,
@@ -581,6 +595,7 @@ def read_all_orders(
                 "invoice_number": 1,
                 "invoice_id": 1,
                 "line_items": 1,
+                "created_by_name": 1,
                 "overdue_by_days": {
                     "$dateDiff": {
                         "startDate": {"$dateFromString": {"dateString": "$due_date"}},
@@ -589,6 +604,8 @@ def read_all_orders(
                     }
                 },
                 "invoice_notes": 1,
+                # Replace the invoice note's created_by with the user's first name
+                "note_created_by_name": "$user_created_by.first_name",
             }
         },
         # Now sort by the converted due_date
@@ -697,6 +714,8 @@ def download_payments_due_csv(sales_person: str):
         "Created By",
         "Total",
         "Balance",
+        "Additional Information",
+        "Images",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
@@ -716,6 +735,10 @@ def download_payments_due_csv(sales_person: str):
                 "Created By": invoice.get("created_by_name"),
                 "Total": invoice.get("total"),
                 "Balance": invoice.get("balance"),
+                "Additional Information": invoice.get("invoice_notes", {}).get(
+                    "additional_info", ""
+                ),
+                "Images": ", ".join(invoice.get("invoice_notes", {}).get("images", [])),
             }
         )
 
