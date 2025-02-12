@@ -464,10 +464,7 @@ async def finalise(order_dict: dict):
         special_margin = special_margin_dict.get(
             product_id_str, customer.get("cf_margin", "40%")
         )
-        # Optional: Validate the format of special_margin
-        if isinstance(special_margin, str) and re.match(r"^\d+%$", special_margin):
-            discount_value = special_margin
-
+        discount_value = special_margin
         if not discount_value.endswith("%"):
             discount_value = f"{discount_value}%"
         obj = {
