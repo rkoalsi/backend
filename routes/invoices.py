@@ -184,7 +184,7 @@ async def create_invoice_note(
                     unique_filename,
                     ExtraArgs={"ContentType": image.content_type},
                 )
-                saved_images.append(f"{os.getenv("S3_URL")}/{unique_filename}")
+                saved_images.append(f"{os.getenv('S3_URL')}/{unique_filename}")
             except Exception as e:
                 raise HTTPException(
                     status_code=500, detail=f"Error uploading image: {str(e)}"
@@ -259,7 +259,7 @@ async def update_invoice_note(
                     unique_filename,
                     ExtraArgs={"ContentType": image.content_type},
                 )
-                saved_images.append(f"{os.getenv("S3_URL")}/{unique_filename}")
+                saved_images.append(f"{os.getenv('S3_URL')}/{unique_filename}")
             except Exception as e:
                 raise HTTPException(
                     status_code=500, detail=f"Error uploading image: {str(e)}"
