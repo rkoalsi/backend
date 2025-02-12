@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form
+from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Response
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from typing import Optional, List
 from bson import ObjectId
-import re, uuid, boto3, os
+import re, uuid, boto3, os, requests
 from datetime import date, datetime
 from urllib.parse import urlparse
+from .helpers import get_access_token
 
 router = APIRouter()
 
@@ -18,6 +19,10 @@ s3_client = boto3.client(
     region_name=os.getenv("S3_REGION"),
 )
 bucket_name = os.getenv("S3_BUCKET_NAME")
+
+org_id = os.getenv("ORG_ID")
+ESTIMATE_URL = os.getenv("ESTIMATE_URL")
+INVOICE_PDF_URL = os.getenv("INVOICE_PDF_URL")
 
 
 def get_invoice(
@@ -151,6 +156,7 @@ def get_invoices(
 @router.post("/notes")
 async def create_invoice_note(
     invoice_number: str = Form(...),
+    created_by: str = Form(...),
     additional_info: Optional[str] = Form(None),
     images: Optional[List[UploadFile]] = File(None),
 ):
@@ -194,6 +200,7 @@ async def create_invoice_note(
         "invoice_number": invoice_number,
         "additional_info": additional_info,
         "images": saved_images,
+        "created_by": ObjectId(created_by),
         "created_at": datetime.now(),
     }
 
@@ -241,8 +248,8 @@ async def update_invoice_note(
         raise HTTPException(
             status_code=404, detail="Invoice note not found. Please create one first."
         )
-
-    saved_images = []
+    print(note.get("images"))
+    saved_images = note.get("images", [])
     if images:
         for image in images:
             # Generate a unique filename for each image
@@ -311,6 +318,53 @@ async def delete_invoice_note_image(
         raise HTTPException(status_code=404, detail="Image not found in invoice note.")
 
     return {"message": "Image deleted successfully"}
+
+
+@router.get("/download_pdf/{invoice_id}")
+async def download_pdf(invoice_id: str = ""):
+    try:
+        # Check if the order exists in the database
+        invoice = db.invoices.find_one({"_id": ObjectId(invoice_id)})
+        if invoice is None:
+            raise HTTPException(status_code=404, detail="Invoice Not Found")
+
+        # Get the invoice_id and make the request to Zoho
+        invoice_id = invoice.get("invoice_id", "")
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        response = requests.get(
+            url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=invoice_id),
+            headers=headers,
+            allow_redirects=False,  # Prevent automatic redirects
+        )
+
+        # Check if the response from Zoho is successful (200)
+        if response.status_code == 200:
+            # Return the PDF content
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=order_{invoice_id}.pdf"
+                },
+            )
+        elif response.status_code == 307:
+            raise HTTPException(
+                status_code=307,
+                detail="Redirect encountered. Check Zoho endpoint or token.",
+            )
+        else:
+            # Raise an exception if Zoho's API returns an error
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch PDF: {response.text}",
+            )
+
+    except HTTPException as e:
+        print(f"HTTP Exception: {e.detail}")
+        raise e
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/{invoice_id}")
