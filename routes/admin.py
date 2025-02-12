@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 import boto3, datetime, io, csv
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
-from datetime import date
+from datetime import date, timedelta
 from .admin_trainings import router as admin_trainings_router
 from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
@@ -88,15 +88,23 @@ async def get_stats():
         total_sales_people = active_sales_people + inactive_sales_people
 
         # Orders Statistics
-        orders_draft = db["orders"].count_documents({"status": "draft"})
-        orders_accepted = db["orders"].count_documents({"status": "accepted"})
-        orders_declined = db["orders"].count_documents({"status": "declined"})
-        orders_invoiced = db["orders"].count_documents({"status": "invoiced"})
         ist = timezone("Asia/Kolkata")
         now_ist = datetime.datetime.now(ist)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         recent_orders = db["orders"].count_documents(
             {"created_at": {"$gte": start_of_today_ist}}
+        )
+        orders_draft = db["orders"].count_documents(
+            {"status": "draft", "created_at": {"$gte": start_of_today_ist}}
+        )
+        orders_accepted = db["orders"].count_documents(
+            {"status": "accepted", "created_at": {"$gte": start_of_today_ist}}
+        )
+        orders_declined = db["orders"].count_documents(
+            {"status": "declined", "created_at": {"$gte": start_of_today_ist}}
+        )
+        orders_invoiced = db["orders"].count_documents(
+            {"status": "invoiced", "created_at": {"$gte": start_of_today_ist}}
         )
         active_catalogues = db["catalogues"].count_documents({"is_active": True})
         inactive_catalogues = db["catalogues"].count_documents({"is_active": False})
@@ -108,13 +116,32 @@ async def get_stats():
         inactive_announcements = db["announcements"].count_documents(
             {"is_active": False}
         )
-        today_str = date.today().isoformat()
+        # Get today's date
+        today = date.today()
 
+        day_before_yesterday = today - timedelta(days=2)
+
+        # Convert both dates to ISO format (YYYY-MM-DD)
+        day_before_yesterday_str = day_before_yesterday.isoformat()
+        today_str = today.isoformat()
+        print(
+            {
+                "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
+                "status": {"$nin": ["paid"]},
+            }
+        )
+        # Get the overdue invoices for yesterday
         total_due_payments = db["invoices"].count_documents(
-            {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+            {
+                "due_date": {"$lt": today_str},
+                "status": {"$nin": ["paid"]},
+            }
         )
         total_due_payments_today = db["invoices"].count_documents(
-            {"due_date": {"$eq": today_str}, "status": {"$nin": ["paid"]}}
+            {
+                "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
+                "status": {"$nin": ["paid"]},
+            }
         )
         return {
             "active_stock_products": active_stock_products,
@@ -476,6 +503,7 @@ def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
     sales_person: str = Query(None, description="Filter by sales person"),
+    invoice_number: str = Query(None, description="Filter by Invoice number"),
 ):
     """
     Retrieve all invoices past their due_date with pagination.
@@ -507,6 +535,12 @@ def read_all_orders(
             },
         ]
 
+    if invoice_number:
+        query["invoice_number"] = {
+            "$regex": f"^{invoice_number.strip()}$",
+            "$options": "i",
+        }
+
     # Basic query stage for the aggregation pipeline
     match_stage = {"$match": query}
 
@@ -517,6 +551,20 @@ def read_all_orders(
     pipeline = [
         match_stage,
         # Project only the necessary fields
+        {
+            "$lookup": {
+                "from": "invoice_notes",  # Collection to join
+                "localField": "invoice_number",  # Field from the invoices collection
+                "foreignField": "invoice_number",  # Field from the invoice_notes collection
+                "as": "invoice_notes",  # The result will be an array of matching documents
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$invoice_notes",  # Unwind the array of invoice_notes
+                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+            }
+        },
         {
             "$project": {
                 "created_at": 1,
@@ -540,6 +588,7 @@ def read_all_orders(
                         "unit": "day",
                     }
                 },
+                "invoice_notes": 1,
             }
         },
         # Now sort by the converted due_date
@@ -587,6 +636,20 @@ def download_payments_due_csv(sales_person: str):
     pipeline = [
         match_stage,
         {
+            "$lookup": {
+                "from": "invoice_notes",  # Collection to join
+                "localField": "invoice_number",  # Field from the invoices collection
+                "foreignField": "invoice_number",  # Field from the invoice_notes collection
+                "as": "invoice_notes",  # The result will be an array of matching documents
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$invoice_notes",  # Unwind the array of invoice_notes
+                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+            }
+        },
+        {
             "$project": {
                 "created_at": 1,
                 "total": 1,
@@ -610,6 +673,7 @@ def download_payments_due_csv(sales_person: str):
                         "unit": "day",
                     }
                 },
+                "invoice_notes": 1,
             }
         },
         {"$sort": {"due_date": -1}},
