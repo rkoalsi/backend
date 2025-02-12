@@ -728,12 +728,12 @@ async def notify(order_dict: dict):
         for item in [
             {"name": salesperson_name, "phone": sales_person_phone},
             {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC4_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC4"),
             },
             {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC2_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC5_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC5"),
             },
         ]:
             params["salesperson_name"] = item["name"]
