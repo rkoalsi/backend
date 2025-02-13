@@ -124,12 +124,6 @@ async def get_stats():
         # Convert both dates to ISO format (YYYY-MM-DD)
         day_before_yesterday_str = day_before_yesterday.isoformat()
         today_str = today.isoformat()
-        print(
-            {
-                "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
-                "status": {"$nin": ["paid"]},
-            }
-        )
         # Get the overdue invoices for yesterday
         total_due_payments = db["invoices"].count_documents(
             {
