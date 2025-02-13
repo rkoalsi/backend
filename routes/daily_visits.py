@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from bson import ObjectId
 import boto3, os, uuid, logging, datetime, json
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from backend.config.whatsapp import send_whatsapp  # type: ignore
 
 router = APIRouter()
 
@@ -74,8 +75,19 @@ async def create_daily_visit(
         "created_at": datetime.datetime.now(),
     }
 
-    print(daily_visit)
-    db.daily_visits.insert_one({**daily_visit})
+    result = db.daily_visits.insert_one({**daily_visit})
+    user = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    created_by = db.users.find_one({"_id": ObjectId(created_by)})
+    template = db.templates.find_one({"name": "create_daily_visit"})
+    send_whatsapp(
+        user.get("phone"),
+        {**template},
+        {
+            "name": user.get("first_name", ""),
+            "salesperson_name": created_by.get("first_name", ""),
+            "button_url": f"{os.getenv('URL')}/daily_visits/{str(result.inserted_id)}",
+        },
+    )
     return JSONResponse(
         status_code=201,
         content={
@@ -232,7 +244,18 @@ async def update_daily_visit_update(
         {"$set": {"updates": updates, "updated_at": datetime.datetime.now()}},
     )
     updated_daily_visit = db.daily_visits.find_one({"_id": ObjectId(daily_visit_id)})
-
+    user = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    created_by = db.users.find_one({"_id": ObjectId(daily_visit.get("created_by", ""))})
+    template = db.templates.find_one({"name": "update_daily_visit"})
+    send_whatsapp(
+        user.get("phone"),
+        {**template},
+        {
+            "name": user.get("first_name", ""),
+            "salesperson_name": created_by.get("first_name", ""),
+            "button_url": f"{os.getenv('URL')}/daily_visits/{daily_visit_id}",
+        },
+    )
     return JSONResponse(
         status_code=200,
         content={
