@@ -874,7 +874,7 @@ def handle_draft_invoice(data: dict):
         for person in [member1, member2]:
             params = {
                 "name": person.get("first_name"),
-                "sales_order_number": invoice_number,
+                "invoice_number": invoice_number,
             }
             send_whatsapp(person.get("phone"), {**template}, {**params})
     else:
