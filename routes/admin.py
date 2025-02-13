@@ -138,6 +138,13 @@ async def get_stats():
                 "status": {"$nin": ["paid"]},
             }
         )
+        submitted_daily_visits = db["daily_visits"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
+        updated_daily_visits = db["daily_visits"].count_documents(
+            {"updates": {"$exists": True}, "created_at": {"$gte": start_of_today_ist}}
+        )
+
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
@@ -164,6 +171,8 @@ async def get_stats():
             "inactive_announcements": inactive_announcements,
             "total_due_payments": total_due_payments,
             "total_due_payments_today": total_due_payments_today,
+            "submitted_daily_visits": submitted_daily_visits,
+            "updated_daily_visits": updated_daily_visits,
         }
 
     except Exception as e:
