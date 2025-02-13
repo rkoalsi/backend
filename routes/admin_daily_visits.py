@@ -11,6 +11,8 @@ router = APIRouter()
 
 client, db = connect_to_mongo()
 
+IST_OFFSET = 19800000
+
 
 @router.get("")
 async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge=1)):
@@ -29,6 +31,57 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
         {"$skip": skip},
         {"$limit": limit},
+        {
+            "$addFields": {
+                "created_at": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "date": {"$add": ["$created_at", IST_OFFSET]},
+                    }
+                },
+                "updated_at": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "date": {"$add": ["$updated_at", IST_OFFSET]},
+                    }
+                },
+                "updates": {
+                    "$map": {
+                        "input": {"$ifNull": ["$updates", []]},
+                        "as": "update",
+                        "in": {
+                            "$mergeObjects": [
+                                "$$update",
+                                {
+                                    "created_at": {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d %H:%M:%S",
+                                            "date": {
+                                                "$add": [
+                                                    "$$update.created_at",
+                                                    IST_OFFSET,
+                                                ]
+                                            },
+                                        }
+                                    },
+                                    "updated_at": {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d %H:%M:%S",
+                                            "date": {
+                                                "$add": [
+                                                    "$$update.updated_at",
+                                                    IST_OFFSET,
+                                                ]
+                                            },
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                },
+            }
+        },
     ]
 
     try:
@@ -49,7 +102,6 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
         # Remove the lookup field.
         if "created_by_info" in visit:
             del visit["created_by_info"]
-
     return JSONResponse(
         status_code=200,
         content={

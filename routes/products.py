@@ -7,7 +7,7 @@ from pymongo import ASCENDING, DESCENDING
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import Optional
-import os
+import os, json
 
 router = APIRouter()
 
@@ -20,6 +20,48 @@ def get_product(product_id: str, collection: Collection):
     if not product:
         return "Product Not Found"
     return serialize_mongo_document(product)
+
+
+@router.get("/counts")
+def get_product_counts():
+    """
+    Returns the number of active products grouped by brand and category.
+    """
+    try:
+        base_query = {
+            "stock": {"$gt": 0},
+            "is_deleted": {"$exists": False},
+            "status": "active",
+        }
+
+        pipeline = [
+            {"$match": base_query},
+            {
+                "$group": {
+                    "_id": {"brand": "$brand", "category": "$category"},
+                    "count": {"$sum": 1},
+                }
+            },
+        ]
+
+        counts = list(db.products.aggregate(pipeline))
+        print(json.dumps(counts, indent=4))
+        # Format counts into a nested dict: { brand: { category: count, ... }, ... }
+        result = {}
+        for item in counts:
+            brand = item["_id"]["brand"]
+            # Provide a default value if 'category' doesn't exist
+            category = item["_id"].get("category", "Uncategorized")
+            if brand not in result:
+                result[brand] = {}
+            result[brand][category] = item["count"]
+
+        print(result)
+        return result
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to get product counts")
 
 
 @router.get("/brands")
