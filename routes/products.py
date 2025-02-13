@@ -45,13 +45,15 @@ def get_product_counts():
         ]
 
         counts = list(db.products.aggregate(pipeline))
-        print(json.dumps(counts, indent=4))
+        print(json.dumps(pipeline, indent=4))
         # Format counts into a nested dict: { brand: { category: count, ... }, ... }
         result = {}
         for item in counts:
             brand = item["_id"]["brand"]
-            # Provide a default value if 'category' doesn't exist
-            category = item["_id"].get("category", "Uncategorized")
+            # Skip items that don't have a category key so they won't be counted
+            if "category" not in item["_id"]:
+                continue
+            category = item["_id"]["category"]
             if brand not in result:
                 result[brand] = {}
             result[brand][category] = item["count"]
