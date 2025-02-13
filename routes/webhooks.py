@@ -834,6 +834,23 @@ def handle_accepted_estimate(data: dict):
         print("Estimate Does Not Exist. Webhook Received")
 
 
+def handle_draft_sales_order(data: dict):
+    salesorder = data.get("salesorder")
+    salesorder_id = salesorder.get("salesorder_id", "")
+    salesorder_number = salesorder.get("salesorder_number", "")
+    if salesorder_id != "":
+        to = serialize_mongo_document(
+            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
+        )
+        template = serialize_mongo_document(
+            dict(db.templates.find_one({"name": "draft_sales_order"}))
+        )
+        params = {"name": to.get("first_name"), "sales_order_number": salesorder_number}
+        send_whatsapp(to.get("phone"), {**template}, {**params})
+    else:
+        print("Estimate Does Not Exist. Webhook Received")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -864,3 +881,11 @@ def accepted_estimate(
 ):
     handle_accepted_estimate(data)
     return "Accepted Estimate Webhook Received Successfully"
+
+
+@router.post("/draft_sales_order")
+def accepted_estimate(
+    data: dict,
+):
+    handle_draft_sales_order(data)
+    return "Draft Sales Order Webhook Received Successfully"
