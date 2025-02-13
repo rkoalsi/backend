@@ -140,11 +140,6 @@ def update_order(
                 if customer.get("company_name") != ""
                 else customer.get("contact_name")
             )
-            print(
-                customer.get("cf_in_ex")
-                if type(customer.get("cf_in_ex")) is not NoneType
-                else "Exclusive"
-            )
             order_update["gst_type"] = (
                 customer.get("cf_in_ex")
                 if type(customer.get("cf_in_ex")) is not NoneType
@@ -176,7 +171,6 @@ def update_order(
             )
         # Replace the product list in the update payload
         order_update["products"] = updated_products
-    print(order_update)
     # Perform the update in MongoDB
     order_collection.update_one({"_id": ObjectId(order_id)}, {"$set": order_update})
 
@@ -492,7 +486,6 @@ async def finalise(order_dict: dict):
             "unit_conversion_id": "",
         }
         line_items.append(obj)
-    print(json.dumps(line_items, indent=4))
 
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
@@ -510,7 +503,6 @@ async def finalise(order_dict: dict):
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
             new_estimate_number = f"{last_estimate_number[0]}/{last_estimate_number[1]}/{int(last_estimate_number[-1]) + 1}"
-            print(new_estimate_number)
             # Prepare the request payload
             payload = {
                 "estimate_number": new_estimate_number,
@@ -554,7 +546,6 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            print("Estimate Response:", estimate_response.json())
             estimate_response.raise_for_status()
 
             estimate_data = estimate_response.json()["estimate"]
