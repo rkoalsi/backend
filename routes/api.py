@@ -8,6 +8,7 @@ from .util import router as util
 from .admin import router as admin
 from .catalogues import router as catalogues
 from .trainings import router as trainings
+from .daily_visits import router as daily_visits
 from .announcements import router as announcements
 from .invoices import router as invoices
 from .webhooks import router as webhooks
@@ -16,6 +17,7 @@ from backend.config.auth import JWTBearer  # type: ignore
 router = APIRouter()
 
 router.include_router(users, prefix="/users", tags=["User"])
+router.include_router(daily_visits, prefix="/daily_visits", tags=["Daily Visits"])
 router.include_router(catalogues, prefix="/catalogues", tags=["Catalogues"])
 router.include_router(trainings, prefix="/trainings", tags=["Trainings"])
 router.include_router(announcements, prefix="/announcements", tags=["Announcements"])

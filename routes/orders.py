@@ -732,3 +732,25 @@ async def notify(order_dict: dict):
         return
     except Exception as e:
         raise e
+
+
+@router.post("/duplicate_order")
+async def duplicate_order(order_dict: dict):
+    try:
+        order_id = order_dict.get("order_id", "")
+        if not order_id:
+            raise HTTPException(status_code=404, detail="Order Id is neccesary")
+        order = db.orders.find_one({"_id": ObjectId(order_id)})
+        order["created_at"] = datetime.now()
+        order["updated_at"] = datetime.now()
+        order["status"] = "draft"
+        order.pop("_id")
+        if "estimate_created" in order.keys():
+            order.pop("estimate_created")
+            order.pop("estimate_number")
+            order.pop("estimate_id")
+            order.pop("estimate_url")
+        result = db.orders.insert_one(order)
+        return str(result.inserted_id)
+    except Exception as e:
+        raise e

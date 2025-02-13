@@ -25,6 +25,7 @@ from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
 from .admin_special_margins import router as admin_special_margins_router
 from .admin_announcements import router as admin_announcements_router
+from .admin_daily_visits import router as admin_daily_visits_router
 from backend.config.auth import JWTBearer  # type: ignore
 
 load_dotenv()
@@ -124,12 +125,6 @@ async def get_stats():
         # Convert both dates to ISO format (YYYY-MM-DD)
         day_before_yesterday_str = day_before_yesterday.isoformat()
         today_str = today.isoformat()
-        print(
-            {
-                "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
-                "status": {"$nin": ["paid"]},
-            }
-        )
         # Get the overdue invoices for yesterday
         total_due_payments = db["invoices"].count_documents(
             {
@@ -959,5 +954,11 @@ router.include_router(
     admin_announcements_router,
     prefix="/announcements",
     tags=["Admin Announcments"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_daily_visits_router,
+    prefix="/daily_visits",
+    tags=["Admin Daily Visits"],
     dependencies=[Depends(JWTBearer())],
 )
