@@ -839,16 +839,46 @@ def handle_draft_sales_order(data: dict):
     salesorder_id = salesorder.get("salesorder_id", "")
     salesorder_number = salesorder.get("salesorder_number", "")
     if salesorder_id != "":
-        to = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
+        warehouse_team = serialize_mongo_document(
+            list(db.users.find({"designation": "Warehouse Team"}))
         )
+
         template = serialize_mongo_document(
             dict(db.templates.find_one({"name": "draft_sales_order"}))
         )
-        params = {"name": to.get("first_name"), "sales_order_number": salesorder_number}
-        send_whatsapp(to.get("phone"), {**template}, {**params})
+        for person in warehouse_team:
+            params = {
+                "name": person.get("first_name"),
+                "sales_order_number": salesorder_number,
+            }
+            send_whatsapp(person.get("phone"), {**template}, {**params})
     else:
-        print("Estimate Does Not Exist. Webhook Received")
+        print("Sales Order Does Not Exist. Webhook Received")
+
+
+def handle_draft_invoice(data: dict):
+    invoice = data.get("invoice")
+    invoice_id = invoice.get("invoice_id", "")
+    invoice_number = invoice.get("invoice_number", "")
+    if invoice_id != "":
+        member1 = serialize_mongo_document(
+            dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
+        )
+        member2 = serialize_mongo_document(
+            dict(db.users.find_one({"designation": "Customer Care"}))
+        )
+
+        template = serialize_mongo_document(
+            dict(db.templates.find_one({"name": "draft_invoice"}))
+        )
+        for person in [member1, member2]:
+            params = {
+                "name": person.get("first_name"),
+                "invoice_number": invoice_number,
+            }
+            send_whatsapp(person.get("phone"), {**template}, {**params})
+    else:
+        print("Invoice Does Not Exist. Webhook Received")
 
 
 @router.post("/estimate")
@@ -884,8 +914,16 @@ def accepted_estimate(
 
 
 @router.post("/draft_sales_order")
-def accepted_estimate(
+def draft_sales_order(
     data: dict,
 ):
     handle_draft_sales_order(data)
     return "Draft Sales Order Webhook Received Successfully"
+
+
+@router.post("/draft_invoice")
+def draft_invoice(
+    data: dict,
+):
+    handle_draft_invoice(data)
+    return "Draft Invoice Webhook Received Successfully"
