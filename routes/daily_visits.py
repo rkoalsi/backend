@@ -85,7 +85,7 @@ async def create_daily_visit(
         {
             "name": user.get("first_name", ""),
             "salesperson_name": created_by.get("first_name", ""),
-            "button_url": f"{os.getenv('URL')}/daily_visits/{str(result.inserted_id)}",
+            "button_url": f"{str(result.inserted_id)}",
         },
     )
     return JSONResponse(
@@ -253,7 +253,7 @@ async def update_daily_visit_update(
         {
             "name": user.get("first_name", ""),
             "salesperson_name": created_by.get("first_name", ""),
-            "button_url": f"{os.getenv('URL')}/daily_visits/{daily_visit_id}",
+            "button_url": f"{daily_visit_id}",
         },
     )
     return JSONResponse(

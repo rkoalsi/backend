@@ -714,7 +714,7 @@ async def notify(order_dict: dict):
             "salesperson_name": salesperson_name,
             "customer_name": customer_name,
             "estimate_number": estimate_number if estimate_created else order_id[-6:],
-            "button_url": f"{os.getenv('URL')}/orders/new/{order_id}",
+            "button_url": f"{order_id}",
         }
         for item in [
             {"name": salesperson_name, "phone": sales_person_phone},
