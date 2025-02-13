@@ -140,11 +140,6 @@ def update_order(
                 if customer.get("company_name") != ""
                 else customer.get("contact_name")
             )
-            print(
-                customer.get("cf_in_ex")
-                if type(customer.get("cf_in_ex")) is not NoneType
-                else "Exclusive"
-            )
             order_update["gst_type"] = (
                 customer.get("cf_in_ex")
                 if type(customer.get("cf_in_ex")) is not NoneType
@@ -176,7 +171,6 @@ def update_order(
             )
         # Replace the product list in the update payload
         order_update["products"] = updated_products
-    print(order_update)
     # Perform the update in MongoDB
     order_collection.update_one({"_id": ObjectId(order_id)}, {"$set": order_update})
 
@@ -492,7 +486,6 @@ async def finalise(order_dict: dict):
             "unit_conversion_id": "",
         }
         line_items.append(obj)
-    print(json.dumps(line_items, indent=4))
 
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
@@ -510,7 +503,6 @@ async def finalise(order_dict: dict):
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
             new_estimate_number = f"{last_estimate_number[0]}/{last_estimate_number[1]}/{int(last_estimate_number[-1]) + 1}"
-            print(new_estimate_number)
             # Prepare the request payload
             payload = {
                 "estimate_number": new_estimate_number,
@@ -554,7 +546,6 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            print("Estimate Response:", estimate_response.json())
             estimate_response.raise_for_status()
 
             estimate_data = estimate_response.json()["estimate"]
@@ -723,21 +714,43 @@ async def notify(order_dict: dict):
             "salesperson_name": salesperson_name,
             "customer_name": customer_name,
             "estimate_number": estimate_number if estimate_created else order_id[-6:],
-            "button_url": f"{os.getenv('URL')}/orders/new/{order_id}",
+            "button_url": f"{order_id}",
         }
         for item in [
             {"name": salesperson_name, "phone": sales_person_phone},
             {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC1_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC4_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC4"),
             },
             {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC2_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC2"),
+                "name": os.getenv("NOTIFY_NUMBER_TO_CC5_NAME"),
+                "phone": os.getenv("NOTIFY_NUMBER_TO_CC5"),
             },
         ]:
             params["salesperson_name"] = item["name"]
             send_whatsapp(to=item["phone"], template_doc=template_doc, params=params)
         return
+    except Exception as e:
+        raise e
+
+
+@router.post("/duplicate_order")
+async def duplicate_order(order_dict: dict):
+    try:
+        order_id = order_dict.get("order_id", "")
+        if not order_id:
+            raise HTTPException(status_code=404, detail="Order Id is neccesary")
+        order = db.orders.find_one({"_id": ObjectId(order_id)})
+        order["created_at"] = datetime.now()
+        order["updated_at"] = datetime.now()
+        order["status"] = "draft"
+        order.pop("_id")
+        if "estimate_created" in order.keys():
+            order.pop("estimate_created")
+            order.pop("estimate_number")
+            order.pop("estimate_id")
+            order.pop("estimate_url")
+        result = db.orders.insert_one(order)
+        return str(result.inserted_id)
     except Exception as e:
         raise e
