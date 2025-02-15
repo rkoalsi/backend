@@ -73,6 +73,7 @@ async def create_daily_visit(
         "created_by": ObjectId(created_by),
         "selfie": selfie_url,
         "created_at": datetime.datetime.now(),
+        "updated_at": datetime.datetime.now(),
     }
 
     result = db.daily_visits.insert_one({**daily_visit})
