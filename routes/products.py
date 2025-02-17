@@ -45,25 +45,24 @@ def get_product_counts():
         ]
 
         counts = list(db.products.aggregate(pipeline))
-        print(json.dumps(pipeline, indent=4))
         # Format counts into a nested dict: { brand: { category: count, ... }, ... }
         result = {}
         for item in counts:
-            brand = item["_id"]["brand"]
-            # Skip items that don't have a category key so they won't be counted
-            if "category" not in item["_id"]:
+            group_id = item["_id"]
+            # Skip if either 'brand' or 'category' is missing or null
+            if not group_id.get("brand") or not group_id.get("category"):
                 continue
-            category = item["_id"]["category"]
+            brand = group_id["brand"]
+            category = group_id["category"]
             if brand not in result:
                 result[brand] = {}
             result[brand][category] = item["count"]
 
-        print(result)
         return result
 
     except Exception as e:
         print(e)
-        raise HTTPException(status_code=500, detail="Failed to get product counts")
+        raise HTTPException(status_code=400, detail="Failed to get product counts")
 
 
 @router.get("/brands")
@@ -228,6 +227,28 @@ def get_products(
         "category": category,
         "search": search,
     }
+
+
+@router.get("/all_categories", response_model=dict)
+def get_all_product_categories():
+    """
+    Retrieve a sorted list of all distinct product categories (across all brands).
+    Only categories for products with stock > 0 and not marked as deleted are returned.
+    """
+    try:
+        # Use distinct to fetch unique categories across all products meeting the criteria
+        categories = products_collection.distinct(
+            "category", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+        )
+        # Filter out any empty or null values
+        categories = [category for category in categories if category]
+        # Sort the categories alphabetically
+        return {"categories": sorted(categories)}
+    except Exception as e:
+        print(f"Error fetching all product categories: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch all product categories."
+        )
 
 
 @router.get("/{product_id}")
