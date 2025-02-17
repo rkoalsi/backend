@@ -195,12 +195,50 @@ def get_all_brands():
         raise HTTPException(status_code=500, detail="Failed to fetch brands.")
 
 
+@router.get("/categories")
+def get_all_categories():
+    """
+    Retrieve a list of all distinct categories.
+    """
+    try:
+        categories = products_collection.distinct(
+            "category", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+        )
+        categories = [
+            category for category in categories if category
+        ]  # Remove empty or null categories
+        return {"categories": categories}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch categories.")
+
+
+@router.get("/sub_categories")
+def get_all_sub_categories():
+    """
+    Retrieve a list of all distinct sub_categories.
+    """
+    try:
+        sub_categories = products_collection.distinct(
+            "sub_category", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+        )
+        sub_categories = [
+            sub_category for sub_category in sub_categories if sub_category
+        ]  # Remove empty or null sub_categories
+        return {"sub_categories": sub_categories}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch sub_categories.")
+
+
 @router.get("/products")
 def get_products(
     page: int = Query(0, ge=0),
     limit: int = Query(10, ge=1),
     search: Optional[str] = None,
     brand: Optional[str] = None,
+    category: Optional[str] = None,
+    sub_category: Optional[str] = None,
     # New query params
     status: Optional[str] = None,  # e.g. 'active' or 'inactive'
     stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
@@ -246,6 +284,12 @@ def get_products(
         # 5) Brand Filter
         if brand and brand.lower() != "all":
             query["brand"] = {"$regex": f"^{brand}$", "$options": "i"}
+
+        if category and category.lower() != "all":
+            query["category"] = {"$regex": f"^{category}$", "$options": "i"}
+
+        if sub_category and sub_category.lower() != "all":
+            query["sub_category"] = {"$regex": f"^{sub_category}$", "$options": "i"}
 
         # Pagination
         skip = page * limit
