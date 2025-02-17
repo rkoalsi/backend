@@ -827,14 +827,20 @@ def handle_accepted_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_number = estimate.get("estimate_number", "")
     if estimate_id != "":
-        to = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
-        )
         template = serialize_mongo_document(
             dict(db.templates.find_one({"name": "accepted_estimate"}))
         )
-        params = {"name": to.get("first_name"), "estimate_number": estimate_number}
-        send_whatsapp(to.get("phone"), {**template}, {**params})
+
+        to1 = serialize_mongo_document(
+            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
+        )
+        to2 = serialize_mongo_document(
+            dict(db.users.find_one({"email": "crmbarksales@gmail.com"}))
+        )
+
+        for to in [to1, to2]:
+            params = {"name": to.get("first_name"), "estimate_number": estimate_number}
+            send_whatsapp(to.get("phone"), {**template}, {**params})
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
