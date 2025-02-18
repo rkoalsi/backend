@@ -506,7 +506,9 @@ def handle_invoice(data: dict):
             # Check if due_date is today (date only, ignoring time)
             today = datetime.datetime.utcnow().date()
             due_date_only = due_date.date()
-            if due_date_only == today and invoice_status == "overdue":
+            if due_date_only == today and (
+                invoice_status != "void" or invoice_status != "paid"
+            ):
                 msg_params = {
                     "to": os.getenv("OVERDUE_ADMIN_TO"),
                     "invoice_number": invoice.get("invoice_number", ""),
