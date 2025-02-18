@@ -28,7 +28,9 @@ INVOICE_PDF_URL = os.getenv("INVOICE_PDF_URL")
 def get_invoice(
     invoice_id: str,
 ):
-    result = invoice_collection.find_one({"_id": ObjectId(invoice_id)})
+    result = invoice_collection.find_one(
+        {"_id": ObjectId(invoice_id), "status": {"$nin": ["void", "paid"]}}
+    )
     if result:
         invoice = result
         invoice["status"] = str(invoice["status"]).capitalize()
@@ -61,7 +63,7 @@ def get_invoices(
     # Build the query to match invoices past their due date and not marked as paid.
     query = {
         "due_date": {"$lt": today_str},
-        "status": {"$nin": ["paid"]},
+        "status": {"$nin": ["paid", "void"]},
         # Must match 'code' in either cf_sales_person or salesperson_name
         "$or": [
             {

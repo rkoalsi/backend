@@ -1,6 +1,5 @@
 from fastapi import (
     APIRouter,
-    Body,
     HTTPException,
     Query,
     File,
@@ -8,18 +7,18 @@ from fastapi import (
     Form,
     Depends,
 )
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
 from .helpers import get_access_token
 from typing import Optional
-import re, requests, os
+import re, requests, os, json
 from dotenv import load_dotenv
-import boto3, datetime, io, csv
+import boto3, io, csv, openpyxl
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from pytz import timezone
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from .admin_trainings import router as admin_trainings_router
 from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
@@ -90,7 +89,7 @@ async def get_stats():
 
         # Orders Statistics
         ist = timezone("Asia/Kolkata")
-        now_ist = datetime.datetime.now(ist)
+        now_ist = datetime.now(ist)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         recent_orders = db["orders"].count_documents(
             {"created_at": {"$gte": start_of_today_ist}}
@@ -129,13 +128,13 @@ async def get_stats():
         total_due_payments = db["invoices"].count_documents(
             {
                 "due_date": {"$lt": today_str},
-                "status": {"$nin": ["paid"]},
+                "status": {"$nin": ["paid", "void"]},
             }
         )
         total_due_payments_today = db["invoices"].count_documents(
             {
                 "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
-                "status": {"$nin": ["paid"]},
+                "status": {"$nin": ["paid", "void"]},
             }
         )
         submitted_daily_visits = db["daily_visits"].count_documents(
@@ -243,6 +242,7 @@ def get_products(
     status: Optional[str] = None,  # e.g. 'active' or 'inactive'
     stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
     new_arrivals: Optional[bool] = None,
+    missing_info_products: Optional[bool] = None,
 ):
     """
     Retrieve products with optional search, brand, status, stock, and new_arrivals filtering.
@@ -273,8 +273,15 @@ def get_products(
             # Or if it's based on creation date (last 30 days, etc.)
             from datetime import datetime, timedelta
 
-            ninty_days_ago = datetime.utcnow() - timedelta(days=90)
+            ninty_days_ago = datetime.now() - timedelta(days=90)
             query["created_at"] = {"$gte": ninty_days_ago}
+
+        if missing_info_products:
+            query["$and"] = [
+                {"$or": [{"series": {"$exists": False}}, {"series": ""}]},
+                {"$or": [{"category": {"$exists": False}}, {"category": ""}]},
+                {"$or": [{"sub_category": {"$exists": False}}, {"sub_category": ""}]},
+            ]
 
         # 4) Search Filter
         if search and search.strip() != "":
@@ -300,7 +307,7 @@ def get_products(
             .skip(skip)
             .limit(limit)
         )
-
+        print(json.dumps(query, indent=4))
         total_count = products_collection.count_documents(query)
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
@@ -320,6 +327,125 @@ def get_products(
     except Exception as e:
         print(e)
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@router.get("/products/download")
+def download_products(
+    search: Optional[str] = None,
+    brand: Optional[str] = None,
+    category: Optional[str] = None,
+    sub_category: Optional[str] = None,
+    status: Optional[str] = None,  # e.g. 'active' or 'inactive'
+    stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
+    new_arrivals: Optional[bool] = None,
+    missing_info_products: Optional[bool] = None,
+):
+    """
+    Download products in XLSX format using the same filters.
+    """
+    try:
+        query = {}
+
+        # 1) Status Filter
+        if status == "active":
+            query["status"] = "active"
+        elif status == "inactive":
+            query["status"] = "inactive"
+
+        # 2) Stock Filter
+        if stock == "zero":
+            query["stock"] = {"$lte": 0}
+        elif stock == "gt_zero":
+            query["stock"] = {"$gt": 0}
+
+        # 3) New Arrivals
+        if new_arrivals:
+            ninety_days_ago = datetime.now() - timedelta(days=90)
+            query["created_at"] = {"$gte": ninety_days_ago}
+
+        # 4) Missing Info Filter for series, category, sub_category
+        if missing_info_products:
+            query["$and"] = [
+                {"$or": [{"series": {"$exists": False}}, {"series": ""}]},
+                {"$or": [{"category": {"$exists": False}}, {"category": ""}]},
+                {"$or": [{"sub_category": {"$exists": False}}, {"sub_category": ""}]},
+            ]
+
+        # 5) Search Filter
+        if search and search.strip() != "":
+            regex = {"$regex": search.strip(), "$options": "i"}
+            query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
+
+        # 6) Brand, Category, Sub Category Filters
+        if brand and brand.lower() != "all":
+            query["brand"] = {"$regex": f"^{brand}$", "$options": "i"}
+        if category and category.lower() != "all":
+            query["category"] = {"$regex": f"^{category}$", "$options": "i"}
+        if sub_category and sub_category.lower() != "all":
+            query["sub_category"] = {"$regex": f"^{sub_category}$", "$options": "i"}
+
+        docs_cursor = products_collection.find(query).sort([("status", 1), ("name", 1)])
+        products = [serialize_mongo_document(doc) for doc in docs_cursor]
+
+        # Create a new workbook and worksheet using openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Products"
+
+        # Define headers (adjust these fields as needed)
+        headers = [
+            "Name",
+            "Brand",
+            "Category",
+            "Sub Category",
+            "Series",
+            "SKU",
+            "Price",
+            "Stock",
+            "Status",
+            "Created At",
+        ]
+        ws.append(headers)
+
+        for product in products:
+            # Convert created_at to a formatted string if present
+            created_at = ""
+            if product.get("created_at"):
+                if isinstance(product["created_at"], datetime):
+                    created_at = product["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    created_at = str(product["created_at"])
+
+            row = [
+                product.get("name", ""),
+                product.get("brand", ""),
+                product.get("category", ""),
+                product.get("sub_category", ""),
+                product.get("series", ""),
+                product.get("cf_sku_code", ""),
+                product.get("rate", ""),
+                product.get("stock", ""),
+                product.get("status", ""),
+                created_at,
+            ]
+            ws.append(row)
+
+        # Save workbook to a BytesIO stream
+        stream = io.BytesIO()
+        wb.save(stream)
+        stream.seek(0)
+
+        filename = f"products_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        headers_response = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(
+            stream,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers_response,
+        )
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/customers")
@@ -562,7 +688,7 @@ def read_all_orders(
     today_str = date.today().isoformat()
 
     # Query to match invoices with a due_date less than today
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
     # If you also want to ensure the invoice has a specific status (e.g., "overdue"),
     # you can combine conditions like this:
     # query = {"due_date": {"$lt": today_str}, "status": "overdue"}
@@ -689,7 +815,7 @@ def download_payments_due_csv(sales_person: str):
     today_str = date.today().isoformat()
 
     # Query to match invoices with a due_date less than today and status not in ["paid"]
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
     if sales_person:
         query["$or"] = [
             {"cf_sales_person": sales_person},
