@@ -40,4 +40,4 @@ jobs:
           script: |
             cd /home/ubuntu
             # The deploy.sh script uses the -b flag to deploy backend only.
-            ./new-deploy.sh -b
+            sudo ./deploy.sh -b
