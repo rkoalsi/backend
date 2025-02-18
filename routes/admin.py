@@ -128,13 +128,13 @@ async def get_stats():
         total_due_payments = db["invoices"].count_documents(
             {
                 "due_date": {"$lt": today_str},
-                "status": {"$nin": ["paid"]},
+                "status": {"$nin": ["paid", "void"]},
             }
         )
         total_due_payments_today = db["invoices"].count_documents(
             {
                 "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
-                "status": {"$nin": ["paid"]},
+                "status": {"$nin": ["paid", "void"]},
             }
         )
         submitted_daily_visits = db["daily_visits"].count_documents(
@@ -688,7 +688,7 @@ def read_all_orders(
     today_str = date.today().isoformat()
 
     # Query to match invoices with a due_date less than today
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
     # If you also want to ensure the invoice has a specific status (e.g., "overdue"),
     # you can combine conditions like this:
     # query = {"due_date": {"$lt": today_str}, "status": "overdue"}
@@ -815,7 +815,7 @@ def download_payments_due_csv(sales_person: str):
     today_str = date.today().isoformat()
 
     # Query to match invoices with a due_date less than today and status not in ["paid"]
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid"]}}
+    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
     if sales_person:
         query["$or"] = [
             {"cf_sales_person": sales_person},
