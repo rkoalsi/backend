@@ -539,7 +539,7 @@ def handle_invoice(data: dict):
             user = db.users.find_one({"code": sp})
             valid_salespeople.append(
                 {
-                    "email": user.get("email"),
+                    "email": user.get("email", ""),
                     "name": user.get("name"),
                     "phone": user.get("phone"),
                 }
@@ -574,7 +574,7 @@ def handle_invoice(data: dict):
                 )
             else:
                 print(
-                    f"One week before due_date {one_week_before} is in the past. Skipping one-week-before email for invoice {invoice_number} to {email}."
+                    f"One week before due_date {one_week_before} is in the past. Skipping one-week-before email for invoice {invoice_number} to {name}."
                 )
 
             # Schedule email on due_date
@@ -600,11 +600,11 @@ def handle_invoice(data: dict):
                     job_suffix="due_date",
                 )
                 print(
-                    f"Scheduled due-date email for invoice {invoice_number} to {email} at {due_date}."
+                    f"Scheduled due-date email for invoice {invoice_number} to {name} at {due_date}."
                 )
             else:
                 print(
-                    f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {email}."
+                    f"Due date {due_date} is in the past. Skipping due-date email for invoice {invoice_number} to {name}."
                 )
     else:
         print("Invoice Does Not Exist. Webhook Received")
