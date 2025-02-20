@@ -537,19 +537,22 @@ def handle_invoice(data: dict):
 
         for sp in all_salespeople:
             user = db.users.find_one({"code": sp})
-            valid_salespeople.append(
-                {
-                    "email": user.get("email", ""),
-                    "name": user.get("name"),
-                    "phone": user.get("phone"),
-                }
-            )
+            if user:
+                valid_salespeople.append(
+                    {
+                        "email": user.get("email", ""),
+                        "name": user.get("name"),
+                        "phone": user.get("phone"),
+                    }
+                )
 
         # 3) Schedule one job for each valid (unique) salesperson
         for sp in valid_salespeople:
             name = sp.get("name")
             email = sp.get("email")
             phone = sp.get("phone")
+            if not phone:
+                print(f"Phone does not exist for SP:{name}")
             msg_params = {
                 "to": phone,
                 "invoice_number": invoice_number,
