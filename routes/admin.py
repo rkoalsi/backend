@@ -475,11 +475,9 @@ def get_customers(
     """
     try:
         query = {}
-
         # Filter by name if provided
         if name:
-            query["contact_name"] = re.compile(name, re.IGNORECASE)
-
+            query["contact_name"] = re.compile(re.escape(name), re.IGNORECASE)
         # Sort logic
         sort_order = [("status", 1)]  # default ascending by status
         if sort and sort.lower() == "desc":
@@ -529,6 +527,8 @@ def get_customers(
                     {"cf_in_ex": {"$exists": False}},
                     {"cf_in_ex": "Exclusive"},
                 ]
+
+        # print(json.dumps(query, indent=4))
         # Calculate skip based on 1-based indexing
         skip = (page - 1) * limit
         cursor = (

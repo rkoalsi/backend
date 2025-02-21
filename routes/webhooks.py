@@ -730,10 +730,13 @@ def handle_customer(data: dict):
         db.customers.find_one({"contact_id": contact_id})
     )
 
+    import json  # make sure to import json if not already
+
     def is_address_present(address, existing_addresses):
-        # Check if the address is already present in the existing addresses
+        # Use JSON serialization for deep equality check
+        new_addr_serialized = json.dumps(address, sort_keys=True)
         return any(
-            all(address.get(key) == existing_addr.get(key) for key in address.keys())
+            json.dumps(existing_addr, sort_keys=True) == new_addr_serialized
             for existing_addr in existing_addresses
         )
 
@@ -754,7 +757,7 @@ def handle_customer(data: dict):
         if "billing_address" in contact and contact["billing_address"]:
             addresses.append(contact["billing_address"])
 
-        # Add shipping_address to addresses if it exists and is not a duplicate of billing_address
+        # Add shipping_address to addresses if it exists and is not a duplicate
         if "shipping_address" in contact and contact["shipping_address"]:
             if not is_address_present(contact["shipping_address"], addresses):
                 addresses.append(contact["shipping_address"])
@@ -804,7 +807,7 @@ def handle_customer(data: dict):
         if new_addresses:
             update_fields["addresses"] = existing_addresses + new_addresses
 
-        # Remove billing_address and shipping_address from contact
+        # Remove billing_address and shipping_address from update_fields if they exist
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
 
