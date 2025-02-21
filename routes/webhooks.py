@@ -803,6 +803,10 @@ def handle_customer(data: dict):
             if not is_address_present(contact["shipping_address"], existing_addresses):
                 new_addresses.append(contact["shipping_address"])
 
+        if "addresses" in contact and isinstance(contact["addresses"], list):
+            for addr in contact["addresses"]:
+                if not is_address_present(addr, existing_addresses):
+                    new_addresses.append(addr)
         # Add new addresses to the update
         if new_addresses:
             update_fields["addresses"] = existing_addresses + new_addresses
@@ -810,7 +814,7 @@ def handle_customer(data: dict):
         # Remove billing_address and shipping_address from update_fields if they exist
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
-        print(update_fields)
+        print(existing_addresses, new_addresses)
         # Update the customer if there are changes
         if update_fields:
             update_fields["updated_at"] = datetime.datetime.now()
