@@ -810,7 +810,7 @@ def handle_customer(data: dict):
         # Remove billing_address and shipping_address from update_fields if they exist
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
-
+        print(update_fields)
         # Update the customer if there are changes
         if update_fields:
             update_fields["updated_at"] = datetime.datetime.now()
