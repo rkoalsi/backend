@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Query
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
+from pymongo import UpdateOne
 
 client, db = connect_to_mongo()
 
@@ -12,12 +13,30 @@ def get_customer_special_margins(customer_id: str):
     """
     Retrieve all special margin products for the given customer.
     """
-    special_margins = [
-        serialize_mongo_document(doc)
-        for doc in db.special_margins.find({"customer_id": ObjectId(customer_id)})
+    pipeline = [
+        {"$match": {"customer_id": ObjectId(customer_id)}},
+        {
+            "$lookup": {
+                "from": "products",
+                "localField": "product_id",
+                "foreignField": "_id",
+                "as": "product_info",
+            }
+        },
+        {"$unwind": {"path": "$product_info", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {"brand": "$product_info.brand"}},
+        {
+            "$project": {
+                "brand": 1,
+                "name": 1,
+                "customer_id": 1,
+                "margin": 1,
+                "product_id": 1,
+            }
+        },  # remove extra product details if not needed
     ]
-    # Convert ObjectIds to strings for JSON serializability
-    return {"products": special_margins}
+    special_margins = list(db.special_margins.aggregate(pipeline))
+    return {"products": [serialize_mongo_document(doc) for doc in special_margins]}
 
 
 @router.post("/bulk/{customer_id}")
@@ -34,10 +53,10 @@ def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(..
         customer_obj_id = ObjectId(customer_id)
 
         for item in data:
-            if not all(k in item for k in ("product_id", "name", "margin")):
+            if not all(k in item for k in ("product_id", "margin")):
                 raise HTTPException(
                     status_code=400,
-                    detail="Each item must have 'product_id', 'name', and 'margin'.",
+                    detail="Each item must have 'product_id' and 'margin'.",
                 )
 
             if not ObjectId.is_valid(item["product_id"]):
@@ -65,6 +84,117 @@ def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(..
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.put("/{customer_id}/product/{product_id}")
+def update_customer_special_margin(
+    customer_id: str, product_id: str, data: dict = Body(...)
+):
+    """
+    Update the special margin for a single product for a given customer.
+    Expects data like:
+      {
+        "margin": "50%",
+        "name": "Some Product"
+      }
+    """
+    if not data.get("margin"):
+        raise HTTPException(status_code=400, detail="Margin is required.")
+
+    if not ObjectId.is_valid(customer_id) or not ObjectId.is_valid(product_id):
+        raise HTTPException(status_code=400, detail="Invalid customer_id or product_id")
+
+    customer_obj_id = ObjectId(customer_id)
+    product_obj_id = ObjectId(product_id)
+    update_data = {"margin": data["margin"]}
+    if data.get("name"):
+        update_data["name"] = data["name"]
+
+    result = db.special_margins.update_one(
+        {"customer_id": customer_obj_id, "product_id": product_obj_id},
+        {"$set": update_data},
+        upsert=True,
+    )
+    return {"message": "Special margin updated successfully."}
+
+
+@router.post("/brand/{customer_id}")
+def create_brand_special_margins(customer_id: str, data: dict = Body(...)):
+    if not data.get("brand") or not data.get("margin"):
+        raise HTTPException(status_code=400, detail="brand and margin are required.")
+    if not ObjectId.is_valid(customer_id):
+        raise HTTPException(status_code=400, detail="Invalid customer_id")
+
+    customer_obj_id = ObjectId(customer_id)
+    brand = data["brand"]
+    margin = data["margin"]
+
+    # Fetch all active products for the given brand.
+    products = list(db.products.find({"brand": brand, "status": "active"}))
+    if not products:
+        raise HTTPException(
+            status_code=404, detail="No products found for the specified brand."
+        )
+
+    # Remove existing special margins for this customer and brand.
+    product_ids = [p["_id"] for p in products]
+    db.special_margins.delete_many(
+        {"customer_id": customer_obj_id, "product_id": {"$in": product_ids}}
+    )
+
+    # Build new special margin documents.
+    new_docs = [
+        {
+            "customer_id": customer_obj_id,
+            "product_id": p["_id"],
+            "name": p.get("name", "Unnamed"),
+            "margin": margin,
+        }
+        for p in products
+    ]
+
+    # Insert all new documents in one go.
+    if new_docs:
+        db.special_margins.insert_many(new_docs)
+    return {
+        "message": f"Special margins updated for {len(new_docs)} products for brand {brand}."
+    }
+
+
+@router.delete("/brand/{customer_id}")
+def delete_brand_special_margins(
+    customer_id: str,
+    brand: str = Query(
+        ..., description="The brand name for which to delete special margins"
+    ),
+):
+    """
+    Delete all special margin entries for a specific customer and brand.
+    """
+    if not ObjectId.is_valid(customer_id):
+        raise HTTPException(status_code=400, detail="Invalid customer_id")
+
+    customer_obj_id = ObjectId(customer_id)
+    # Fetch all active products for the given brand.
+    products = list(db.products.find({"brand": brand, "status": "active"}))
+    if not products:
+        raise HTTPException(
+            status_code=404, detail="No products found for the specified brand."
+        )
+
+    product_ids = [p["_id"] for p in products]
+    result = db.special_margins.delete_many(
+        {"customer_id": customer_obj_id, "product_id": {"$in": product_ids}}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404, detail="No special margins found for the specified brand."
+        )
+
+    return {
+        "message": f"Successfully deleted {result.deleted_count} special margin(s) for brand {brand}."
+    }
 
 
 @router.post("/{customer_id}")
