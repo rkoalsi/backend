@@ -826,6 +826,7 @@ def download_payments_due_csv(sales_person: str):
     # Build the aggregation pipeline similar to the table data route
     pipeline = [
         match_stage,
+        {"$sort": {"due_date": -1}},
         {
             "$lookup": {
                 "from": "invoice_notes",  # Collection to join
@@ -867,7 +868,6 @@ def download_payments_due_csv(sales_person: str):
                 "invoice_notes": 1,
             }
         },
-        {"$sort": {"due_date": -1}},
     ]
 
     # Execute the aggregation pipeline

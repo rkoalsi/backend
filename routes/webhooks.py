@@ -525,6 +525,13 @@ def handle_invoice(data: dict):
                     run_date=datetime.datetime.now() + datetime.timedelta(minutes=1),
                     job_suffix="due_date",
                 )
+                msg_params["to"] = os.getenv("NOTIFY_NUMBER_TO_CC5")
+                msg_params["salesperson_name"] = os.getenv("NOTIFY_NUMBER_TO_CC5_NAME")
+                schedule_job(
+                    msg_params,
+                    run_date=datetime.datetime.now() + datetime.timedelta(minutes=1),
+                    job_suffix="due_date",
+                )
                 print(
                     "At least one salesperson is forbidden. Scheduled admin notification email."
                 )
