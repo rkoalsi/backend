@@ -10,7 +10,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-from pymongo.collection import Collection
+from pymongo import ASCENDING
 from .helpers import get_access_token
 from typing import Optional
 import re, requests, os, json
@@ -243,6 +243,7 @@ def get_products(
     stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
     new_arrivals: Optional[bool] = None,
     missing_info_products: Optional[bool] = None,
+    sort_by: Optional[str] = None,
 ):
     """
     Retrieve products with optional search, brand, status, stock, and new_arrivals filtering.
@@ -303,7 +304,11 @@ def get_products(
 
         docs_cursor = (
             products_collection.find(query)
-            .sort([("status", 1), ("name", 1)])
+            .sort(
+                [("catalogue_order", 1)]
+                if sort_by == "catalogue"
+                else [("status", 1), ("name", 1)]
+            )
             .skip(skip)
             .limit(limit)
         )
