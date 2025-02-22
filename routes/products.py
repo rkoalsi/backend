@@ -160,6 +160,9 @@ def get_products(
     elif sort == "price_desc":
         # Sort by price descending
         sort_stage = {"rate": DESCENDING}
+    elif sort == "catalogue":
+        # Sort by price descending
+        sort_stage = {"catalogue_order": ASCENDING}
     else:
         # Default sort: new products first (within each brand) and then by other fields
         sort_stage = {
