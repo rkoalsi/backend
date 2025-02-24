@@ -113,70 +113,91 @@ def get_categories_for_brand(brand: str):
         raise HTTPException(status_code=500, detail="Failed to fetch categories.")
 
 
+@router.get("/catalogue_pages")
+def get_catalogue_pages(brand: str):
+    """
+    Returns the distinct catalogue page numbers available from products.
+    """
+    try:
+        # Fetch distinct catalogue_page values that exist and are not null.
+        pages = db.products.distinct(
+            "catalogue_page",
+            {
+                "catalogue_page": {"$exists": True, "$ne": None},
+                "brand": brand,
+                "stock": {"$gt": 0},
+                "is_deleted": {"$exists": False},
+            },
+        )
+        # Sort the pages (assuming they are numeric)
+        pages = sorted(pages)
+        return {"catalogue_pages": pages}
+    except Exception as e:
+        print(f"Error fetching catalogue pages: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("")
 def get_products(
     role: str = "salesperson",
     page: int = Query(1, ge=1, description="Page number, starting from 1"),
+    catalogue_page: Optional[int] = Query(
+        None, description="Catalogue page number for catalogue mode"
+    ),
     per_page: int = Query(25, ge=1, le=100, description="Number of items per page"),
     brand: Optional[str] = Query(None, description="Filter by brand"),
     category: Optional[str] = Query(None, description="Filter by category"),
     search: Optional[str] = Query(None, description="Search term for name or SKU code"),
     sort: Optional[str] = Query(
-        "default", description="Sort order: default, price_asc, price_desc"
+        "default", description="Sort order: default, price_asc, price_desc, catalogue"
     ),
 ):
     """
-    Retrieves paginated products with optional brand, category, and search filters.
-    The default sort shows new products first within each brand.
-    Additional sort orders by price (ascending or descending) are supported.
+    Retrieves paginated products with optional filters.
+    When sort is "catalogue", the `catalogue_page` parameter is used to filter
+    products by their catalogue_page field rather than for skipping documents.
     """
     # Define base query
     query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
 
-    # Add brand filter
     if brand:
         query["brand"] = brand
 
-    # Add category filter
     if category:
-        query["category"] = category  # Adjust if 'category' is nested
+        query["category"] = category
 
-    # Add search filter
     if search:
-        regex = {"$regex": search, "$options": "i"}  # Case-insensitive search
+        regex = {"$regex": search, "$options": "i"}
         query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
 
-    # Add additional condition for salespeople
     if role == "salesperson":
         query["status"] = "active"
 
-    # Define the threshold date (three months ago)
     three_months_ago = datetime.now() - relativedelta(months=3)
 
-    # Compute sort stage based on sort parameter
+    # Adjust query and sort based on sort order
     if sort == "price_asc":
-        # Sort by price ascending; you can add additional tie-breakers if needed
         sort_stage = {"rate": ASCENDING}
     elif sort == "price_desc":
-        # Sort by price descending
         sort_stage = {"rate": DESCENDING}
     elif sort == "catalogue":
-        # Only include documents that have a non-null catalogue_order.
-        if not search:
+        # Use the catalogue_page parameter to filter documents.
+        if catalogue_page is not None and not search:
+            query["catalogue_page"] = catalogue_page
             query["catalogue_order"] = {"$exists": True, "$ne": None}
         sort_stage = {"catalogue_order": ASCENDING}
     else:
-        # Default sort: new products first (within each brand) and then by other fields
         sort_stage = {
             "brand": ASCENDING,
-            "new": DESCENDING,  # New products first within each brand
+            "new": DESCENDING,
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": ASCENDING,
             "rate": ASCENDING,
             "name": ASCENDING,
         }
-    # Aggregation Pipeline
+
+    # Build the aggregation pipeline
     pipeline = [
         {"$match": query},
         {
@@ -191,32 +212,31 @@ def get_products(
             }
         },
         {"$sort": sort_stage},
-        {"$skip": (page - 1) * per_page},
-        {"$limit": per_page},
     ]
 
-    # Execute Aggregation Pipeline
+    # Only use skip if not in catalogue mode, because catalogue_page is used as a filter
+    if sort != "catalogue":
+        pipeline.append({"$skip": (page - 1) * per_page})
+    pipeline.append({"$limit": per_page})
+
     try:
         fetched_products = list(db.products.aggregate(pipeline))
     except Exception as e:
         print(f"Error during aggregation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    # Serialize products
+
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
 
-    # Calculate total products matching the query
     try:
         total_products = db.products.count_documents(query)
     except Exception as e:
         print(f"Error counting documents: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    # Calculate total pages
     total_pages = (
         ((total_products + per_page - 1) // per_page) if total_products > 0 else 1
     )
 
-    # Validate page number
     if page > total_pages and total_pages != 0:
         raise HTTPException(status_code=400, detail="Page number out of range")
 
