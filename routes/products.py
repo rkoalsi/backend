@@ -203,7 +203,6 @@ def get_products(
         raise HTTPException(status_code=500, detail="Internal server error")
     # Serialize products
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
-    print(json.dumps(all_products, indent=4))
 
     # Calculate total products matching the query
     try:
