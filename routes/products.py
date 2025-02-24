@@ -160,6 +160,11 @@ def get_products(
     elif sort == "price_desc":
         # Sort by price descending
         sort_stage = {"rate": DESCENDING}
+    elif sort == "catalogue":
+        # Only include documents that have a non-null catalogue_order.
+        if not search:
+            query["catalogue_order"] = {"$exists": True, "$ne": None}
+        sort_stage = {"catalogue_order": ASCENDING}
     else:
         # Default sort: new products first (within each brand) and then by other fields
         sort_stage = {
@@ -171,7 +176,6 @@ def get_products(
             "rate": ASCENDING,
             "name": ASCENDING,
         }
-
     # Aggregation Pipeline
     pipeline = [
         {"$match": query},
@@ -197,7 +201,6 @@ def get_products(
     except Exception as e:
         print(f"Error during aggregation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
     # Serialize products
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
 
