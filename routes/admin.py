@@ -10,7 +10,6 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-from pymongo import ASCENDING
 from .helpers import get_access_token
 from typing import Optional
 import re, requests, os, json
@@ -556,6 +555,130 @@ def get_customers(
         }
     except Exception as e:
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@router.get("/customers/report")
+def get_customers_report(
+    name: Optional[str] = None,
+    sort: Optional[str] = None,
+    status: Optional[str] = Query(
+        None, description="Filter by customer status: active or inactive"
+    ),
+    sales_person: Optional[str] = Query(
+        None, description="Filter by sales person name"
+    ),
+    unassigned: Optional[bool] = Query(
+        None, description="Filter for unassigned customers"
+    ),
+    gst_type: Optional[str] = Query(
+        None, description="Filter by customer type: exclusive or inclusive"
+    ),
+):
+    # Build the query similar to your /customers endpoint.
+    query = {}
+    if name:
+        query["contact_name"] = re.compile(re.escape(name), re.IGNORECASE)
+
+    sort_order = [("status", 1)]
+    if sort and sort.lower() == "desc":
+        sort_order = [("status", -1)]
+
+    if status:
+        if status.lower() not in ["active", "inactive"]:
+            raise HTTPException(status_code=400, detail="Invalid status filter value")
+        query["status"] = status.lower()
+
+    if sales_person:
+        escaped_sales_person = re.escape(sales_person)
+        query["$or"] = [
+            {
+                "cf_sales_person": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
+            {
+                "salesperson_name": {
+                    "$regex": f"^{escaped_sales_person}$",
+                    "$options": "i",
+                }
+            },
+        ]
+
+    if unassigned:
+        query["$or"] = [
+            {"cf_sales_person": {"$exists": False}},
+            {"cf_sales_person": ""},
+            {"cf_sales_person": None},
+        ]
+
+    if gst_type:
+        if str(gst_type).capitalize() == "Inclusive":
+            query["$and"] = [
+                {"cf_in_ex": {"$exists": True}},
+                {"cf_in_ex": "Inclusive"},
+            ]
+        else:
+            query["$or"] = [
+                {"cf_in_ex": {"$exists": False}},
+                {"cf_in_ex": "Exclusive"},
+            ]
+
+    # Fetch matching customers (adjust as necessary for your setup)
+    customers_cursor = customers_collection.find(query).sort(sort_order)
+    customers = [serialize_mongo_document(doc) for doc in customers_cursor]
+
+    # Create an Excel workbook using openpyxl.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Customers Report"
+
+    # Define the header row.
+    headers = [
+        "Customer Name",
+        "Sales Person",
+        "GST Number",
+        "Status",
+        "Place Of Supply",
+    ]
+    ws.append(headers)
+
+    for cust in customers:
+        # Extract state codes from each address
+        addresses = cust.get("addresses", [])
+        state_codes = set()
+        for addr in addresses:
+            state_value = addr.get("state", "")
+            if state_value:
+                state_codes.add(state_value.title())
+        place_of_supply = ", ".join(state_codes)
+
+        # Handle sales person conversion if it's a list.
+        sales_person_val = cust.get("cf_sales_person", "") or cust.get(
+            "salesperson_name", ""
+        )
+        if isinstance(sales_person_val, list):
+            sales_person_val = ", ".join(sales_person_val)
+
+        row = [
+            cust.get("contact_name", ""),
+            sales_person_val,
+            cust.get("gst_no", "-"),
+            cust.get("status", ""),
+            place_of_supply,
+        ]
+        ws.append(row)
+
+    # Save the workbook to a binary stream.
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=customers_report.xlsx"},
+    )
 
 
 @router.get("/orders")
