@@ -82,6 +82,7 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
                 },
             }
         },
+        {"$sort": {"created_at": -1}},
     ]
 
     try:
