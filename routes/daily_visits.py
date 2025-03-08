@@ -107,8 +107,17 @@ async def create_daily_visit(
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid shops data format")
     for shop in shops_data:
-        if not shop["potential_customer"]:
+        if not shop.get("potential_customer", ""):
             shop["customer_id"] = ObjectId(shop["customer_id"])
+        else:
+            db.potential_customers.insert_one(
+                {
+                    "name": shop["potential_customer_name"],
+                    "address": shop["potential_customer_address"],
+                    "tier": shop["potential_customer_tier"],
+                    "created_by": ObjectId(created_by),
+                }
+            )
     # Create the daily visit record with the shops data
     daily_visit = {
         "shops": shops_data,
@@ -181,6 +190,8 @@ async def update_daily_visit_update(
     customer_name: str = Form(None),  # new: selected customer's name,
     potential_customer: bool = Form(None),
     potential_customer_name: str = Form(None),
+    potential_customer_address: str = Form(None),
+    potential_customer_tier: str = Form(None),
 ):
     """
     Appends or edits an update entry on a daily visit, and/or updates the main daily visit content.
@@ -193,17 +204,57 @@ async def update_daily_visit_update(
     daily_visit = db.daily_visits.find_one({"_id": ObjectId(daily_visit_id)})
     if not daily_visit:
         raise HTTPException(status_code=404, detail="Daily visit not found")
-
+    update_fields = {"updated_at": datetime.datetime.now()}
     # Update the main content.
     if shops is not None:
         try:
             shops_data = json.loads(shops)
             daily_visit["shops"] = shops_data
+            for shop in shops_data:
+                if "potential_customer" in shop:
+                    name = shop.get("potential_customer_name", potential_customer_name)
+                    address = shop.get(
+                        "potential_customer_address", potential_customer_address
+                    )
+                    tier = shop.get("potential_customer_tier", potential_customer_tier)
+                    shop.pop("address")
+                    potential_customer_data = {
+                        "name": name,
+                        "address": address,
+                        "tier": tier,
+                        "created_by": ObjectId(uploaded_by),
+                    }
+
+                    doc = db.potential_customers.find_one(
+                        {
+                            "name": name,
+                            "created_by": ObjectId(uploaded_by),
+                        }
+                    )
+                    print(doc)
+                    if doc:
+                        db.potential_customers.update_one(
+                            {"_id": doc.get("_id")},
+                            {"$set": potential_customer_data},
+                        )
+                        potential_customer_id = doc.get("_id")
+                    else:
+                        potential_customer_id = db.potential_customers.insert_one(
+                            potential_customer_data
+                        ).inserted_id
+                    # Store potential customer info in the update entry
+                    update_fields["potential_customer"] = {
+                        "potential_customer_id": potential_customer_id,
+                        "potential_customer_name": name,
+                        "potential_customer_address": address,
+                        "potential_customer_tier": tier,
+                    }
+
         except Exception as e:
             raise HTTPException(status_code=400, detail="Invalid shops data format")
     elif plan is not None:
         daily_visit["plan"] = plan
-
+    print(update_fields)
     if delete_update:
         updates = daily_visit.get("updates", [])
         new_updates = [u for u in updates if str(u.get("_id")) != delete_update]
@@ -240,10 +291,14 @@ async def update_daily_visit_update(
 
             # Update customer info if provided.
             if customer_id is not None:
-                update_entry["customer_id"] = customer_id
+                update_entry["customer_id"] = ObjectId(customer_id)
             if customer_name is not None:
                 update_entry["customer_name"] = customer_name
-
+            if potential_customer:
+                update_entry["potential_customer"] = potential_customer
+                update_entry["potential_customer_name"] = potential_customer_name
+                update_entry["potential_customer_address"] = potential_customer_address
+                update_entry["potential_customer_tier"] = potential_customer_tier
             # Process deletion of images if requested.
             if delete_images:
                 try:
@@ -297,6 +352,7 @@ async def update_daily_visit_update(
                 update_entry.setdefault("images", [])
                 update_entry["images"].extend(new_uploaded_images)
             update_entry["updated_at"] = datetime.datetime.now()
+
         else:
             # Create a new update entry.
             new_entry = {
@@ -306,14 +362,17 @@ async def update_daily_visit_update(
                 "uploaded_by": ObjectId(uploaded_by),
                 "created_at": datetime.datetime.now(),
                 "updated_at": datetime.datetime.now(),
-                "customer_id": customer_id,  # save customer ID
-                "customer_name": customer_name,  # save customer name
             }
+            if customer_id is not None:
+                new_entry["customer_id"] = ObjectId(customer_id)
+            if customer_name is not None:
+                new_entry["customer_name"] = customer_name
+            print(update_fields)
             if potential_customer:
-                new_entry.pop("customer_id")
-                new_entry.pop("customer_name")
                 new_entry["potential_customer"] = potential_customer
                 new_entry["potential_customer_name"] = potential_customer_name
+                new_entry["potential_customer_address"] = potential_customer_address
+                new_entry["potential_customer_tier"] = potential_customer_tier
             if new_images:
                 new_uploaded_images = []
                 for image in new_images:
@@ -345,14 +404,13 @@ async def update_daily_visit_update(
             daily_visit["updates"] = updates
 
     # Prepare update fields.
-    update_fields = {"updated_at": datetime.datetime.now()}
     if shops is not None:
         update_fields["shops"] = daily_visit["shops"]
     elif plan is not None:
         update_fields["plan"] = daily_visit["plan"]
     if update_text is not None:
         update_fields["updates"] = daily_visit.get("updates", [])
-
+    print(json.dumps(serialize_mongo_document(update_fields), indent=4))
     db.daily_visits.update_one(
         {"_id": ObjectId(daily_visit_id)},
         {"$set": update_fields},
