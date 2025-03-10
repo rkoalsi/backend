@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
-import math, datetime
+import math, datetime, io, openpyxl
 
 load_dotenv()
 router = APIRouter()
@@ -44,6 +44,112 @@ async def get_hooks(page: int = Query(0, ge=0), limit: int = Query(25, ge=1)):
             "total_count": total_count,
             "total_pages": total_pages,
         },
+    )
+
+
+@router.get("/report")
+def get_shop_hooks_report():
+    # Corrected query definition with proper lookup for created_by
+    query = [
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "created_by_info",
+            }
+        },
+        {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
+    ]
+
+    # Fetch matching hooks
+    hooks_cursor = db.shop_hooks.aggregate(query)
+    hooks = [serialize_mongo_document(doc) for doc in hooks_cursor]
+
+    # Create an Excel workbook using openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Shop Hooks Report"
+
+    # Define the header row with customer info and hooks information
+    headers = [
+        "Customer Name",
+        "Address",
+        "City",
+        "State",
+        "ZIP",
+        "Country",
+        "Created By",
+        "Created At",
+        "Category",
+        "Hooks Available",
+        "Total Hooks",
+    ]
+    ws.append(headers)
+
+    for hook_doc in hooks:
+        # Format address properly
+        customer_address = hook_doc.get("customer_address", {})
+        formatted_address = f"{customer_address.get('address', '')}, {customer_address.get('street2', '')}"
+        formatted_address = formatted_address.strip(", ")
+
+        # Format creation date
+        created_at = hook_doc.get("created_at", "")
+        if created_at:
+            created_at = (
+                created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if hasattr(created_at, "strftime")
+                else created_at
+            )
+
+        # Get creator name
+        created_by_name = hook_doc.get("created_by_info", {}).get("name", "")
+
+        # For each hook in the hooks array, create a separate row
+        hooks_array = hook_doc.get("hooks", [])
+
+        if hooks_array:
+            for hook_item in hooks_array:
+                row = [
+                    hook_doc.get("customer_name", ""),
+                    formatted_address,
+                    customer_address.get("city", ""),
+                    customer_address.get("state", ""),
+                    customer_address.get("zip", ""),
+                    customer_address.get("country", ""),
+                    created_by_name,
+                    created_at,
+                    hook_item.get("category_name", ""),
+                    hook_item.get("hooksAvailable", ""),
+                    hook_item.get("totalHooks", ""),
+                ]
+                ws.append(row)
+        else:
+            # If no hooks, still add customer info
+            row = [
+                hook_doc.get("customer_name", ""),
+                formatted_address,
+                customer_address.get("city", ""),
+                customer_address.get("state", ""),
+                customer_address.get("zip", ""),
+                customer_address.get("country", ""),
+                created_by_name,
+                created_at,
+                "",
+                "",
+                "",
+            ]
+            ws.append(row)
+
+    # Save the workbook to a binary stream
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=shop_hooks_report.xlsx"},
     )
 
 
