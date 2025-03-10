@@ -24,6 +24,9 @@ from .admin_salespeople import router as admin_salespeople_router
 from .admin_special_margins import router as admin_special_margins_router
 from .admin_announcements import router as admin_announcements_router
 from .admin_daily_visits import router as admin_daily_visits_router
+from .admin_hooks_categories import router as admin_hooks_categories_router
+from .admin_hooks import router as admin_hooks_router
+from .admin_potential_customers import router as admin_potential_customers_router
 from backend.config.auth import JWTBearer  # type: ignore
 
 load_dotenv()
@@ -1267,5 +1270,23 @@ router.include_router(
     admin_daily_visits_router,
     prefix="/daily_visits",
     tags=["Admin Daily Visits"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_hooks_router,
+    prefix="/hooks",
+    tags=["Admin Hooks And Categories"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_hooks_categories_router,
+    prefix="/hooks_categories",
+    tags=["Admin Hooks And Categories"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_potential_customers_router,
+    prefix="/potential_customers",
+    tags=["Admin Potential Customers"],
     dependencies=[Depends(JWTBearer())],
 )
