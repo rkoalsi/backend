@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
 from dotenv import load_dotenv
-import math, datetime
+import math, datetime, io, openpyxl
 
 load_dotenv()
 router = APIRouter()
@@ -82,6 +82,7 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
                 },
             }
         },
+        {"$sort": {"created_at": -1}},
     ]
 
     try:
@@ -108,6 +109,187 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
             "daily_visits": serialize_mongo_document(daily_visits),
             "total_count": total_count,
             "total_pages": total_pages,
+        },
+    )
+
+
+@router.get("/report")
+def get_daily_visits_report():
+    # Corrected query definition
+    query = [
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "created_by_info",
+            }
+        },
+        {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
+        {
+            "$addFields": {
+                "created_at": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "date": {"$add": ["$created_at", IST_OFFSET]},
+                    }
+                },
+                "updated_at": {
+                    "$dateToString": {
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "date": {"$add": ["$updated_at", IST_OFFSET]},
+                    }
+                },
+                "updates": {
+                    "$map": {
+                        "input": {"$ifNull": ["$updates", []]},
+                        "as": "update",
+                        "in": {
+                            "$mergeObjects": [
+                                "$$update",
+                                {
+                                    "created_at": {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d %H:%M:%S",
+                                            "date": {
+                                                "$add": [
+                                                    "$$update.created_at",
+                                                    IST_OFFSET,
+                                                ]
+                                            },
+                                        }
+                                    },
+                                    "updated_at": {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d %H:%M:%S",
+                                            "date": {
+                                                "$add": [
+                                                    "$$update.updated_at",
+                                                    IST_OFFSET,
+                                                ]
+                                            },
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                },
+            }
+        },
+        {"$sort": {"created_at": -1}},
+    ]
+
+    # Fetch matching customers
+    daily_visits_cursor = db.daily_visits.aggregate(query)
+    daily_visits = [serialize_mongo_document(doc) for doc in daily_visits_cursor]
+
+    # Create an Excel workbook using openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Daily Visits Report"
+
+    # Find the maximum number of updates across all visits
+    max_updates = 0
+    for dv in daily_visits:
+        updates_count = len(dv.get("updates", []))
+        if updates_count > max_updates:
+            max_updates = updates_count
+
+    # Define fields to exclude from update columns
+    keys_to_exclude = {
+        "_id",
+        # "uploaded_by",
+        "images",
+        "customer_id"
+        # Exclude all potential customer fields as requested
+        "potential_customer",
+        "potential_customer_name",
+        "potential_customer_address",
+        "potential_customer_tier",
+    }
+
+    # Collect all possible update keys for dynamic columns
+    update_keys = set()
+    for dv in daily_visits:
+        for update in dv.get("updates", []):
+            # Only add keys that aren't in the exclude list
+            update_keys.update([k for k in update.keys() if k not in keys_to_exclude])
+
+    # Define the base header row
+    base_headers = ["Created By", "Selfie", "Created At", "Updated At"]
+
+    # Create dynamic headers for each update
+    headers = base_headers.copy()
+    for i in range(max_updates):
+        # Add a single "Customer" column that will contain either customer_name or "Potential Customer"
+        headers.append(f"Update {i+1} - Customer")
+
+        # Add the rest of the columns
+        for key in sorted(update_keys):
+            headers.append(f"Update {i+1} - {key}")
+
+    ws.append(headers)
+
+    # Add data rows
+    for dv in daily_visits:
+        # Base row data
+        row = [
+            dv.get("created_by_info", {}).get("name", ""),
+            dv.get("selfie", ""),
+            dv.get("created_at", ""),
+            dv.get("updated_at", ""),
+        ]
+
+        # Add update data
+        updates = dv.get("updates", [])
+        for i in range(max_updates):
+            if i < len(updates):
+                update = updates[i]
+
+                # Handle customer column - use "Potential Customer" if potential_customer is True,
+                # otherwise use customer_name
+                if update.get("potential_customer") is True:
+                    row.append("Potential Customer")
+                else:
+                    row.append(update.get("customer_name", ""))
+
+                # Add other fields
+                for key in sorted(update_keys):
+                    row.append(
+                        str(update.get(key, "")) if update.get(key) is not None else ""
+                    )
+            else:
+                # Fill empty cells for missing updates
+                # +1 for the customer column
+                for _ in range(len(update_keys) + 1):
+                    row.append("")
+
+        ws.append(row)
+
+    # Auto-adjust column width for better readability
+    for column in ws.columns:
+        max_length = 0
+        column_letter = openpyxl.utils.get_column_letter(column[0].column)
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2) if max_length < 50 else 50
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    # Save the workbook to a binary stream
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=daily_visits_report.xlsx"
         },
     )
 
@@ -175,7 +357,6 @@ def update_daily_visit(daily_visit_id: str, daily_visit: dict):
         update_data = {k: v for k, v in daily_visit.items() if v is not None}
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
-
         result = db.daily_visits.update_one(
             {"_id": ObjectId(daily_visit_id)}, {"$set": update_data}
         )
