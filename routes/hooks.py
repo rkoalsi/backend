@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Body, status
 from bson import ObjectId
 from .helpers import validate_file, process_upload
-import threading, logging
+import pytz, logging
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from datetime import datetime
 
@@ -46,6 +46,18 @@ async def get_all_hooks(created_by: str):
                 {"created_at": -1}
             )
         )
+        for hook in hooks:
+            # Convert created_at from UTC to IST if it exists
+            if "created_at" in hook:
+                utc_dt = hook["created_at"]
+                # Ensure the datetime is timezone aware; assume it's UTC if not
+                if utc_dt.tzinfo is None:
+                    utc_dt = utc_dt.replace(tzinfo=pytz.UTC)
+                # Convert to IST (UTC+5:30)
+                ist_timezone = pytz.timezone("Asia/Kolkata")
+                ist_dt = utc_dt.astimezone(ist_timezone)
+                # Format the datetime as a string, e.g., "YYYY-MM-DD HH:MM:SS"
+                hook["created_at"] = ist_dt.strftime("%Y-%m-%d %H:%M:%S")
         return serialize_mongo_document(hooks)
     except Exception as e:
         return e
@@ -55,6 +67,17 @@ async def get_all_hooks(created_by: str):
 def get_hook_by_id(hook_id: str):
     try:
         shop_hook = dict(db.shop_hooks.find_one({"_id": ObjectId(hook_id)}))
+        # Convert created_at from UTC to IST if it exists
+        if "created_at" in shop_hook:
+            utc_dt = shop_hook["created_at"]
+            # Ensure the datetime is timezone aware; assume it's UTC if not
+            if utc_dt.tzinfo is None:
+                utc_dt = utc_dt.replace(tzinfo=pytz.UTC)
+            # Convert to IST (UTC+5:30)
+            ist_timezone = pytz.timezone("Asia/Kolkata")
+            ist_dt = utc_dt.astimezone(ist_timezone)
+            # Format the datetime as a string, e.g., "YYYY-MM-DD HH:MM:SS"
+            shop_hook["created_at"] = ist_dt.strftime("%Y-%m-%d %H:%M:%S")
         return serialize_mongo_document(shop_hook)
     except Exception as e:
         return e
