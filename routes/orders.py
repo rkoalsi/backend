@@ -6,11 +6,15 @@ from .helpers import get_access_token, send_email
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-import re, os, json, httpx, requests
+import time, os, httpx, requests
 from dotenv import load_dotenv
 from fastapi.responses import Response
 from backend.config.constants import terms, STATE_CODES  # type: ignore
 from backend.config.whatsapp import send_whatsapp  # type:ignore
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -338,6 +342,236 @@ def check_order_status(order: dict):
             return {"message": "Existing Draft Order Not Found", "can_create": True}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# Function to fetch active products with stock > 0
+def get_active_products(sort):
+    products = list(
+        db.products.aggregate(
+            [
+                {"$match": {"status": "active", "stock": {"$gt": 0}}},
+            ]
+        )
+    )
+    return products
+
+
+# Set up API credentials and Google Sheets service
+SERVICE_ACCOUNT_FILE = "/Users/rohankalsi/Desktop/b2b_ecom/backend/creds.json"  # Update with the actual path
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+# Authenticate and create a service client
+def get_sheets_service():
+    credentials = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    service = build("sheets", "v4", credentials=credentials)
+    return service
+
+
+def get_drive_service():
+    credentials = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    service = build("drive", "v3", credentials=credentials)
+    return service
+
+
+# Helper function to implement retry logic for API requests
+def execute_with_retry(request, retries=5, backoff=1):
+    for attempt in range(retries):
+        try:
+            return request.execute()
+        except HttpError as err:
+            if err.resp.status == 429:  # Rate limit exceeded
+                print(f"Rate limit exceeded, retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff *= 2  # Exponential backoff
+            else:
+                raise  # If it's another error, raise it
+    raise Exception("Exceeded maximum retry attempts")
+
+
+@router.get("/download_order_form")
+async def download_order_form(customer_id: str, order_id: str, sort: str = "default"):
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="Customer is Required")
+    if not order_id:
+        raise HTTPException(status_code=400, detail="Order is Required")
+
+    order = db.orders.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise HTTPException(status_code=400, detail="Order does not exist")
+    spreadsheet_created = order.get("spreadsheet_created", False)
+    if spreadsheet_created:
+        spreadsheet_url = order.get("spreadsheet_url", "")
+        return {"google_sheet_url": spreadsheet_url}
+    # Sorting logic (same as before)
+    sort_stage = {}
+    if sort == "price_asc":
+        sort_stage = {"rate": "ASCENDING"}
+    elif sort == "price_desc":
+        sort_stage = {"rate": "DESCENDING"}
+    elif sort == "catalogue":
+        sort_stage = {"catalogue_order": "ASCENDING"}
+    else:
+        sort_stage = {
+            "brand": "ASCENDING",
+            "new": "DESCENDING",
+            "category": "ASCENDING",
+            "sub_category": "ASCENDING",
+            "series": "ASCENDING",
+            "rate": "ASCENDING",
+            "name": "ASCENDING",
+        }
+
+    # Fetch the products (implement your function to get products)
+    products = get_active_products(sort_stage)
+    brands = {}
+    for product in products:
+        brand = product.get("brand", "Unknown")
+        if brand not in brands:
+            brands[brand] = []
+        brands[brand].append(product)
+
+    # Create a new Google Sheets spreadsheet
+    try:
+        service = get_sheets_service()
+        drive_service = get_drive_service()
+
+        # Create a new Google Sheet
+        spreadsheet = (
+            service.spreadsheets()
+            .create(body={"properties": {"title": "Order Form"}})
+            .execute()
+        )
+        spreadsheet_id = spreadsheet["spreadsheetId"]
+        print(f"Created spreadsheet with ID: {spreadsheet_id}")
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        print(f"Google Sheet URL: {sheet_url}")
+        db.orders.update_one(
+            {"_id": ObjectId(order_id)},
+            {"$set": {"spreadsheet_created": True, "spreadsheet_url": sheet_url}},
+        )
+        # Get the ID of the default Sheet1 to delete it later
+        sheet1_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
+
+        # Loop through brands and add sheets dynamically
+        for brand, products_in_brand in brands.items():
+            # Add new sheet for each brand
+            requests = [{"addSheet": {"properties": {"title": brand}}}]
+            execute_with_retry(
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={"requests": requests}
+                )
+            )
+
+            # Prepare headers
+            headers = [
+                "Image",
+                "Name",
+                "Sub Category",
+                "Series",
+                "SKU",
+                "Price",
+                "Margin",
+                "Selling Price",
+                "Quantity",
+                "Total",
+            ]
+
+            # Create an empty list to hold all row data for this brand
+            all_row_data = [headers]
+
+            # Fetch customer and special margin data
+            customer = db.customers.find_one({"_id": ObjectId(customer_id)})
+            special_margins_cursor = db.special_margins.find(
+                {"customer_id": ObjectId(customer_id)}
+            )
+            special_margin_dict = {
+                str(sm["product_id"]): sm["margin"] for sm in special_margins_cursor
+            }
+
+            # Prepare all the rows for this brand
+            for row_index, product in enumerate(products_in_brand, start=2):
+                image_url = product.get("image_url", "")
+                image_formula = f'=IMAGE("{image_url}")' if image_url else ""
+
+                product_id_str = str(product.get("product_id"))
+                special_margin = special_margin_dict.get(
+                    product_id_str, customer.get("cf_margin", "40%")
+                )
+                discount_value = special_margin
+                if not discount_value.endswith("%"):
+                    discount_value = f"{discount_value}%"
+
+                # Convert margin percentage to decimal for calculation
+                margin_decimal = int(discount_value.replace("%", "")) / 100
+
+                # Prepare row data
+                row_data = [
+                    image_formula,
+                    product.get("name", ""),
+                    product.get("sub_category", ""),
+                    product.get("series", ""),
+                    product.get("cf_sku_code", ""),
+                    product.get("rate", 0),
+                    discount_value,
+                    # Use a number for selling price calculation instead of a formula here
+                    product.get("rate", 0) * margin_decimal,
+                    "",  # Empty cell for quantity
+                    f"=I{row_index}*H{row_index}",
+                ]
+
+                # Add row data to the list
+                all_row_data.append(row_data)
+
+            # Update the sheet with all the row data for the brand at once
+            range_ = f"{brand}!A1:J{len(all_row_data)}"
+            execute_with_retry(
+                service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=spreadsheet_id,
+                    range=range_,
+                    valueInputOption="USER_ENTERED",  # Changed from RAW to USER_ENTERED
+                    body={"values": all_row_data},
+                )
+            )
+
+        # Delete the default Sheet1
+        delete_sheet1_request = {"requests": [{"deleteSheet": {"sheetId": sheet1_id}}]}
+        execute_with_retry(
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=delete_sheet1_request
+            )
+        )
+
+        # Make the spreadsheet public (anyone with the link can view)
+        permission = {
+            "type": "anyone",
+            "role": "writer",  # 'writer' for edit access, 'reader' for view-only
+        }
+        execute_with_retry(
+            drive_service.permissions().create(
+                fileId=spreadsheet_id,
+                body=permission,
+            )
+        )
+
+        # Return the link to the created Google Sheet
+
+        return {"google_sheet_url": sheet_url}
+
+    except HttpError as err:
+        print(err)
+        raise HTTPException(
+            status_code=500, detail=f"Error creating Google Sheet: {err}"
+        )
 
 
 # Get an order by ID
