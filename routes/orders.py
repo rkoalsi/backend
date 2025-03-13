@@ -466,7 +466,7 @@ async def finalise(order_dict: dict):
             "item_id": item.get("item_id"),
             "rate": item.get("rate"),
             "name": item.get("name"),
-            "description": "",
+            "description": f"SOH:{item.get('stock')}",
             "quantity": product.get("quantity"),
             "discount": discount_value,
             "tax_id": (
