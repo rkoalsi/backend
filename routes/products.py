@@ -100,7 +100,12 @@ def get_categories_for_brand(brand: str):
         # Fetch distinct categories for the specified brand
         categories = products_collection.distinct(
             "category",
-            {"brand": brand, "stock": {"$gt": 0}, "is_deleted": {"$exists": False}},
+            {
+                "brand": brand,
+                "stock": {"$gt": 0},
+                "status": "active",
+                "is_deleted": {"$exists": False},
+            },
         )
 
         # Remove empty or null categories
