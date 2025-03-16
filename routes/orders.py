@@ -15,6 +15,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from pymongo import DESCENDING, ASCENDING
 
 load_dotenv()
 
@@ -344,12 +345,12 @@ def check_order_status(order: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# Function to fetch active products with stock > 0
-def get_active_products(sort):
+def get_active_products(sort: dict):
     products = list(
         db.products.aggregate(
             [
                 {"$match": {"status": "active", "stock": {"$gt": 0}}},
+                {"$sort": sort},
             ]
         )
     )
@@ -361,6 +362,7 @@ SERVICE_ACCOUNT_FILE = "/Users/rohankalsi/Desktop/b2b_ecom/backend/creds.json"  
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/script.projects",
 ]
 
 
@@ -379,6 +381,17 @@ def get_drive_service():
     )
     service = build("drive", "v3", credentials=credentials)
     return service
+
+
+def get_apps_script_service():
+    creds = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,  # Update this path
+        scopes=[
+            "https://www.googleapis.com/auth/script.projects",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    return build("script", "v1", credentials=creds)
 
 
 # Helper function to implement retry logic for API requests
@@ -406,71 +419,72 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
     order = db.orders.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=400, detail="Order does not exist")
+
     spreadsheet_created = order.get("spreadsheet_created", False)
     if spreadsheet_created:
-        spreadsheet_url = order.get("spreadsheet_url", "")
-        return {"google_sheet_url": spreadsheet_url}
-    # Sorting logic (same as before)
-    sort_stage = {}
-    if sort == "price_asc":
-        sort_stage = {"rate": "ASCENDING"}
-    elif sort == "price_desc":
-        sort_stage = {"rate": "DESCENDING"}
-    elif sort == "catalogue":
-        sort_stage = {"catalogue_order": "ASCENDING"}
-    else:
-        sort_stage = {
-            "brand": "ASCENDING",
-            "new": "DESCENDING",
-            "category": "ASCENDING",
-            "sub_category": "ASCENDING",
-            "series": "ASCENDING",
-            "rate": "ASCENDING",
-            "name": "ASCENDING",
-        }
+        return {"google_sheet_url": order.get("spreadsheet_url", "")}
 
-    # Fetch the products (implement your function to get products)
+    sort_stage = {
+        "brand": ASCENDING,
+        "new": DESCENDING,
+        "category": ASCENDING,
+        "sub_category": ASCENDING,
+        "series": ASCENDING,
+        "rate": ASCENDING,
+        "name": ASCENDING,
+    }
+
+    if sort == "price_asc":
+        sort_stage = {"rate": ASCENDING}
+    elif sort == "price_desc":
+        sort_stage = {"rate": DESCENDING}
+    elif sort == "catalogue":
+        sort_stage = {"catalogue_order": ASCENDING}
+
     products = get_active_products(sort_stage)
     brands = {}
     for product in products:
         brand = product.get("brand", "Unknown")
-        if brand not in brands:
-            brands[brand] = []
-        brands[brand].append(product)
+        brands.setdefault(brand, []).append(product)
 
-    # Create a new Google Sheets spreadsheet
     try:
         service = get_sheets_service()
         drive_service = get_drive_service()
 
-        # Create a new Google Sheet
         spreadsheet = (
             service.spreadsheets()
             .create(body={"properties": {"title": "Order Form"}})
             .execute()
         )
         spreadsheet_id = spreadsheet["spreadsheetId"]
-        print(f"Created spreadsheet with ID: {spreadsheet_id}")
         sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-        print(f"Google Sheet URL: {sheet_url}")
+
         db.orders.update_one(
             {"_id": ObjectId(order_id)},
             {"$set": {"spreadsheet_created": True, "spreadsheet_url": sheet_url}},
         )
-        # Get the ID of the default Sheet1 to delete it later
-        sheet1_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
 
-        # Loop through brands and add sheets dynamically
+        # Store the ID of the first brand sheet to use for adding the note
+        first_brand_sheet_id = None
+
         for brand, products_in_brand in brands.items():
-            # Add new sheet for each brand
-            requests = [{"addSheet": {"properties": {"title": brand}}}]
-            execute_with_retry(
+            add_sheet_request = {"addSheet": {"properties": {"title": brand}}}
+            response = execute_with_retry(
                 service.spreadsheets().batchUpdate(
-                    spreadsheetId=spreadsheet_id, body={"requests": requests}
+                    spreadsheetId=spreadsheet_id, body={"requests": [add_sheet_request]}
                 )
             )
+            sheet_id = (
+                response.get("replies", [{}])[0]
+                .get("addSheet", {})
+                .get("properties", {})
+                .get("sheetId")
+            )
 
-            # Prepare headers
+            # Save the first brand sheet ID for later use
+            if first_brand_sheet_id is None:
+                first_brand_sheet_id = sheet_id
+
             headers = [
                 "Image",
                 "Name",
@@ -483,11 +497,8 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 "Quantity",
                 "Total",
             ]
-
-            # Create an empty list to hold all row data for this brand
             all_row_data = [headers]
 
-            # Fetch customer and special margin data
             customer = db.customers.find_one({"_id": ObjectId(customer_id)})
             special_margins_cursor = db.special_margins.find(
                 {"customer_id": ObjectId(customer_id)}
@@ -496,41 +507,29 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 str(sm["product_id"]): sm["margin"] for sm in special_margins_cursor
             }
 
-            # Prepare all the rows for this brand
             for row_index, product in enumerate(products_in_brand, start=2):
                 image_url = product.get("image_url", "")
-                image_formula = f'=IMAGE("{image_url}")' if image_url else ""
-
                 product_id_str = str(product.get("product_id"))
                 special_margin = special_margin_dict.get(
                     product_id_str, customer.get("cf_margin", "40%")
                 )
-                discount_value = special_margin
-                if not discount_value.endswith("%"):
-                    discount_value = f"{discount_value}%"
+                margin_decimal = int(special_margin.replace("%", "")) / 100
 
-                # Convert margin percentage to decimal for calculation
-                margin_decimal = int(discount_value.replace("%", "")) / 100
-
-                # Prepare row data
                 row_data = [
-                    image_formula,
+                    # Use mode 2 with custom dimensions for larger images (approx 100px)
+                    f'=IMAGE("{image_url}",1)',
                     product.get("name", ""),
                     product.get("sub_category", ""),
                     product.get("series", ""),
                     product.get("cf_sku_code", ""),
                     product.get("rate", 0),
-                    discount_value,
-                    # Use a number for selling price calculation instead of a formula here
+                    special_margin,
                     product.get("rate", 0) * margin_decimal,
-                    "",  # Empty cell for quantity
+                    "",
                     f"=I{row_index}*H{row_index}",
                 ]
-
-                # Add row data to the list
                 all_row_data.append(row_data)
 
-            # Update the sheet with all the row data for the brand at once
             range_ = f"{brand}!A1:J{len(all_row_data)}"
             execute_with_retry(
                 service.spreadsheets()
@@ -538,32 +537,222 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 .update(
                     spreadsheetId=spreadsheet_id,
                     range=range_,
-                    valueInputOption="USER_ENTERED",  # Changed from RAW to USER_ENTERED
+                    valueInputOption="USER_ENTERED",
                     body={"values": all_row_data},
                 )
             )
 
-        # Delete the default Sheet1
-        delete_sheet1_request = {"requests": [{"deleteSheet": {"sheetId": sheet1_id}}]}
-        execute_with_retry(
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id, body=delete_sheet1_request
-            )
-        )
+            # Updated formatting requests
+            format_requests = [
+                # Make header row bold with no background color
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 10,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"bold": True},
+                                "horizontalAlignment": "CENTER",
+                                "verticalAlignment": "MIDDLE",
+                            }
+                        },
+                        "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment)",
+                    }
+                },
+                # Add borders to the entire table
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 10,
+                        },
+                        "top": {"style": "SOLID", "width": 1},
+                        "bottom": {"style": "SOLID", "width": 1},
+                        "left": {"style": "SOLID", "width": 1},
+                        "right": {"style": "SOLID", "width": 1},
+                        "innerHorizontal": {"style": "SOLID", "width": 1},
+                        "innerVertical": {"style": "SOLID", "width": 1},
+                    }
+                },
+                # Resize image column to fit 100px images
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 0,
+                            "endIndex": 1,
+                        },
+                        "properties": {"pixelSize": 120},
+                        "fields": "pixelSize",
+                    }
+                },
+                # Set row heights to accommodate 100px images
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": 1,
+                            "endIndex": len(all_row_data),
+                        },
+                        "properties": {"pixelSize": 110},
+                        "fields": "pixelSize",
+                    }
+                },
+                # Center align image column
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "CENTER",
+                                "verticalAlignment": "MIDDLE",
+                            }
+                        },
+                        "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment)",
+                    }
+                },
+                # Format numbers as decimal numbers (not currency)
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 5,
+                            "endColumnIndex": 6,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": "NUMBER",
+                                    "pattern": "#,##0.00",
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+                # Format selling price as regular number
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 7,
+                            "endColumnIndex": 8,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": "NUMBER",
+                                    "pattern": "#,##0.00",
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+                # Format total as regular number
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 9,
+                            "endColumnIndex": 10,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": "NUMBER",
+                                    "pattern": "#,##0.00",
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+                # Format margin as percentage
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(all_row_data),
+                            "startColumnIndex": 6,
+                            "endColumnIndex": 7,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "PERCENT", "pattern": "0.00%"}
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+            ]
 
-        # Make the spreadsheet public (anyone with the link can view)
-        permission = {
-            "type": "anyone",
-            "role": "writer",  # 'writer' for edit access, 'reader' for view-only
-        }
+            # Add auto-resize requests for all columns except image
+            for col_index in range(1, 10):
+                format_requests.append(
+                    {
+                        "autoResizeDimensions": {
+                            "dimensions": {
+                                "sheetId": sheet_id,
+                                "dimension": "COLUMNS",
+                                "startIndex": col_index,
+                                "endIndex": col_index + 1,
+                            }
+                        }
+                    }
+                )
+
+            execute_with_retry(
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={"requests": format_requests}
+                )
+            )
+
+        # Set public permissions
         execute_with_retry(
             drive_service.permissions().create(
-                fileId=spreadsheet_id,
-                body=permission,
+                fileId=spreadsheet_id, body={"type": "anyone", "role": "writer"}
             )
         )
 
-        # Return the link to the created Google Sheet
+        # Delete the default sheet AFTER adding the note to a brand sheet
+        delete_default_sheet_request = {
+            "requests": [
+                {
+                    "deleteSheet": {
+                        "sheetId": spreadsheet["sheets"][0]["properties"]["sheetId"]
+                    }
+                }
+            ]
+        }
+        execute_with_retry(
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=delete_default_sheet_request
+            )
+        )
 
         return {"google_sheet_url": sheet_url}
 
@@ -571,6 +760,118 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
         print(err)
         raise HTTPException(
             status_code=500, detail=f"Error creating Google Sheet: {err}"
+        )
+
+
+@router.get("/update_cart")
+async def update_order_from_sheet(order_id: str):
+    # Fetch order details from DB
+    order = db.orders.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    spreadsheet_url = order.get("spreadsheet_url", "")
+    if not spreadsheet_url:
+        raise HTTPException(
+            status_code=400, detail="No spreadsheet associated with order"
+        )
+
+    try:
+        spreadsheet_id = spreadsheet_url.split("/d/")[1].split("/")[0]
+    except IndexError:
+        raise HTTPException(status_code=400, detail="Invalid spreadsheet URL")
+
+    try:
+        service = get_sheets_service()
+
+        # Get all sheets in the spreadsheet
+        spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheet_titles = [sheet["properties"]["title"] for sheet in spreadsheet["sheets"]]
+
+        updated_products = []
+
+        for sheet_title in sheet_titles:
+            sheet_data = (
+                service.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=f"{sheet_title}!A1:J")
+                .execute()
+            )
+
+            values = sheet_data.get("values", [])
+            if not values or len(values) < 2:
+                continue  # Skip empty sheets
+
+            headers = values[0]
+            col_indices = {
+                "image_url": headers.index("Image") if "Image" in headers else -1,
+                "name": headers.index("Name") if "Name" in headers else -1,
+                "sub_category": (
+                    headers.index("Sub Category") if "Sub Category" in headers else -1
+                ),
+                "series": headers.index("Series") if "Series" in headers else -1,
+                "sku": headers.index("SKU") if "SKU" in headers else -1,
+                "price": headers.index("Price") if "Price" in headers else -1,
+                "margin": headers.index("Margin") if "Margin" in headers else -1,
+                "selling_price": (
+                    headers.index("Selling Price") if "Selling Price" in headers else -1
+                ),
+                "quantity": headers.index("Quantity") if "Quantity" in headers else -1,
+                "total": headers.index("Total") if "Total" in headers else -1,
+            }
+
+            # Ensure required fields exist
+            if col_indices["sku"] == -1 or col_indices["quantity"] == -1:
+                continue
+
+            for row in values[1:]:
+                if (
+                    len(row) > col_indices["quantity"]
+                    and row[col_indices["quantity"]].strip()
+                ):
+                    try:
+                        quantity = int(row[col_indices["quantity"]].strip())
+                        if quantity > 0:
+                            product_sku = row[col_indices["sku"]]
+                            product = db.products.find_one({"cf_sku_code": product_sku})
+
+                            if product:
+                                updated_products.append(
+                                    {
+                                        "product_id": ObjectId(product["_id"]),
+                                        "tax_percentage": 18,  # Adjust based on product data if available
+                                        "brand": product.get("brand", "Unknown"),
+                                        "product_code": product_sku,
+                                        "quantity": quantity,
+                                        "name": row[col_indices["name"]],
+                                        "image_url": row[col_indices["image_url"]],
+                                        "margin": row[col_indices["margin"]],
+                                        "price": float(row[col_indices["price"]]),
+                                        "added_by": "sales_person",
+                                    }
+                                )
+                    except ValueError:
+                        continue  # Ignore invalid quantity values
+
+        if not updated_products:
+            raise HTTPException(
+                status_code=400, detail="No products with quantities found"
+            )
+
+        # Update the order in the database
+        db.orders.update_one(
+            {"_id": ObjectId(order_id)},
+            {"$set": {"products": updated_products, "updated_from_sheet": True}},
+        )
+
+        return {
+            "message": "Order updated successfully",
+            "updated_products": serialize_mongo_document(updated_products),
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error reading spreadsheet: {str(e)}"
         )
 
 
