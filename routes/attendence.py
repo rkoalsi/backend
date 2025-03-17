@@ -1,0 +1,18 @@
+from fastapi import APIRouter, BackgroundTasks
+from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from dotenv import load_dotenv
+
+load_dotenv()
+
+router = APIRouter()
+
+client, db = connect_to_mongo()
+
+
+@router.post("/in_and_out")
+def in_and_out(
+    data: dict,
+):
+    print("Request Received")
+    print(data)
+    return
