@@ -6,7 +6,7 @@ from .helpers import get_access_token, send_email
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-import time, os, httpx, requests
+import time, os, httpx, requests, asyncio, random, json
 from dotenv import load_dotenv
 from fastapi.responses import Response
 from backend.config.constants import terms, STATE_CODES  # type: ignore
@@ -16,6 +16,7 @@ from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from pymongo import DESCENDING, ASCENDING
+from pathlib import Path
 
 load_dotenv()
 
@@ -97,7 +98,7 @@ def get_all_orders(
             raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
         query["is_deleted"] = {"$exists": False}
-        query["total_amount"] = {"$gt": 0}
+        query["$or"] = [{"total_amount": {"$gt": 0}}, {"spreadsheet_created": True}]
     if status:
         query["status"] = status
 
@@ -357,8 +358,13 @@ def get_active_products(sort: dict):
     return products
 
 
-# Set up API credentials and Google Sheets service
-SERVICE_ACCOUNT_FILE = "/Users/rohankalsi/Desktop/b2b_ecom/backend/creds.json"  # Update with the actual path
+BASE_DIR = (
+    Path(__file__).resolve().parent.parent
+)  # Get the directory of the current script
+SERVICE_ACCOUNT_FILE = (
+    BASE_DIR / "creds.json"
+)  # Adjust based on where the file is stored
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -409,6 +415,42 @@ def execute_with_retry(request, retries=5, backoff=1):
     raise Exception("Exceeded maximum retry attempts")
 
 
+async def execute_with_retry_async(request, max_retries=5, initial_delay=1.0):
+    """
+    Executes a Google API request with automatic exponential backoff retry.
+
+    Parameters:
+        - request: The Google API request object.
+        - max_retries: Maximum retry attempts.
+        - initial_delay: Initial wait time before retry (in seconds).
+
+    Returns:
+        - API response if successful.
+
+    Raises:
+        - HttpError if all retries fail.
+    """
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.to_thread(request.execute)  # Run in async mode
+        except HttpError as err:
+            if err.resp.status in [500, 502, 503, 504]:  # Retry on transient errors
+                if attempt < max_retries - 1:
+                    wait_time = delay + random.uniform(0, 0.5)  # Add jitter
+                    print(
+                        f"Retry {attempt + 1}/{max_retries} after {wait_time:.2f}s due to error: {err}"
+                    )
+                    await asyncio.sleep(wait_time)
+                    delay *= 2  # Exponential backoff
+                else:
+                    raise HTTPException(
+                        status_code=500, detail=f"Google API Error: {err}"
+                    )
+            else:
+                raise  # If it's a permanent error, don't retry
+
+
 @router.get("/download_order_form")
 async def download_order_form(customer_id: str, order_id: str, sort: str = "default"):
     if not customer_id:
@@ -424,342 +466,367 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
     if spreadsheet_created:
         return {"google_sheet_url": order.get("spreadsheet_url", "")}
 
-    sort_stage = {
-        "brand": ASCENDING,
-        "new": DESCENDING,
-        "category": ASCENDING,
-        "sub_category": ASCENDING,
-        "series": ASCENDING,
-        "rate": ASCENDING,
-        "name": ASCENDING,
-    }
-
+    sort_stage = {"brand": 1, "rate": 1, "name": 1}
     if sort == "price_asc":
-        sort_stage = {"rate": ASCENDING}
+        sort_stage = {"rate": 1}
     elif sort == "price_desc":
-        sort_stage = {"rate": DESCENDING}
+        sort_stage = {"rate": -1}
     elif sort == "catalogue":
-        sort_stage = {"catalogue_order": ASCENDING}
+        sort_stage = {"catalogue_order": 1}
 
     products = get_active_products(sort_stage)
     brands = {}
     for product in products:
-        brand = product.get("brand", "Unknown")
-        brands.setdefault(brand, []).append(product)
+        brands.setdefault(product.get("brand", "Unknown"), []).append(product)
+
+    # Enhanced retry function with exponential backoff for SSL errors
+    async def execute_with_robust_retry(func, max_retries=5, initial_delay=1):
+        retries = 0
+        last_exception = None
+
+        while retries < max_retries:
+            try:
+                return await asyncio.to_thread(func)
+            except (HttpError, ConnectionError, TimeoutError) as e:
+                last_exception = e
+                wait_time = initial_delay * (2**retries)  # Exponential backoff
+                print(
+                    f"Connection error. Retry {retries + 1}/{max_retries} after {wait_time}s: {str(e)}"
+                )
+                await asyncio.sleep(wait_time)
+                retries += 1
+
+        # If we get here, all retries failed
+        raise last_exception
 
     try:
-        service = get_sheets_service()
-        drive_service = get_drive_service()
+        # Get services with robust retry
+        try:
+            service = await execute_with_robust_retry(get_sheets_service)
+            drive_service = await execute_with_robust_retry(get_drive_service)
+        except Exception as e:
+            print(f"Failed to initialize services after retries: {e}")
+            raise HTTPException(
+                status_code=503, detail="Google services temporarily unavailable"
+            )
 
-        spreadsheet = (
-            service.spreadsheets()
-            .create(body={"properties": {"title": "Order Form"}})
-            .execute()
-        )
-        spreadsheet_id = spreadsheet["spreadsheetId"]
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        # Create spreadsheet
+        try:
+            spreadsheet = await execute_with_robust_retry(
+                lambda: service.spreadsheets()
+                .create(body={"properties": {"title": "Order Form"}})
+                .execute()
+            )
+            spreadsheet_id = spreadsheet["spreadsheetId"]
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        except Exception as e:
+            print(f"Failed to create spreadsheet: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create spreadsheet")
 
+        # Update DB
         db.orders.update_one(
             {"_id": ObjectId(order_id)},
             {"$set": {"spreadsheet_created": True, "spreadsheet_url": sheet_url}},
         )
 
-        # Store the ID of the first brand sheet to use for adding the note
-        first_brand_sheet_id = None
-
-        for brand, products_in_brand in brands.items():
-            add_sheet_request = {"addSheet": {"properties": {"title": brand}}}
-            response = execute_with_retry(
-                service.spreadsheets().batchUpdate(
-                    spreadsheetId=spreadsheet_id, body={"requests": [add_sheet_request]}
-                )
-            )
-            sheet_id = (
-                response.get("replies", [{}])[0]
-                .get("addSheet", {})
-                .get("properties", {})
-                .get("sheetId")
-            )
-
-            # Save the first brand sheet ID for later use
-            if first_brand_sheet_id is None:
-                first_brand_sheet_id = sheet_id
-
-            headers = [
-                "Image",
-                "Name",
-                "Sub Category",
-                "Series",
-                "SKU",
-                "Price",
-                "Margin",
-                "Selling Price",
-                "Quantity",
-                "Total",
-            ]
-            all_row_data = [headers]
-
-            customer = db.customers.find_one({"_id": ObjectId(customer_id)})
-            special_margins_cursor = db.special_margins.find(
-                {"customer_id": ObjectId(customer_id)}
-            )
-            special_margin_dict = {
-                str(sm["product_id"]): sm["margin"] for sm in special_margins_cursor
-            }
-
-            for row_index, product in enumerate(products_in_brand, start=2):
-                image_url = product.get("image_url", "")
-                product_id_str = str(product.get("product_id"))
-                special_margin = special_margin_dict.get(
-                    product_id_str, customer.get("cf_margin", "40%")
-                )
-                margin_decimal = int(special_margin.replace("%", "")) / 100
-
-                row_data = [
-                    # Use mode 2 with custom dimensions for larger images (approx 100px)
-                    f'=IMAGE("{image_url}",1)',
-                    product.get("name", ""),
-                    product.get("sub_category", ""),
-                    product.get("series", ""),
-                    product.get("cf_sku_code", ""),
-                    product.get("rate", 0),
-                    special_margin,
-                    product.get("rate", 0) * margin_decimal,
-                    "",
-                    f"=I{row_index}*H{row_index}",
-                ]
-                all_row_data.append(row_data)
-
-            range_ = f"{brand}!A1:J{len(all_row_data)}"
-            execute_with_retry(
-                service.spreadsheets()
-                .values()
-                .update(
-                    spreadsheetId=spreadsheet_id,
-                    range=range_,
-                    valueInputOption="USER_ENTERED",
-                    body={"values": all_row_data},
-                )
-            )
-
-            # Updated formatting requests
-            format_requests = [
-                # Make header row bold with no background color
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 0,
-                            "endRowIndex": 1,
-                            "startColumnIndex": 0,
-                            "endColumnIndex": 10,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "textFormat": {"bold": True},
-                                "horizontalAlignment": "CENTER",
-                                "verticalAlignment": "MIDDLE",
-                            }
-                        },
-                        "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment)",
-                    }
-                },
-                # Add borders to the entire table
-                {
-                    "updateBorders": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 0,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 0,
-                            "endColumnIndex": 10,
-                        },
-                        "top": {"style": "SOLID", "width": 1},
-                        "bottom": {"style": "SOLID", "width": 1},
-                        "left": {"style": "SOLID", "width": 1},
-                        "right": {"style": "SOLID", "width": 1},
-                        "innerHorizontal": {"style": "SOLID", "width": 1},
-                        "innerVertical": {"style": "SOLID", "width": 1},
-                    }
-                },
-                # Resize image column to fit 100px images
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "COLUMNS",
-                            "startIndex": 0,
-                            "endIndex": 1,
-                        },
-                        "properties": {"pixelSize": 120},
-                        "fields": "pixelSize",
-                    }
-                },
-                # Set row heights to accommodate 100px images
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": 1,
-                            "endIndex": len(all_row_data),
-                        },
-                        "properties": {"pixelSize": 110},
-                        "fields": "pixelSize",
-                    }
-                },
-                # Center align image column
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 0,
-                            "endColumnIndex": 1,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "horizontalAlignment": "CENTER",
-                                "verticalAlignment": "MIDDLE",
-                            }
-                        },
-                        "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment)",
-                    }
-                },
-                # Format numbers as decimal numbers (not currency)
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 5,
-                            "endColumnIndex": 6,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {
-                                    "type": "NUMBER",
-                                    "pattern": "#,##0.00",
-                                }
-                            }
-                        },
-                        "fields": "userEnteredFormat.numberFormat",
-                    }
-                },
-                # Format selling price as regular number
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 7,
-                            "endColumnIndex": 8,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {
-                                    "type": "NUMBER",
-                                    "pattern": "#,##0.00",
-                                }
-                            }
-                        },
-                        "fields": "userEnteredFormat.numberFormat",
-                    }
-                },
-                # Format total as regular number
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 9,
-                            "endColumnIndex": 10,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {
-                                    "type": "NUMBER",
-                                    "pattern": "#,##0.00",
-                                }
-                            }
-                        },
-                        "fields": "userEnteredFormat.numberFormat",
-                    }
-                },
-                # Format margin as percentage
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1,
-                            "endRowIndex": len(all_row_data),
-                            "startColumnIndex": 6,
-                            "endColumnIndex": 7,
-                        },
-                        "cell": {
-                            "userEnteredFormat": {
-                                "numberFormat": {"type": "PERCENT", "pattern": "0.00%"}
-                            }
-                        },
-                        "fields": "userEnteredFormat.numberFormat",
-                    }
-                },
-            ]
-
-            # Add auto-resize requests for all columns except image
-            for col_index in range(1, 10):
-                format_requests.append(
-                    {
-                        "autoResizeDimensions": {
-                            "dimensions": {
-                                "sheetId": sheet_id,
-                                "dimension": "COLUMNS",
-                                "startIndex": col_index,
-                                "endIndex": col_index + 1,
-                            }
-                        }
-                    }
-                )
-
-            execute_with_retry(
-                service.spreadsheets().batchUpdate(
-                    spreadsheetId=spreadsheet_id, body={"requests": format_requests}
-                )
-            )
-
-        # Set public permissions
-        execute_with_retry(
-            drive_service.permissions().create(
-                fileId=spreadsheet_id, body={"type": "anyone", "role": "writer"}
-            )
-        )
-
-        # Delete the default sheet AFTER adding the note to a brand sheet
-        delete_default_sheet_request = {
-            "requests": [
-                {
-                    "deleteSheet": {
-                        "sheetId": spreadsheet["sheets"][0]["properties"]["sheetId"]
-                    }
-                }
-            ]
+        # Get customer data
+        customer = db.customers.find_one({"_id": ObjectId(customer_id)})
+        special_margins = {
+            str(sm["product_id"]): sm["margin"]
+            for sm in db.special_margins.find({"customer_id": ObjectId(customer_id)})
         }
-        execute_with_retry(
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id, body=delete_default_sheet_request
+
+        # Get spreadsheet details
+        try:
+            spreadsheet_details = await execute_with_robust_retry(
+                lambda: service.spreadsheets()
+                .get(spreadsheetId=spreadsheet_id)
+                .execute()
             )
-        )
+            existing_sheets = {
+                sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+                for sheet in spreadsheet_details["sheets"]
+            }
+            sheet1_id = existing_sheets.get("Sheet1")
+        except Exception as e:
+            print(f"Failed to get spreadsheet details: {e}")
+            # Continue with the process, we can still try to add sheets
+
+        # Sort brands alphabetically
+        sorted_brands = sorted(brands.keys())
+
+        # Add sheets in smaller batches to reduce connection load
+        brand_sheets = {}
+        for brand in sorted_brands:
+            if brand in existing_sheets:
+                brand_sheets[brand] = existing_sheets[brand]
+
+        # Process brands in chunks to reduce API load
+        chunk_size = 5  # Process 5 brands at a time
+        for i in range(0, len(sorted_brands), chunk_size):
+            chunk_brands = sorted_brands[i : i + chunk_size]
+            chunk_requests = []
+
+            for brand in chunk_brands:
+                if brand not in brand_sheets:
+                    chunk_requests.append(
+                        {"addSheet": {"properties": {"title": brand}}}
+                    )
+
+            if chunk_requests:
+                try:
+                    batch_response = await execute_with_robust_retry(
+                        lambda: service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={"requests": chunk_requests},
+                        )
+                        .execute()
+                    )
+
+                    for j, brand in enumerate(
+                        [b for b in chunk_brands if b not in brand_sheets]
+                    ):
+                        brand_sheets[brand] = batch_response["replies"][j]["addSheet"][
+                            "properties"
+                        ]["sheetId"]
+                except Exception as e:
+                    print(f"Error adding sheets for chunk {i//chunk_size + 1}: {e}")
+                    # Continue with sheets we successfully created
+
+        # Process data in chunks
+        for i in range(0, len(sorted_brands), chunk_size):
+            chunk_brands = sorted_brands[i : i + chunk_size]
+            data_updates = []
+            format_requests = []
+
+            for brand in chunk_brands:
+                if brand not in brand_sheets:
+                    continue  # Skip brands without sheets
+
+                sheet_id = brand_sheets[brand]
+                products_in_brand = brands[brand]
+                rows = [
+                    [
+                        "Image",
+                        "Name",
+                        "Sub Category",
+                        "Series",
+                        "SKU",
+                        "Price",
+                        "Margin",
+                        "Selling Price",
+                        "Quantity",
+                        "Total",
+                    ]
+                ]
+
+                for idx, product in enumerate(products_in_brand, start=2):
+                    image_url = product.get("image_url", "")
+                    margin = special_margins.get(
+                        str(product.get("_id")), customer.get("cf_margin", "40%")
+                    )
+                    margin_value = int(margin.replace("%", "")) / 100
+
+                    rows.append(
+                        [
+                            f'=IMAGE("{image_url}", 1)',
+                            product.get("name", ""),
+                            product.get("sub_category", ""),
+                            product.get("series", ""),
+                            product.get("cf_sku_code", ""),
+                            product.get("rate", 0),
+                            margin,
+                            product.get("rate", 0) * margin_value,
+                            "",
+                            f"=I{idx}*H{idx}",
+                        ]
+                    )
+
+                data_updates.append(
+                    {"range": f"{brand}!A1:J{len(rows)}", "values": rows}
+                )
+                rows_count = len(products_in_brand) + 1
+
+                # Add formatting requests for this brand
+                format_requests.extend(
+                    [
+                        # Bold headers
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 10,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "textFormat": {"bold": True},
+                                        "horizontalAlignment": "CENTER",
+                                        "verticalAlignment": "MIDDLE",
+                                    }
+                                },
+                                "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment)",
+                            }
+                        },
+                        # Table borders
+                        {
+                            "updateBorders": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": rows_count,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 10,
+                                },
+                                "top": {"style": "SOLID"},
+                                "bottom": {"style": "SOLID"},
+                                "left": {"style": "SOLID"},
+                                "right": {"style": "SOLID"},
+                                "innerHorizontal": {"style": "SOLID"},
+                                "innerVertical": {"style": "SOLID"},
+                            }
+                        },
+                        # Column widths
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 0,
+                                    "endIndex": 1,
+                                },
+                                "properties": {"pixelSize": 120},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 1,
+                                    "endIndex": 2,
+                                },
+                                "properties": {"pixelSize": 250},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 2,
+                                    "endIndex": 4,
+                                },
+                                "properties": {"pixelSize": 150},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 4,
+                                    "endIndex": 10,
+                                },
+                                "properties": {"pixelSize": 120},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        # Row height
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": 0,
+                                    "endIndex": rows_count,
+                                },
+                                "properties": {"pixelSize": 100},
+                                "fields": "pixelSize",
+                            }
+                        },
+                    ]
+                )
+
+            # Update data for this chunk if we have any
+            if data_updates:
+                try:
+                    await execute_with_robust_retry(
+                        lambda: service.spreadsheets()
+                        .values()
+                        .batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={
+                                "valueInputOption": "USER_ENTERED",
+                                "data": data_updates,
+                            },
+                        )
+                        .execute()
+                    )
+                except Exception as e:
+                    print(f"Error updating data for chunk {i//chunk_size + 1}: {e}")
+
+            # Apply formatting for this chunk if we have any
+            if format_requests:
+                try:
+                    await execute_with_robust_retry(
+                        lambda: service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={"requests": format_requests},
+                        )
+                        .execute()
+                    )
+                except Exception as e:
+                    print(
+                        f"Error applying formatting for chunk {i//chunk_size + 1}: {e}"
+                    )
+
+        # Delete Sheet1 if it exists - attempt multiple times
+        if sheet1_id is not None:
+            for attempt in range(3):  # Try 3 times to delete Sheet1
+                try:
+                    await execute_with_robust_retry(
+                        lambda: service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=spreadsheet_id,
+                            body={
+                                "requests": [{"deleteSheet": {"sheetId": sheet1_id}}]
+                            },
+                        )
+                        .execute()
+                    )
+                    break  # If successful, break out of the retry loop
+                except Exception as e:
+                    print(f"Error deleting Sheet1 (attempt {attempt+1}/3): {e}")
+                    if attempt == 2:  # If this was the last attempt
+                        print("Failed to delete Sheet1 after multiple attempts")
+
+        # Set permissions
+        try:
+            await execute_with_robust_retry(
+                lambda: drive_service.permissions()
+                .create(
+                    fileId=spreadsheet_id, body={"type": "anyone", "role": "writer"}
+                )
+                .execute()
+            )
+        except Exception as e:
+            print(f"Error setting permissions: {e}")
+            # We'll return the URL anyway since the sheet is created
 
         return {"google_sheet_url": sheet_url}
 
-    except HttpError as err:
-        print(err)
+    except Exception as err:
+        print(f"Unexpected error: {err}")
         raise HTTPException(
-            status_code=500, detail=f"Error creating Google Sheet: {err}"
+            status_code=500, detail=f"Error creating Google Sheet: {str(err)}"
         )
 
 
@@ -833,7 +900,9 @@ async def update_order_from_sheet(order_id: str):
                         quantity = int(row[col_indices["quantity"]].strip())
                         if quantity > 0:
                             product_sku = row[col_indices["sku"]]
-                            product = db.products.find_one({"cf_sku_code": product_sku})
+                            product = db.products.find_one(
+                                {"cf_sku_code": product_sku, "status": "active"}
+                            )
 
                             if product:
                                 updated_products.append(
@@ -844,19 +913,19 @@ async def update_order_from_sheet(order_id: str):
                                         "product_code": product_sku,
                                         "quantity": quantity,
                                         "name": row[col_indices["name"]],
-                                        "image_url": row[col_indices["image_url"]],
+                                        "image_url": product.get("image_url"),
                                         "margin": row[col_indices["margin"]],
-                                        "price": float(row[col_indices["price"]]),
+                                        "price": float(product.get("rate", 0)),
                                         "added_by": "sales_person",
                                     }
                                 )
                     except ValueError:
                         continue  # Ignore invalid quantity values
-
         if not updated_products:
             raise HTTPException(
                 status_code=400, detail="No products with quantities found"
             )
+        print(json.dumps(serialize_mongo_document(updated_products), indent=4))
 
         # Update the order in the database
         db.orders.update_one(
@@ -870,6 +939,7 @@ async def update_order_from_sheet(order_id: str):
         }
 
     except Exception as e:
+        print(str(e))
         raise HTTPException(
             status_code=500, detail=f"Error reading spreadsheet: {str(e)}"
         )
