@@ -9,7 +9,7 @@ router = APIRouter()
 client, db = connect_to_mongo()
 
 
-@router.post("/in_and_out")
+@router.get("/in_and_out")
 def in_and_out(
     data: dict,
 ):
