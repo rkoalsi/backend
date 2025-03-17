@@ -10,9 +10,6 @@ client, db = connect_to_mongo()
 
 
 @router.get("/in_and_out")
-def in_and_out(
-    data: dict,
-):
+def in_and_out():
     print("Request Received")
-    print(data)
     return
