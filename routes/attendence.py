@@ -95,7 +95,7 @@ def in_and_out(request: Request):
             r"Dear Sir,\s*(.+?)\s+(\d+)\s+has punched attendance on\s+([\d-]+)\s+at",
             text,
         )
-        print(match.group(1))
+        print(match)
         # name = match.group(1)
         # mobile = match.group(2)
         # date = match.group(3)
