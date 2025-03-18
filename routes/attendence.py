@@ -88,10 +88,8 @@ def in_and_out(request: Request):
 
 @router.get("/in_and_out")
 def in_and_out(request: Request):
-    name = request.query_params.get("name")
-    mobile = request.query_params.get("mobile")
-    date = request.query_params.get("date")
-
+    text = request.query_params.get("text")
+    name, mobile, date = [item.strip() for item in text.split(",")]
     if not mobile:
         return JSONResponse(
             content={"error": "No 'mobile' query parameter received"}, status_code=400
