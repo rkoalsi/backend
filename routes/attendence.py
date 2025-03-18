@@ -91,11 +91,16 @@ def in_and_out(request: Request):
     text = request.query_params.get("text")  # Get 'text' from query params
     if text:
         print(f"Received text: {text}")  # Print to console as well
-        match = re.search(
-            r"Dear Sir,\s*(.+?)\s+(\d+)\s+has punched attendance on\s+([\d-]+)\s+at",
-            text,
-        )
-        print(match)
+        pattern = r"Dear Sir,?\s*([\w\s]+)\s+(\d+)\s+has punched attendance on\s+([\d-]+\s+[\d:]+)"
+        match = re.search(pattern, text)
+
+        if match:
+            name = match.group(1)
+            mobile = match.group(2)
+            datetime = match.group(3)
+            print(f"Name: {name}, Mobile: {mobile}, DateTime: {datetime}")
+        else:
+            print("No match found.")
         # name = match.group(1)
         # mobile = match.group(2)
         # date = match.group(3)
