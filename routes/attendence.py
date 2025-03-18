@@ -95,10 +95,66 @@ def in_and_out(request: Request):
             r"Dear Sir,\s*(.+?)\s+(\d+)\s+has punched attendance on\s+([\d-]+)\s+at",
             text,
         )
-        name = match.group(1)
-        mobile = match.group(2)
-        date = match.group(3)
-        print(f"Received name: {name}\tmobile: {mobile}\tdate:{date}")
+        print(match.group(1))
+        # name = match.group(1)
+        # mobile = match.group(2)
+        # date = match.group(3)
+        # print(f"Received name: {name}\tmobile: {mobile}\tdate:{date}")
+        # db = None
+        # cursor = None  # Initialize cursor to avoid UnboundLocalError
+
+        # try:
+        #     db = get_db_connection()
+        #     cursor = db.cursor(dictionary=True)
+
+        #     # Fetch employee details
+        #     cursor.execute(
+        #         "SELECT id, name, device_id FROM employees WHERE mobile_number = %s",
+        #         (mobile,),
+        #     )
+        #     employee = cursor.fetchone()
+
+        #     if not employee:
+        #         return JSONResponse(
+        #             content={"error": "Employee not found"}, status_code=404
+        #         )
+
+        #     employee_id = employee["id"]
+        #     employee_name = employee["name"]
+        #     employee_number = employee["name"]
+        #     device_name = employee.get(
+        #         "device_id", "Unknown"
+        #     )  # Handle missing device_id
+
+        #     print(f"Employee ID: {employee_id}, Name: {employee_name}")
+
+        #     # Insert attendance record
+        #     cursor.execute(
+        #         """
+        #         INSERT INTO attendance (employee_id, employee_name, employee_number, swipe_datetime, device_name, created_at)
+        #         VALUES (%s, %s, %s, %s, %s, NOW())
+        #         """,
+        #         (employee_id, employee_name, employee_number, date, device_name),
+        #     )
+        #     db.commit()
+
+        #     return JSONResponse(
+        #         content={"message": "Attendance recorded", "employee": employee},
+        #         status_code=201,
+        #     )
+
+        # except Exception as e:
+        #     print(f"Error: {str(e)}")
+        #     return JSONResponse(
+        #         content={"error": "Database error", "details": str(e)}, status_code=500
+        #     )
+
+        # finally:
+        #     if cursor:
+        #         cursor.close()
+        #     if db:
+        #         db.close()
+
     else:
         print("No 'text' query parameter received.")
 
