@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
 import mysql.connector
 from dotenv import load_dotenv
-import os
+import os, re
 
 load_dotenv()
 
@@ -89,11 +89,26 @@ def in_and_out(request: Request):
 @router.get("/in_and_out")
 def in_and_out(request: Request):
     text = request.query_params.get("text")
-    name, mobile, date = [item.strip() for item in text.split(",")]
-    if not mobile:
+    if not text:
         return JSONResponse(
             content={"error": "No 'mobile' query parameter received"}, status_code=400
         )
+    # Regex pattern to extract <_name_>, <_mo_>, and <_date_>
+    match = re.search(
+        r"Dear Sir,\s*(.+?)\s+(\d+)\s+has punched attendance on\s+([\d-]+)\s+at", text
+    )
+
+    if not match:
+        return JSONResponse(
+            content={"error": "Invalid text format. Could not extract details."},
+            status_code=400,
+        )
+
+    name = match.group(1)
+    mobile = match.group(2)
+    date = match.group(3)
+
+    print(f"Extracted Name: {name}, Mobile: {mobile}, Date: {date}")
 
     print(f"Received mobile: {mobile}")
 
