@@ -72,7 +72,7 @@ def in_and_out(request: Request):
                 )
 
             finally:
-                client.close()
+                pass
         else:
             print("No match found.")
 
