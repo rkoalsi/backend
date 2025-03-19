@@ -29,11 +29,10 @@ def in_and_out(request: Request):
 
             try:
                 db = client.get_database("attendance")
-                employees_collection = db.get_collection("employees")
-                attendance_collection = db.get_collection("attendance")
-
+                employees_collection = db["employees"]
+                attendance_collection = db["attendance"]
                 # Fetch employee details
-                employee = employees_collection.find_one({"phone": mobile})
+                employee = employees_collection.find_one({"phone": int(mobile)})
                 if not employee:
                     return JSONResponse(
                         content={"error": "Employee not found"}, status_code=404
