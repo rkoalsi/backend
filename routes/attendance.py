@@ -25,21 +25,15 @@ def in_and_out(request: Request):
         if match:
             name = match.group(1).strip()
             mobile = match.group(2).strip()
-            swipe_datetime_str = match.group(3).strip()
-            print(f"Name: {name}, Mobile: {mobile}, DateTime: {swipe_datetime_str}")
+            swipe_datetime = match.group(3).strip()
+            print(f"Name: {name}, Mobile: {mobile}, DateTime: {swipe_datetime}")
 
             try:
-                # Convert string to datetime
-                swipe_datetime = datetime.strptime(
-                    swipe_datetime_str, "%d-%m-%Y %H:%M:%S"
-                )
-
                 db = client.get_database("attendance")
-                employees_collection = db.get_collection("employees")
-                attendance_collection = db.get_collection("attendance")
-
+                employees_collection = db["employees"]
+                attendance_collection = db["attendance"]
                 # Fetch employee details
-                employee = employees_collection.find_one({"phone": mobile})
+                employee = employees_collection.find_one({"phone": int(mobile)})
                 if not employee:
                     return JSONResponse(
                         content={"error": "Employee not found"}, status_code=404
@@ -56,9 +50,9 @@ def in_and_out(request: Request):
                     "employee_id": ObjectId(employee_id),
                     "employee_name": employee_name,
                     "employee_number": employee_name,
-                    "swipe_datetime": swipe_datetime,  # Now in datetime format
+                    "swipe_datetime": swipe_datetime,
                     "device_name": ObjectId(device_id),
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.now(),
                 }
                 attendance_collection.insert_one(attendance_record)
 
@@ -68,12 +62,6 @@ def in_and_out(request: Request):
                         "employee": serialize_mongo_document(employee),
                     },
                     status_code=201,
-                )
-
-            except ValueError:
-                return JSONResponse(
-                    content={"error": "Invalid date format"},
-                    status_code=400,
                 )
 
             except Exception as e:
