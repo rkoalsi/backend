@@ -41,6 +41,7 @@ def in_and_out(request: Request):
 
                 employee_id = str(employee["_id"])
                 employee_name = employee["name"]
+                employee_number = employee["employee_number"]
                 device_id = employee.get("device_id", "Unknown")
 
                 print(f"Employee ID: {employee_id}, Name: {employee_name}")
@@ -49,8 +50,8 @@ def in_and_out(request: Request):
                 attendance_record = {
                     "employee_id": ObjectId(employee_id),
                     "employee_name": employee_name,
-                    "employee_number": employee_name,
-                    "swipe_datetime": swipe_datetime,
+                    "employee_number": employee_number,
+                    "swipe_datetime": swipe_datetime,  # Now in datetime format
                     "device_name": ObjectId(device_id),
                     "created_at": datetime.now(),
                 }
