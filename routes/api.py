@@ -13,7 +13,11 @@ from .hooks import router as hooks
 from .announcements import router as announcements
 from .invoices import router as invoices
 from .webhooks import router as webhooks
+<<<<<<< HEAD
 from .potential_customers import router as potential_customers
+=======
+from .attendance import router as attendance
+>>>>>>> biometric
 from backend.config.auth import JWTBearer  # type: ignore
 
 router = APIRouter()
@@ -37,6 +41,7 @@ router.include_router(webhooks, prefix="/zoho/webhooks", tags=["Zoho"])
 router.include_router(
     potential_customers, prefix="/potential_customers", tags=["Potential Customers"]
 )
+router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
 
 
 @router.get("/")
