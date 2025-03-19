@@ -13,7 +13,7 @@ from .hooks import router as hooks
 from .announcements import router as announcements
 from .invoices import router as invoices
 from .webhooks import router as webhooks
-from .attendence import router as attendence
+from .attendance import router as attendence
 from .potential_customers import router as potential_customers
 from backend.config.auth import JWTBearer  # type: ignore
 
