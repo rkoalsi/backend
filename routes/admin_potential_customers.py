@@ -2,14 +2,13 @@ from fastapi import (
     APIRouter,
     HTTPException,
     Query,
-    File,
-    UploadFile,
+    Body,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
-import boto3, os, openpyxl, io
+import os, openpyxl, io
 
 load_dotenv()
 router = APIRouter()
@@ -19,19 +18,7 @@ products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
-
-AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
-AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
-AWS_S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-AWS_S3_REGION = os.getenv("S3_REGION", "ap-south-1")  # Default to ap-south-1
-AWS_S3_URL = os.getenv("S3_URL")
-
-s3_client = boto3.client(
-    "s3",
-    region_name=AWS_S3_REGION,
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-)
+potential_customers_collection = db["potential_customers"]
 
 
 @router.get("")
@@ -128,3 +115,47 @@ def get_potential_customers_report():
             "Content-Disposition": "attachment; filename=potential_customers_report.xlsx"
         },
     )
+
+
+@router.put("/{customer_id}")
+def update_potential_customer(
+    customer_id: str,
+    update_data: dict = Body(
+        ..., description="Fields to update for the potential customer"
+    ),
+):
+    try:
+        if not ObjectId.is_valid(customer_id):
+            raise HTTPException(status_code=400, detail="Invalid customer ID")
+
+        customer_obj_id = ObjectId(customer_id)
+        existing_customer = potential_customers_collection.find_one(
+            {"_id": customer_obj_id}
+        )
+        if not existing_customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        update_data.pop("_id")
+        update_data.pop("created_by")
+        update_data.pop("created_by_info", "")
+        potential_customers_collection.update_one(
+            {"_id": customer_obj_id}, {"$set": update_data}
+        )
+        return {"message": "Customer updated successfully"}
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{customer_id}")
+def delete_potential_customer(customer_id: str):
+    try:
+        if not ObjectId.is_valid(customer_id):
+            raise HTTPException(status_code=400, detail="Invalid customer ID")
+
+        customer_obj_id = ObjectId(customer_id)
+        result = potential_customers_collection.delete_one({"_id": customer_obj_id})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+
+        return {"message": "Customer deleted successfully"}
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)

@@ -245,6 +245,7 @@ async def update_daily_visit_update(
                         "address": address,
                         "tier": tier,
                         "created_by": ObjectId(uploaded_by),
+                        "created_at": datetime.datetime.now(),
                     }
 
                     doc = db.potential_customers.find_one(
