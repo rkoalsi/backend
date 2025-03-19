@@ -51,7 +51,7 @@ def in_and_out(request: Request):
                     "employee_number": employee_name,
                     "swipe_datetime": swipe_datetime,
                     "device_name": ObjectId(device_id),
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.now(),
                 }
                 attendance_collection.insert_one(attendance_record)
 
