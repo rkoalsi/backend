@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 import re
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson import ObjectId
-from datetime import datetime
 
 load_dotenv()
 
@@ -25,10 +24,13 @@ def in_and_out(request: Request):
         if match:
             name = match.group(1).strip()
             mobile = match.group(2).strip()
-            swipe_datetime = match.group(3).strip()
-            print(f"Name: {name}, Mobile: {mobile}, DateTime: {swipe_datetime}")
+            swipe_datetime_str = match.group(3).strip()
+            print(f"Name: {name}, Mobile: {mobile}, DateTime: {swipe_datetime_str}")
 
             try:
+                swipe_datetime = datetime.strptime(
+                    swipe_datetime_str, "%d-%m-%Y %H:%M:%S"
+                )
                 db = client.get_database("attendance")
                 employees_collection = db["employees"]
                 attendance_collection = db["attendance"]
@@ -41,6 +43,7 @@ def in_and_out(request: Request):
 
                 employee_id = str(employee["_id"])
                 employee_name = employee["name"]
+                employee_number = employee["employee_number"]
                 device_id = employee.get("device_id", "Unknown")
 
                 print(f"Employee ID: {employee_id}, Name: {employee_name}")
@@ -49,8 +52,8 @@ def in_and_out(request: Request):
                 attendance_record = {
                     "employee_id": ObjectId(employee_id),
                     "employee_name": employee_name,
-                    "employee_number": employee_name,
-                    "swipe_datetime": swipe_datetime,
+                    "employee_number": employee_number,
+                    "swipe_datetime": swipe_datetime,  # Now in datetime format
                     "device_name": ObjectId(device_id),
                     "created_at": datetime.now(),
                 }
