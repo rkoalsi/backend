@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 import re
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson import ObjectId
-from datetime import datetime
 
 load_dotenv()
 
@@ -29,17 +28,14 @@ def in_and_out(request: Request):
             print(f"Name: {name}, Mobile: {mobile}, DateTime: {swipe_datetime_str}")
 
             try:
-                # Convert string to datetime
                 swipe_datetime = datetime.strptime(
                     swipe_datetime_str, "%d-%m-%Y %H:%M:%S"
                 )
-
                 db = client.get_database("attendance")
-                employees_collection = db.get_collection("employees")
-                attendance_collection = db.get_collection("attendance")
-
+                employees_collection = db["employees"]
+                attendance_collection = db["attendance"]
                 # Fetch employee details
-                employee = employees_collection.find_one({"phone": mobile})
+                employee = employees_collection.find_one({"phone": int(mobile)})
                 if not employee:
                     return JSONResponse(
                         content={"error": "Employee not found"}, status_code=404
@@ -59,7 +55,7 @@ def in_and_out(request: Request):
                     "employee_number": employee_number,
                     "swipe_datetime": swipe_datetime,  # Now in datetime format
                     "device_name": ObjectId(device_id),
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.now(),
                 }
                 attendance_collection.insert_one(attendance_record)
 
@@ -69,12 +65,6 @@ def in_and_out(request: Request):
                         "employee": serialize_mongo_document(employee),
                     },
                     status_code=201,
-                )
-
-            except ValueError:
-                return JSONResponse(
-                    content={"error": "Invalid date format"},
-                    status_code=400,
                 )
 
             except Exception as e:
