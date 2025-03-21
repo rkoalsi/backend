@@ -115,7 +115,9 @@ async def create_daily_visit(
                     "name": shop["potential_customer_name"],
                     "address": shop["potential_customer_address"],
                     "tier": shop["potential_customer_tier"],
+                    "mobile": shop["potential_customer_mobile"],
                     "created_by": ObjectId(created_by),
+                    "created_at": datetime.datetime.now(),
                 }
             )
             potential_customer_id = str(result.inserted_id)
@@ -195,6 +197,7 @@ async def update_daily_visit_update(
     potential_customer_name: str = Form(None),
     potential_customer_address: str = Form(None),
     potential_customer_tier: str = Form(None),
+    potential_customer_mobile: str = Form(None),
 ):
     """
     Appends or edits an update entry on a daily visit, and/or updates the main daily visit content.
@@ -227,7 +230,9 @@ async def update_daily_visit_update(
                         "potential_customer_address", potential_customer_address
                     )
                     tier = shop.get("potential_customer_tier", potential_customer_tier)
-
+                    mobile = shop.get(
+                        "potential_customer_mobile", potential_customer_mobile
+                    )
                     # Store these values to update in updates array later
                     updated_potential_customer = True
                     updated_pc_id = pc_id
@@ -235,6 +240,7 @@ async def update_daily_visit_update(
                         "potential_customer_name": name,
                         "potential_customer_address": address,
                         "potential_customer_tier": tier,
+                        "potential_customer_mobile": mobile,
                     }
 
                     shop.pop("address", None)
@@ -244,6 +250,7 @@ async def update_daily_visit_update(
                         "name": name,
                         "address": address,
                         "tier": tier,
+                        "mobile": mobile,
                         "created_by": ObjectId(uploaded_by),
                         "created_at": datetime.datetime.now(),
                     }
@@ -407,6 +414,7 @@ async def update_daily_visit_update(
                 new_entry["potential_customer_name"] = potential_customer_name
                 new_entry["potential_customer_address"] = potential_customer_address
                 new_entry["potential_customer_tier"] = potential_customer_tier
+                new_entry["potential_customer_mobile"] = potential_customer_mobile
             if new_images:
                 new_uploaded_images = []
                 for image in new_images:
