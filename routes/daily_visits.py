@@ -100,7 +100,6 @@ async def create_daily_visit(
             raise HTTPException(
                 status_code=500, detail=f"Error uploading file: {str(e)}"
             )
-
     # Parse the shops JSON string into a Python list
     try:
         shops_data = json.loads(shops)
@@ -109,6 +108,16 @@ async def create_daily_visit(
     for shop in shops_data:
         if not shop.get("potential_customer", ""):
             shop["customer_id"] = ObjectId(shop["customer_id"])
+            if shop.get("order_expected", False):
+                db.expected_reorders.insert_one(
+                    {
+                        "address": shop.get("address"),
+                        "customer_id": ObjectId(shop.get("customer_id")),
+                        "customer_name": shop.get("customer_name"),
+                        "created_by": ObjectId(created_by),
+                        "created_at": datetime.datetime.now(),
+                    }
+                )
         else:
             result = db.potential_customers.insert_one(
                 {
