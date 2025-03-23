@@ -29,7 +29,7 @@ FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440 * 7
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 

@@ -18,11 +18,30 @@ products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
-potential_customers_collection = db["potential_customers"]
+expected_reorders_collection = db["expected_reorders"]
+
+
+def format_address(address):
+    if not isinstance(address, dict):
+        return ""
+
+    parts = [
+        address.get("attention"),
+        address.get("address"),
+        address.get("streetz"),
+        address.get("city"),
+        address.get("state"),
+        address.get("zip"),
+        address.get("country"),
+    ]
+
+    parts = [str(part).strip() for part in parts if part and str(part).strip()]
+
+    return ", ".join(parts)
 
 
 @router.get("")
-def get_potential_customers(
+def get_expected_reorders(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
 ):
@@ -47,8 +66,8 @@ def get_potential_customers(
             {"$skip": page * limit},
             {"$limit": limit},
         ]
-        total_count = db.potential_customers.count_documents(match_statement)
-        cursor = db.potential_customers.aggregate(pipeline)
+        total_count = db.expected_reorders.count_documents(match_statement)
+        cursor = db.expected_reorders.aggregate(pipeline)
         cat = [serialize_mongo_document(doc) for doc in cursor]
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
@@ -56,7 +75,7 @@ def get_potential_customers(
         if page > total_pages and total_pages != 0:
             raise HTTPException(status_code=400, detail="Page number out of range")
         return {
-            "potential_customers": cat,
+            "expected_reorders": cat,
             "total_count": total_count,
             "page": page,
             "per_page": limit,
@@ -67,7 +86,7 @@ def get_potential_customers(
 
 
 @router.get("/report")
-def get_potential_customers_report():
+def get_expected_reorders_report():
     # Corrected query definition
     query = [
         {
@@ -82,24 +101,23 @@ def get_potential_customers_report():
     ]
 
     # Fetch matching customers
-    customers_cursor = db.potential_customers.aggregate(query)
+    customers_cursor = db.expected_reorders.aggregate(query)
     customers = [serialize_mongo_document(doc) for doc in customers_cursor]
 
     # Create an Excel workbook using openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Potential Customers Report"
+    ws.title = "Expected Reorders Report"
 
     # Define the header row
-    headers = ["Name", "Address", "Tier", "Mobile", "Created By"]
+    headers = ["Created At", "Name", "Address", "Created By"]
     ws.append(headers)
 
     for cust in customers:
         row = [
-            cust.get("name", ""),
-            cust.get("address", ""),
-            cust.get("tier", ""),
-            cust.get("mobile", ""),
+            cust.get("created_at", ""),
+            cust.get("customer_name", ""),
+            format_address(cust.get("address")),
             cust.get("created_by_info", {}).get("name", ""),
         ]
         ws.append(row)
@@ -113,7 +131,7 @@ def get_potential_customers_report():
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            "Content-Disposition": "attachment; filename=potential_customers_report.xlsx"
+            "Content-Disposition": "attachment; filename=expected_reorders_report.xlsx"
         },
     )
 
@@ -130,18 +148,18 @@ def update_potential_customer(
             raise HTTPException(status_code=400, detail="Invalid customer ID")
 
         customer_obj_id = ObjectId(customer_id)
-        existing_customer = potential_customers_collection.find_one(
+        existing_customer = expected_reorders_collection.find_one(
             {"_id": customer_obj_id}
         )
         if not existing_customer:
-            raise HTTPException(status_code=404, detail="Customer not found")
+            raise HTTPException(status_code=404, detail="Data not found")
         update_data.pop("_id")
         update_data.pop("created_by")
         update_data.pop("created_by_info", "")
-        potential_customers_collection.update_one(
+        expected_reorders_collection.update_one(
             {"_id": customer_obj_id}, {"$set": update_data}
         )
-        return {"message": "Customer updated successfully"}
+        return {"message": "Data updated successfully"}
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -153,10 +171,10 @@ def delete_potential_customer(customer_id: str):
             raise HTTPException(status_code=400, detail="Invalid customer ID")
 
         customer_obj_id = ObjectId(customer_id)
-        result = potential_customers_collection.delete_one({"_id": customer_obj_id})
+        result = expected_reorders_collection.delete_one({"_id": customer_obj_id})
         if result.deleted_count == 0:
-            raise HTTPException(status_code=404, detail="Customer not found")
+            raise HTTPException(status_code=404, detail="Data not found")
 
-        return {"message": "Customer deleted successfully"}
+        return {"message": "Data deleted successfully"}
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
