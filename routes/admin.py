@@ -27,6 +27,8 @@ from .admin_daily_visits import router as admin_daily_visits_router
 from .admin_hooks_categories import router as admin_hooks_categories_router
 from .admin_hooks import router as admin_hooks_router
 from .admin_potential_customers import router as admin_potential_customers_router
+from .admin_expected_reorders import router as admin_expected_reorders_router
+from .admin_targeted_customers import router as admin_targeted_customers_router
 from backend.config.auth import JWTBearer  # type: ignore
 
 load_dotenv()
@@ -145,7 +147,24 @@ async def get_stats():
         updated_daily_visits = db["daily_visits"].count_documents(
             {"updates": {"$exists": True}, "created_at": {"$gte": start_of_today_ist}}
         )
-
+        active_hook_categories = db["hooks_category"].count_documents(
+            {"is_active": True}
+        )
+        inactive_hook_categories = db["hooks_category"].count_documents(
+            {"is_active": False}
+        )
+        submitted_shop_hooks = db["shop_hooks"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
+        submitted_potential_customers = db["potential_customers"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
+        submitted_targeted_customers = db["targeted_customers"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
+        submitted_expected_reorders = db["expected_reorders"].count_documents(
+            {"created_at": {"$gte": start_of_today_ist}}
+        )
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
@@ -174,6 +193,12 @@ async def get_stats():
             "total_due_payments_today": total_due_payments_today,
             "submitted_daily_visits": submitted_daily_visits,
             "updated_daily_visits": updated_daily_visits,
+            "active_hook_categories": active_hook_categories,
+            "inactive_hook_categories": inactive_hook_categories,
+            "submitted_shop_hooks": submitted_shop_hooks,
+            "submitted_potential_customers": submitted_potential_customers,
+            "submitted_targeted_customers": submitted_targeted_customers,
+            "submitted_expected_reorders": submitted_expected_reorders,
         }
 
     except Exception as e:
@@ -1288,5 +1313,17 @@ router.include_router(
     admin_potential_customers_router,
     prefix="/potential_customers",
     tags=["Admin Potential Customers"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_expected_reorders_router,
+    prefix="/expected_reorders",
+    tags=["Admin Expected Reorders"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_targeted_customers_router,
+    prefix="/targeted_customers",
+    tags=["Admin Targeted Customers"],
     dependencies=[Depends(JWTBearer())],
 )
