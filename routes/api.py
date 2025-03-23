@@ -15,6 +15,7 @@ from .invoices import router as invoices
 from .webhooks import router as webhooks
 from .potential_customers import router as potential_customers
 from .expected_reorders import router as expected_reorders
+from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from backend.config.auth import JWTBearer  # type: ignore
 
@@ -40,8 +41,12 @@ router.include_router(
     potential_customers, prefix="/potential_customers", tags=["Potential Customers"]
 )
 router.include_router(
+    targeted_customers, prefix="/targeted_customers", tags=["Targeted Customers"]
+)
+router.include_router(
     expected_reorders, prefix="/expected_reorders", tags=["Expected Reorders"]
 )
+
 router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
 
 

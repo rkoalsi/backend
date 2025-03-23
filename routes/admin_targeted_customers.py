@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
-import os, openpyxl, io
+import os, openpyxl, io, datetime
 
 load_dotenv()
 router = APIRouter()
@@ -28,7 +28,9 @@ def get_targeted_customers(
 ):
     try:
         match_statement = {}
+
         pipeline = [
+            # Lookup created_by details
             {
                 "$lookup": {
                     "from": "users",
@@ -43,10 +45,20 @@ def get_targeted_customers(
                     "preserveNullAndEmptyArrays": True,
                 }
             },
+            # Lookup sales_people details
+            {
+                "$lookup": {
+                    "from": "users",
+                    "localField": "sales_people",
+                    "foreignField": "_id",
+                    "as": "sales_people_info",
+                }
+            },
             {"$match": match_statement},
             {"$skip": page * limit},
             {"$limit": limit},
         ]
+
         total_count = db.targeted_customers.count_documents(match_statement)
         cursor = db.targeted_customers.aggregate(pipeline)
         cat = [serialize_mongo_document(doc) for doc in cursor]
@@ -55,6 +67,7 @@ def get_targeted_customers(
         # Validate page number
         if page > total_pages and total_pages != 0:
             raise HTTPException(status_code=400, detail="Page number out of range")
+
         return {
             "targeted_customers": cat,
             "total_count": total_count,
@@ -117,11 +130,28 @@ def get_targeted_customers_report():
     )
 
 
+@router.post("")
+def create_targeted_customer(
+    data: dict = Body(..., description="Fields to update for the targeted customer"),
+):
+    try:
+        data["customer_id"] = ObjectId(data.get("customer_id"))
+        data["created_by"] = ObjectId(data.get("created_by"))
+        data["created_at"] = datetime.datetime.now()
+        if "sales_people" in data:
+            data["sales_people"] = [ObjectId(sp) for sp in data.get("sales_people", [])]
+        targeted_customers_collection.insert_one({**data})
+        return {"message": "Target Customer created successfully"}
+    except Exception as e:
+        print(e)
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.put("/{customer_id}")
-def update_potential_customer(
+def update_targeted_customer(
     customer_id: str,
     update_data: dict = Body(
-        ..., description="Fields to update for the potential customer"
+        ..., description="Fields to update for the targeted customer"
     ),
 ):
     try:
@@ -129,24 +159,28 @@ def update_potential_customer(
             raise HTTPException(status_code=400, detail="Invalid customer ID")
 
         customer_obj_id = ObjectId(customer_id)
-        existing_customer = targeted_customers_collection.find_one(
-            {"_id": customer_obj_id}
-        )
+        existing_customer = customers_collection.find_one({"_id": customer_obj_id})
         if not existing_customer:
             raise HTTPException(status_code=404, detail="Customer not found")
-        update_data.pop("_id")
-        update_data.pop("created_by")
-        update_data.pop("created_by_info", "")
+        if "sales_people" in update_data:
+            update_data["sales_people"] = [
+                ObjectId(sp) for sp in update_data.get("sales_people", [])
+            ]
+        _id = update_data.pop("_id")
+        update_data["created_by"] = ObjectId(update_data.get("created_by"))
+        update_data["customer_id"] = ObjectId(update_data.get("customer_id"))
+        update_data["updated_at"] = datetime.datetime.now()
         targeted_customers_collection.update_one(
-            {"_id": customer_obj_id}, {"$set": update_data}
+            {"_id": ObjectId(_id)}, {"$set": update_data}
         )
         return {"message": "Customer updated successfully"}
     except Exception as e:
+        print(e)
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @router.delete("/{customer_id}")
-def delete_potential_customer(customer_id: str):
+def delete_targeted_customer(customer_id: str):
     try:
         if not ObjectId.is_valid(customer_id):
             raise HTTPException(status_code=400, detail="Invalid customer ID")
