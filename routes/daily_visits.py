@@ -124,7 +124,7 @@ async def create_daily_visit(
                     "name": shop["potential_customer_name"],
                     "address": shop["potential_customer_address"],
                     "tier": shop["potential_customer_tier"],
-                    "mobile": shop["potential_customer_mobile"],
+                    "mobile": shop.get("potential_customer_mobile", ""),
                     "created_by": ObjectId(created_by),
                     "created_at": datetime.datetime.now(),
                 }
