@@ -46,6 +46,7 @@ MarkupSafe==3.0.2
 mdurl==0.1.2
 multidict==6.1.0
 mysql-connector==2.2.9
+Naked==0.1.32
 numpy==2.2.1
 oauthlib==3.2.2
 openpyxl==3.1.5
@@ -60,6 +61,8 @@ psutil==7.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.1
 pycparser==2.22
+pycryptodome==3.22.0
+pycryptodomex==3.22.0
 pydantic==2.10.4
 pydantic_core==2.27.2
 Pygments==2.18.0
@@ -78,6 +81,7 @@ rich==13.9.4
 rich-toolkit==0.12.0
 rsa==4.9
 s3transfer==0.10.4
+shellescape==3.8.1
 shellingham==1.5.4
 six==1.17.0
 sniffio==1.3.1
