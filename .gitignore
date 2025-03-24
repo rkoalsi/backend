@@ -7,3 +7,4 @@ db
 __pycache__
 routes/estimate_payloads.json
 creds.json
+certificate.pem
