@@ -39,8 +39,8 @@ def send_attendance_to_greythr(door, employee_number, is_in=True):
     """
     try:
         # Configuration
-        gthost = "tousifapisso.greythr.com"
-        gtapiid = "6051f64b-02d8-4e31-a5e5-dcdd22c55ca7"
+        gthost = "pupscribe.greythr.com"
+        gtapiid = "fd121436-d9c9-401b-bb8b-8dbbdac445b3"
         Attendpoint = "/v2/attendance/asca/swipes"
 
         # Current time in IST format (UTC+5:30)
