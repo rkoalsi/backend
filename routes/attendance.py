@@ -11,12 +11,19 @@ from Crypto.PublicKey import RSA
 import base64
 import http.client
 import urllib.parse
+from pathlib import Path
 
 load_dotenv()
 
 router = APIRouter()
 
 client, _ = connect_to_mongo()
+
+
+BASE_DIR = (
+    Path(__file__).resolve().parent.parent
+)  # Get the directory of the current script
+CERTIFICATE = BASE_DIR / "certificate.pem"  # Adjust based on where the file is stored
 
 
 def send_attendance_to_greythr(door, employee_number, is_in=True):
@@ -47,7 +54,7 @@ def send_attendance_to_greythr(door, employee_number, is_in=True):
 
         # Load private key
         try:
-            with open("certificate.pem", "r") as f:
+            with open(CERTIFICATE, "r") as f:
                 key = RSA.importKey(f.read())
         except Exception as e:
             return False, f"Failed to load certificate: {str(e)}"
