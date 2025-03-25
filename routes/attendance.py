@@ -263,3 +263,39 @@ async def check_in(data: dict):
     except Exception as e:
         print(e)
         return {"error": "Database error", "details": str(e), "status_code": 500}
+
+
+@router.get("/status")
+async def check_attendance_status(phone: str):
+    try:
+        now = datetime.now()  # Use UTC for consistency
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        employee = employees_collection.find_one({"phone": int(phone)})
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        print(
+            list(
+                attendance_collection.find_one(
+                    {
+                        "employee_id": ObjectId(employee.get("_id")),
+                        "created_at": {"$gte": start_of_day, "$lte": end_of_day},
+                        "is_check_in": True,
+                    }
+                )
+            )
+        )
+        record = attendance_collection.find_one(
+            {
+                "employee_id": ObjectId(employee.get("_id")),
+                "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
+                "is_check_in": True,
+            }
+        )
+
+        return {"checked_in": bool(record)}
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Database error")
