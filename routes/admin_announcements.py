@@ -70,15 +70,11 @@ def delete_announcement(announcement_id: str):
     For a soft delete (mark as inactive), you can update the document instead.
     """
     try:
-        doc = db.announcements.find_one({"_id": ObjectId(announcement_id)})
-        result = db.announcements.update_one(
+        db.announcements.delete_one(
             {"_id": ObjectId(announcement_id)},
-            {"$set": {"is_active": not doc.get("is_active")}},
         )
-        if result.modified_count == 1:
-            return {"detail": "Catalogue deleted successfully (soft delete)"}
-        else:
-            raise HTTPException(status_code=404, detail="Catalogue not found")
+
+        return {"detail": "Announcement deleted successfully "}
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
