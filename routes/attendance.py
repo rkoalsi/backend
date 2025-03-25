@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -17,9 +17,12 @@ load_dotenv()
 
 router = APIRouter()
 
-client, _ = connect_to_mongo()
+client, pupscribe_db = connect_to_mongo()
 
-
+attendance_db = client.get_database("attendance")
+employees_collection = attendance_db.get_collection("employees")
+attendance_collection = attendance_db.get_collection("attendance")
+device_collection = attendance_db.get_collection("devices")
 BASE_DIR = (
     Path(__file__).resolve().parent.parent
 )  # Get the directory of the current script
@@ -113,10 +116,6 @@ def in_and_out(request: Request):
                 swipe_datetime = datetime.strptime(
                     swipe_datetime_str, "%d-%m-%Y %H:%M:%S"
                 )
-                db = client.get_database("attendance")
-                employees_collection = db.get_collection("employees")
-                attendance_collection = db.get_collection("attendance")
-                device_collection = db.get_collection("devices")
 
                 # Fetch employee details
                 employee = employees_collection.find_one({"phone": int(mobile)})
@@ -164,7 +163,7 @@ def in_and_out(request: Request):
                         if isinstance(device_id, str) and len(device_id) == 24
                         else device_id
                     ),
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.now(),
                     "is_check_in": is_check_in,
                 }
                 attendance_collection.insert_one(attendance_record)
@@ -203,3 +202,100 @@ def in_and_out(request: Request):
         print("No 'text' query parameter received.")
 
     return JSONResponse(content={"message": "Request Received"}, status_code=200)
+
+
+@router.post("/check_in")
+async def check_in(data: dict):
+    try:
+        print(data)
+        # Fetch employee details using userId
+        user_collection = pupscribe_db.get_collection("users")
+        employee = user_collection.find_one({"_id": ObjectId(data.get("user_id"))})
+        attendance_employee = employees_collection.find_one(
+            {"phone": int(data.get("phone"))}
+        )
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+
+        employee_id = str(attendance_employee["_id"])
+        employee_name = attendance_employee["name"]
+        employee_number = attendance_employee["employee_number"]
+
+        # Determine if it's check-in or check-out
+        is_check_in = data.get("action") == "checkin"
+
+        # Record attendance
+        swipe_datetime = datetime.utcnow()
+        attendance_record = {
+            "employee_id": ObjectId(employee_id),
+            "employee_name": employee_name,
+            "employee_number": employee_number,
+            "swipe_datetime": swipe_datetime,
+            "device_name": "Pupscribe Order Form",
+            "created_at": datetime.now(),
+            "is_check_in": is_check_in,
+        }
+        attendance_collection.insert_one(attendance_record)
+
+        # Send data to GreyTHR
+        success, message = send_attendance_to_greythr(
+            door="Pupscribe Order Form",
+            employee_number=employee_number,
+            is_in=is_check_in,
+        )
+        print(
+            {
+                "message": "Attendance recorded",
+                "employee": {"id": employee_id, "name": employee_name},
+                "greythr_success": success,
+                "greythr_message": message,
+                "is_check_in": is_check_in,
+            }
+        )
+        return {
+            "message": "Attendance recorded",
+            "employee": {"id": employee_id, "name": employee_name},
+            "greythr_success": success,
+            "greythr_message": message,
+            "is_check_in": is_check_in,
+        }
+
+    except Exception as e:
+        print(e)
+        return {"error": "Database error", "details": str(e), "status_code": 500}
+
+
+@router.get("/status")
+async def check_attendance_status(phone: str):
+    try:
+        now = datetime.now()  # Use UTC for consistency
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        employee = employees_collection.find_one({"phone": int(phone)})
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        print(
+            list(
+                attendance_collection.find_one(
+                    {
+                        "employee_id": ObjectId(employee.get("_id")),
+                        "created_at": {"$gte": start_of_day, "$lte": end_of_day},
+                        "is_check_in": True,
+                    }
+                )
+            )
+        )
+        record = attendance_collection.find_one(
+            {
+                "employee_id": ObjectId(employee.get("_id")),
+                "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
+                "is_check_in": True,
+            }
+        )
+
+        return {"checked_in": bool(record)}
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Database error")
