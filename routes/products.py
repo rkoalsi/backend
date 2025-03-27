@@ -72,7 +72,8 @@ def get_all_brands():
     """
     try:
         brands = products_collection.distinct(
-            "brand", {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+            "brand",
+            {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
         )
         brands = [
             {
@@ -110,7 +111,6 @@ def get_categories_for_brand(brand: str):
 
         # Remove empty or null categories
         categories = [category for category in categories if category]
-
         return {"categories": categories}
     except Exception as e:
         # Log the exception details (ensure logging is set up in your application)
