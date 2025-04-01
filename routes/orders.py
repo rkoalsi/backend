@@ -502,7 +502,13 @@ async def finalise(order_dict: dict):
             last_estimate_number = str(
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
-            new_estimate_number = f"{last_estimate_number[0]}/{last_estimate_number[1]}/{int(last_estimate_number[-1]) + 1}"
+            new_last_part = str(int(last_estimate_number[-1]) + 1).zfill(
+                len(last_estimate_number[-1])
+            )
+            # Reconstruct the estimate number
+            new_estimate_number = (
+                f"{last_estimate_number[0]}/{last_estimate_number[1]}/{new_last_part}"
+            )
             # Prepare the request payload
             payload = {
                 "estimate_number": new_estimate_number,
