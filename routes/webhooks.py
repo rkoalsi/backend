@@ -740,12 +740,9 @@ def handle_customer(data: dict):
     import json  # make sure to import json if not already
 
     def is_address_present(address, existing_addresses):
-        # Use JSON serialization for deep equality check
-        new_addr_serialized = json.dumps(address, sort_keys=True)
-        return any(
-            json.dumps(existing_addr, sort_keys=True) == new_addr_serialized
-            for existing_addr in existing_addresses
-        )
+        # Check by address_id instead of deep equality
+        address_id = address.get("address_id")
+        return any(addr.get("address_id") == address_id for addr in existing_addresses)
 
     def clean_data(document):
         # Remove unwanted keys from the document
@@ -757,19 +754,23 @@ def handle_customer(data: dict):
     contact = clean_data(contact)
 
     if not existing_customer:
-        # Insert the new customer with addresses
         addresses = []
+        existing_ids = set()
 
-        # Add billing_address to addresses if it exists
         if "billing_address" in contact and contact["billing_address"]:
-            addresses.append(contact["billing_address"])
+            addr = contact["billing_address"]
+            addr_id = addr.get("address_id")
+            if addr_id not in existing_ids:
+                addresses.append(addr)
+                existing_ids.add(addr_id)
 
-        # Add shipping_address to addresses if it exists and is not a duplicate
         if "shipping_address" in contact and contact["shipping_address"]:
-            if not is_address_present(contact["shipping_address"], addresses):
-                addresses.append(contact["shipping_address"])
+            addr = contact["shipping_address"]
+            addr_id = addr.get("address_id")
+            if addr_id not in existing_ids:
+                addresses.append(addr)
+                existing_ids.add(addr_id)
 
-        # Remove billing_address and shipping_address from contact
         contact.pop("billing_address", None)
         contact.pop("shipping_address", None)
 
@@ -795,30 +796,42 @@ def handle_customer(data: dict):
                 and existing_customer.get(key) != value
             ):
                 update_fields[key] = value
-
-        # Handle addresses
         existing_addresses = existing_customer.get("addresses", [])
+        existing_address_ids = {addr.get("address_id") for addr in existing_addresses}
+
         new_addresses = []
+        new_address_ids = set()
 
-        # Add billing_address to new_addresses if it doesn't already exist
+        # Add billing address
         if "billing_address" in contact and contact["billing_address"]:
-            if not is_address_present(contact["billing_address"], existing_addresses):
-                new_addresses.append(contact["billing_address"])
+            addr = contact["billing_address"]
+            addr_id = addr.get("address_id")
+            if addr_id not in existing_address_ids and addr_id not in new_address_ids:
+                new_addresses.append(addr)
+                new_address_ids.add(addr_id)
 
-        # Add shipping_address to new_addresses if it doesn't already exist
+        # Add shipping address
         if "shipping_address" in contact and contact["shipping_address"]:
-            if not is_address_present(contact["shipping_address"], existing_addresses):
-                new_addresses.append(contact["shipping_address"])
+            addr = contact["shipping_address"]
+            addr_id = addr.get("address_id")
+            if addr_id not in existing_address_ids and addr_id not in new_address_ids:
+                new_addresses.append(addr)
+                new_address_ids.add(addr_id)
 
+        # Add addresses from contact.addresses
         if "addresses" in contact and isinstance(contact["addresses"], list):
             for addr in contact["addresses"]:
-                if not is_address_present(addr, existing_addresses):
+                addr_id = addr.get("address_id")
+                if (
+                    addr_id not in existing_address_ids
+                    and addr_id not in new_address_ids
+                ):
                     new_addresses.append(addr)
-        # Add new addresses to the update
+                    new_address_ids.add(addr_id)
+
         if new_addresses:
             update_fields["addresses"] = existing_addresses + new_addresses
 
-        # Remove billing_address and shipping_address from update_fields if they exist
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
         print(existing_addresses, new_addresses)
