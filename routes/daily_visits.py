@@ -201,6 +201,7 @@ async def update_daily_visit_update(
     shops: str = Form(None),  # new field: JSON string representing shops data
     customer_id: str = Form(None),  # new: selected customer's ID
     customer_name: str = Form(None),  # new: selected customer's name,
+    address: str = Form(None),  # new: selected customer's address,
     potential_customer: bool = Form(None),
     potential_customer_id: str = Form(None),
     potential_customer_name: str = Form(None),
@@ -214,6 +215,7 @@ async def update_daily_visit_update(
     - Else, if 'plan' is provided, it updates the main plan (legacy).
     - If update_text is provided, then an update entry is created or edited.
     - Additionally, if customer_id and customer_name are provided, they are stored with the update entry.
+    - Address is now saved for both regular customers and potential customers.
     """
     # Retrieve the daily visit document.
     daily_visit = db.daily_visits.find_one({"_id": ObjectId(daily_visit_id)})
@@ -302,7 +304,6 @@ async def update_daily_visit_update(
     elif plan is not None:
         daily_visit["plan"] = plan
 
-    print(update_fields)
     if delete_update:
         updates = daily_visit.get("updates", [])
         new_updates = [u for u in updates if str(u.get("_id")) != delete_update]
@@ -336,12 +337,14 @@ async def update_daily_visit_update(
             if not update_entry:
                 raise HTTPException(status_code=404, detail="Update entry not found")
             update_entry["text"] = update_text
-
             # Update customer info if provided.
             if customer_id is not None:
                 update_entry["customer_id"] = ObjectId(customer_id)
             if customer_name is not None:
                 update_entry["customer_name"] = customer_name
+            # Add address for regular customers
+            if address is not None:
+                update_entry["address"] = json.loads(address)
             if potential_customer:
                 update_entry["potential_customer_id"] = ObjectId(potential_customer_id)
                 update_entry["potential_customer"] = potential_customer
@@ -416,7 +419,9 @@ async def update_daily_visit_update(
                 new_entry["customer_id"] = ObjectId(customer_id)
             if customer_name is not None:
                 new_entry["customer_name"] = customer_name
-            print(update_fields)
+            # Add address for regular customers
+            if address is not None:
+                new_entry["address"] = json.loads(address)
             if potential_customer:
                 new_entry["potential_customer_id"] = ObjectId(potential_customer_id)
                 new_entry["potential_customer"] = potential_customer
