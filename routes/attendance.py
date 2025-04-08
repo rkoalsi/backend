@@ -268,23 +268,25 @@ async def check_in(data: dict):
 @router.get("/status")
 async def check_attendance_status(phone: str):
     try:
-        now = datetime.now()  # Use UTC for consistency
+        now = datetime.now()  # Consider timezone if necessary
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
         employee = employees_collection.find_one({"phone": int(phone)})
         if not employee:
             raise HTTPException(status_code=404, detail="Employee not found")
-        record = dict(
-            attendance_collection.find_one(
-                {
-                    "employee_id": ObjectId(employee.get("_id")),
-                    "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
-                    "is_check_in": True,
-                }
-            )
+
+        # Find the latest attendance record for today
+        record = attendance_collection.find_one(
+            {
+                "employee_id": ObjectId(employee["_id"]),
+                "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
+            },
+            sort=[("swipe_datetime", -1)],
         )
-        return {"checked_in": bool(record.get("check_in"))}
+
+        checked_in = record.get("is_check_in", False) if record else False
+        return {"checked_in": checked_in}
 
     except Exception as e:
         print(e)
