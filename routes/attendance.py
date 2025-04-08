@@ -286,7 +286,7 @@ async def check_attendance_status(phone: str):
                 {
                     "employee_id": ObjectId(employee.get("_id")),
                     "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
-                    # "is_check_in": True,
+                    "is_check_in": True,
                 }
             )
         )
