@@ -275,27 +275,86 @@ async def check_attendance_status(phone: str):
         employee = employees_collection.find_one({"phone": int(phone)})
         if not employee:
             raise HTTPException(status_code=404, detail="Employee not found")
-        print(
-            list(
-                attendance_collection.find_one(
-                    {
-                        "employee_id": ObjectId(employee.get("_id")),
-                        "created_at": {"$gte": start_of_day, "$lte": end_of_day},
-                        "is_check_in": True,
-                    }
-                )
+        record = dict(
+            attendance_collection.find_one(
+                {
+                    "employee_id": ObjectId(employee.get("_id")),
+                    "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
+                    # "is_check_in": True,
+                }
             )
         )
-        record = attendance_collection.find_one(
-            {
-                "employee_id": ObjectId(employee.get("_id")),
-                "swipe_datetime": {"$gte": start_of_day, "$lte": end_of_day},
-                "is_check_in": True,
-            }
-        )
+        return {"checked_in": bool(record.get("check_in"))}
 
-        return {"checked_in": bool(record)}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Database error")
 
+
+from datetime import datetime, timedelta
+
+
+@router.get("/employee_attendance")
+async def get_attendance(phone: str):
+    try:
+        # Find the employee - this returns a cursor, not a document
+        employee_cursor = employees_collection.find({"phone": int(phone)})
+        # Convert cursor to list and get first document (if exists)
+        employee_list = list(employee_cursor)
+
+        if not employee_list:
+            raise HTTPException(status_code=404, detail="Employee not found")
+
+        # Get the first (and presumably only) employee that matches
+        employee = serialize_mongo_document(employee_list[0])
+
+        # Now query attendance using the employee's ObjectId
+        all_attendance = attendance_collection.find(
+            {"employee_id": ObjectId(employee["_id"])},
+        ).sort("created_at", -1)
+
+        # Convert cursor to a list of documents
+        attendance_list = list(all_attendance)
+        serialized_attendance = []
+
+        for doc in attendance_list:
+            serialized_doc = serialize_mongo_document(doc)
+
+            # Convert created_at from UTC to IST if it exists
+            if "created_at" in serialized_doc and serialized_doc["created_at"]:
+                # Check if created_at is already a datetime object
+                if isinstance(serialized_doc["created_at"], datetime):
+                    utc_time = serialized_doc["created_at"]
+                else:
+                    # If it's a string, parse it to datetime
+                    # Adjust the format string as needed for your actual date format
+                    try:
+                        # If the format is ISO
+                        utc_time = datetime.fromisoformat(
+                            serialized_doc["created_at"].replace("Z", "+00:00")
+                        )
+                    except:
+                        try:
+                            # Common MongoDB date string format
+                            utc_time = datetime.strptime(
+                                serialized_doc["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"
+                            )
+                        except:
+                            # If parsing fails, keep the original
+                            serialized_attendance.append(serialized_doc)
+                            continue
+
+                # Add 5 hours and 30 minutes to convert from UTC to IST
+                ist_time = utc_time + timedelta(hours=5, minutes=30)
+                # Convert back to the same format as the original
+                if isinstance(serialized_doc["created_at"], str):
+                    serialized_doc["created_at"] = ist_time.isoformat()
+                else:
+                    serialized_doc["created_at"] = ist_time
+
+            serialized_attendance.append(serialized_doc)
+
+        return {"attendance": serialized_attendance}
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Database error")
