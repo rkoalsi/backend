@@ -154,7 +154,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
             for field, value in item.items():
                 # Exclude 'status', 'created_time', 'last_modified_time', and 'created_at' from updates
                 if field in [
-                    "status",
+                    # "status",
                     "created_time",
                     "last_modified_time",
                     "created_at",
@@ -541,7 +541,9 @@ def handle_invoice(data: dict):
                 )
             # Do not schedule emails for salespeople since at least one is forbidden
             return
-
+        sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+        sales_admin_phone = sales_admin.get("phone")
+        sales_admin_name = sales_admin.get("name")
         for sp in all_salespeople:
             user = db.users.find_one({"code": sp})
             if user:
@@ -579,6 +581,13 @@ def handle_invoice(data: dict):
                     run_date=one_week_before + datetime.timedelta(hours=10),
                     job_suffix="one_week_before",
                 )
+                msg_params["to"] = sales_admin_phone
+                msg_params["salesperson_name"] = sales_admin_name
+                schedule_job(
+                    msg_params,
+                    run_date=one_week_before + datetime.timedelta(hours=10),
+                    job_suffix="one_week_before",
+                )
                 print(
                     f"Scheduled one-week-before email for invoice {invoice_number} to {email} at {one_week_before}."
                 )
@@ -598,6 +607,13 @@ def handle_invoice(data: dict):
                     run_date=current_dt,  # execute immediately
                     job_suffix="due_date",
                 )
+                msg_params["to"] = sales_admin_phone
+                msg_params["salesperson_name"] = sales_admin_name
+                schedule_job(
+                    msg_params,
+                    run_date=current_dt,  # execute immediately
+                    job_suffix="due_date",
+                )
                 print(
                     f"Scheduled due-date email for invoice {invoice_number} to {email} to run immediately since due_date {due_date} is today."
                 )
@@ -607,6 +623,13 @@ def handle_invoice(data: dict):
                 schedule_job(
                     msg_params,
                     run_date=due_date + datetime.timedelta(hours=10),
+                    job_suffix="due_date",
+                )
+                msg_params["to"] = sales_admin_phone
+                msg_params["salesperson_name"] = sales_admin_name
+                schedule_job(
+                    msg_params,
+                    run_date=current_dt,  # execute immediately
                     job_suffix="due_date",
                 )
                 print(

@@ -134,8 +134,8 @@ async def create_announcement(
 
         if result:
             # Notify salespeople about the new announcement
-            # template = db.templates.find_one({"name": "update_notification_1"})
-            # notify_all_salespeople(db, template, {})
+            template = db.templates.find_one({"name": "update_notification_1"})
+            notify_all_salespeople(db, template, {})
             return "Document Created"
         else:
             raise HTTPException(status_code=500, detail="Failed to create announcement")
