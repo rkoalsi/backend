@@ -10,6 +10,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import boto3, uuid, os
+from .helpers import notify_all_salespeople
 
 load_dotenv()
 router = APIRouter()
@@ -169,4 +170,15 @@ async def upload_catalogue(file: UploadFile = File(...)):
         return {"file_url": file_url}
     except Exception as e:
         # Log the exception as needed
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/notify_salespeople")
+async def notify():
+    try:
+        template = db.templates.find_one({"name": "catalogue_notification"})
+        notify_all_salespeople(db, template, {})
+    except Exception as e:
+        # Log the exception as needed
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
