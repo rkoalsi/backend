@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
@@ -15,10 +15,33 @@ IST_OFFSET = 19800000
 
 
 @router.get("")
-async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge=1)):
+async def get_daily_visits(request: Request):
+    page = int(request.query_params.get("page", 0))
+    limit = int(request.query_params.get("limit", 25))
     skip = page * limit
+    # Get date filter parameters
+    start_date = request.query_params.get("start_date")
+    end_date = request.query_params.get("end_date")
+
+    # Initialize filter condition
+    filter_condition = {}
+
+    # Add date filtering if parameters are provided
+    if start_date or end_date:
+        filter_condition["created_at"] = {}
+
+        if start_date:
+            # Convert string to datetime and set to start of day (00:00:00)
+            start_datetime = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+            filter_condition["created_at"]["$gte"] = start_datetime
+
+        if end_date:
+            # Convert string to datetime and set to end of day (23:59:59)
+            end_datetime = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+            filter_condition["created_at"]["$lt"] = end_datetime
 
     pipeline = [
+        {"$match": filter_condition},
         {"$sort": {"created_at": -1}},
         {
             "$lookup": {
@@ -88,9 +111,10 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
     try:
         daily_visits_cursor = db.daily_visits.aggregate(pipeline)
         daily_visits = list(daily_visits_cursor)
-        total_count = db.daily_visits.count_documents({})
+        total_count = db.daily_visits.count_documents(filter_condition)
         total_pages = math.ceil(total_count / limit)
     except Exception as e:
+        print(str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
     # Optionally, merge the lookup field into the root document
@@ -114,73 +138,106 @@ async def get_daily_visits(page: int = Query(0, ge=0), limit: int = Query(25, ge
 
 
 @router.get("/report")
-def get_daily_visits_report():
-    # Corrected query definition
-    query = [
-        {
-            "$lookup": {
-                "from": "users",
-                "localField": "created_by",
-                "foreignField": "_id",
-                "as": "created_by_info",
-            }
-        },
-        {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
-        {
-            "$addFields": {
-                "created_at": {
-                    "$dateToString": {
-                        "format": "%Y-%m-%d %H:%M:%S",
-                        "date": {"$add": ["$created_at", IST_OFFSET]},
-                    }
-                },
-                "updated_at": {
-                    "$dateToString": {
-                        "format": "%Y-%m-%d %H:%M:%S",
-                        "date": {"$add": ["$updated_at", IST_OFFSET]},
-                    }
-                },
-                "updates": {
-                    "$map": {
-                        "input": {"$ifNull": ["$updates", []]},
-                        "as": "update",
-                        "in": {
-                            "$mergeObjects": [
-                                "$$update",
-                                {
-                                    "created_at": {
-                                        "$dateToString": {
-                                            "format": "%Y-%m-%d %H:%M:%S",
-                                            "date": {
-                                                "$add": [
-                                                    "$$update.created_at",
-                                                    IST_OFFSET,
-                                                ]
-                                            },
-                                        }
-                                    },
-                                    "updated_at": {
-                                        "$dateToString": {
-                                            "format": "%Y-%m-%d %H:%M:%S",
-                                            "date": {
-                                                "$add": [
-                                                    "$$update.updated_at",
-                                                    IST_OFFSET,
-                                                ]
-                                            },
-                                        }
-                                    },
-                                },
-                            ]
-                        },
-                    }
-                },
-            }
-        },
-        {"$sort": {"created_at": -1}},
-    ]
+def get_daily_visits_report(request: Request):
+    # Get date filter parameters from query
+    start_date = request.query_params.get("start_date")
+    end_date = request.query_params.get("end_date")
 
-    # Fetch matching customers
+    # Base query
+    match_query = {}
+
+    # Add date filtering if parameters are provided
+    if start_date or end_date:
+        match_query["created_at"] = {}
+
+        if start_date:
+            # Convert string to datetime and set to start of day (00:00:00)
+            start_datetime = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+            match_query["created_at"]["$gte"] = start_datetime
+
+        if end_date:
+            # Convert string to datetime and set to end of day (23:59:59)
+            end_datetime = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+            match_query["created_at"]["$lt"] = end_datetime
+
+    # Start with match stage if we have date filters
+    query = []
+    if match_query:
+        query.append({"$match": match_query})
+
+    # Add the rest of the pipeline
+    query.extend(
+        [
+            {
+                "$lookup": {
+                    "from": "users",
+                    "localField": "created_by",
+                    "foreignField": "_id",
+                    "as": "created_by_info",
+                }
+            },
+            {
+                "$unwind": {
+                    "path": "$created_by_info",
+                    "preserveNullAndEmptyArrays": True,
+                }
+            },
+            {
+                "$addFields": {
+                    "created_at": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d %H:%M:%S",
+                            "date": {"$add": ["$created_at", IST_OFFSET]},
+                        }
+                    },
+                    "updated_at": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d %H:%M:%S",
+                            "date": {"$add": ["$updated_at", IST_OFFSET]},
+                        }
+                    },
+                    "updates": {
+                        "$map": {
+                            "input": {"$ifNull": ["$updates", []]},
+                            "as": "update",
+                            "in": {
+                                "$mergeObjects": [
+                                    "$$update",
+                                    {
+                                        "created_at": {
+                                            "$dateToString": {
+                                                "format": "%Y-%m-%d %H:%M:%S",
+                                                "date": {
+                                                    "$add": [
+                                                        "$$update.created_at",
+                                                        IST_OFFSET,
+                                                    ]
+                                                },
+                                            }
+                                        },
+                                        "updated_at": {
+                                            "$dateToString": {
+                                                "format": "%Y-%m-%d %H:%M:%S",
+                                                "date": {
+                                                    "$add": [
+                                                        "$$update.updated_at",
+                                                        IST_OFFSET,
+                                                    ]
+                                                },
+                                            }
+                                        },
+                                    },
+                                ]
+                            },
+                        }
+                    },
+                }
+            },
+            {"$sort": {"created_at": -1}},
+        ]
+    )
+
+    # Fetch matching daily visits
     daily_visits_cursor = db.daily_visits.aggregate(query)
     daily_visits = [serialize_mongo_document(doc) for doc in daily_visits_cursor]
 
@@ -201,7 +258,7 @@ def get_daily_visits_report():
         "_id",
         # "uploaded_by",
         "images",
-        "customer_id"
+        "customer_id",
         # Exclude all potential customer fields as requested
         "potential_customer",
         "potential_customer_name",
@@ -285,12 +342,20 @@ def get_daily_visits_report():
     wb.save(stream)
     stream.seek(0)
 
+    # Add date range to filename if dates are selected
+    filename = "daily_visits_report"
+    if start_date and end_date:
+        filename += f"_{start_date}_to_{end_date}"
+    elif start_date:
+        filename += f"_from_{start_date}"
+    elif end_date:
+        filename += f"_until_{end_date}"
+    filename += ".xlsx"
+
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": "attachment; filename=daily_visits_report.xlsx"
-        },
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
