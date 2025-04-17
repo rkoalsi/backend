@@ -629,7 +629,8 @@ def handle_invoice(data: dict):
                 msg_params["salesperson_name"] = sales_admin_name
                 schedule_job(
                     msg_params,
-                    run_date=current_dt,  # execute immediately
+                    run_date=due_date
+                    + datetime.timedelta(hours=10),  # execute immediately
                     job_suffix="due_date",
                 )
                 print(
