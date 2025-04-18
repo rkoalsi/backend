@@ -887,6 +887,7 @@ def handle_customer(data: dict):
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
         update_fields.pop("cf_margin", None)
+        update_fields.pop("cf_in_ex", None)
         print(existing_addresses, new_addresses)
         # Update the customer if there are changes
         if update_fields:
