@@ -76,6 +76,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "cf_sku_code": item.get("custom_field_hash", {}).get(
                         "cf_sku_code", ""
                     ),
+                    "series": item.get("custom_field_hash", {}).get("cf_series", ""),
+                    "category": item.get("custom_field_hash", {}).get(
+                        "cf_category", ""
+                    ),
+                    "sub_category": item.get("custom_field_hash", {}).get(
+                        "cf_sub_category", ""
+                    ),
                     "created_at": parse_datetime(item.get("created_time")),
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
@@ -149,6 +156,15 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 )
                 update_data["cf_item_code"] = item.get("custom_field_hash", {}).get(
                     "cf_item_code", ""
+                )
+                update_data["series"] = item.get("custom_field_hash", {}).get(
+                    "cf_series", ""
+                )
+                update_data["category"] = item.get("custom_field_hash", {}).get(
+                    "cf_category", ""
+                )
+                update_data["sub_category"] = item.get("custom_field_hash", {}).get(
+                    "cf_sub_category", ""
                 )
             # Iterate over other fields to detect changes
             for field, value in item.items():
