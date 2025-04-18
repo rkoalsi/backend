@@ -41,6 +41,20 @@ def parse_datetime(value):
         return datetime.datetime.now()
 
 
+brands = {
+    "zippy": "Zippy Paws",
+    "waggie": "Waggie Wag",
+    "fofos": "FOFOS",
+    "truelove": "Truelove",
+    "barkbutler": "Barkbutler",
+    "dogfest": "Dogfest",
+    "catfest": "Catfest",
+    "dux": "Dux",
+    "squeeezys": "Squeeezys",
+    "joyser": "Joyser",
+}
+
+
 def handle_item(data: dict, background_tasks: BackgroundTasks):
     item = data.get("item")
     item_id = item.get("item_id", "")
@@ -55,15 +69,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "name": item.get("name", ""),
                     "item_name": item.get("name", ""),
                     "unit": item.get("unit", "pcs"),
-                    "brand": (
-                        "Zippy Paws"
-                        if brand_name.lower() == "zippy"
-                        else (
-                            brand_name
-                            if brand_name == "FOFOS"
-                            else brand_name.capitalize()
-                        )
-                    ),
+                    "brand": brands.get(brand_name.lower(), brand_name.capitalize()),
                     "status": item.get("status", "inactive"),
                     "is_combo_product": item.get("is_combo_product", False),
                     "rate": item.get("rate", 1),
@@ -122,9 +128,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 params = {
                     "name": person["name"],
                     "item_name": item.get("name", ""),
-                    "brand": (
-                        brand_name.capitalize() if brand_name != "FOFOS" else brand_name
-                    ),
+                    "brand": brands.get(brand_name.lower(), brand_name.capitalize()),
                 }
                 send_whatsapp(
                     to=person["phone"],
@@ -154,15 +158,9 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 item_name = str(item.get("name"))
                 brand_name = item_name.split(" ", 1)[0]
 
-                # Handle special brand cases
-                if brand_name.lower() == "zippy":
-                    full_brand = "Zippy Paws"
-                elif brand_name.upper() == "FOFOS":
-                    full_brand = "FOFOS"
-                else:
-                    full_brand = brand_name.capitalize()
-
-                update_data["brand"] = full_brand
+                update_data["brand"] = brands.get(
+                    brand_name.lower(), brand_name.capitalize()
+                )
 
             if "custom_field_hash" in item:
                 update_data["cf_sku_code"] = item.get("custom_field_hash", {}).get(
