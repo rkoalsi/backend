@@ -15,6 +15,7 @@ from typing import Optional
 import re, requests, os, json
 from dotenv import load_dotenv
 import boto3, io, csv, openpyxl
+from pytz import timezone as tz
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from datetime import date, timedelta, datetime, timezone
 from .admin_trainings import router as admin_trainings_router
@@ -94,7 +95,7 @@ async def get_stats():
         total_sales_people = active_sales_people + inactive_sales_people
 
         # Orders Statistics
-        ist = timezone("Asia/Kolkata")
+        ist = tz("Asia/Kolkata")
         now_ist = datetime.now(ist)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         recent_orders = db["orders"].count_documents(
@@ -204,6 +205,7 @@ async def get_stats():
         }
 
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
