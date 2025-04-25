@@ -9,6 +9,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, openpyxl, io
+from datetime import datetime, timezone
 
 load_dotenv()
 router = APIRouter()
@@ -25,9 +26,13 @@ potential_customers_collection = db["potential_customers"]
 def get_potential_customers(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
+    code: str | None = None,
 ):
     try:
         match_statement = {}
+
+        if code:
+            match_statement["created_by_info.code"] = code
         pipeline = [
             {
                 "$lookup": {
@@ -47,9 +52,15 @@ def get_potential_customers(
             {"$skip": page * limit},
             {"$limit": limit},
         ]
-        total_count = db.potential_customers.count_documents(match_statement)
+
         cursor = db.potential_customers.aggregate(pipeline)
         cat = [serialize_mongo_document(doc) for doc in cursor]
+        del pipeline[-2:]
+        total_count = list(
+            db.potential_customers.aggregate([*pipeline, {"$count": "total"}])
+        )
+        total = total_count[0] if total_count else None
+        total_count = total.get("total", 0)
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
         # Validate page number
@@ -67,7 +78,9 @@ def get_potential_customers(
 
 
 @router.get("/report")
-def get_potential_customers_report():
+def get_potential_customers_report(
+    code: str = Query(description="Sales Person Code"),
+):
     # Corrected query definition
     query = [
         {
@@ -80,7 +93,12 @@ def get_potential_customers_report():
         },
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
     ]
+    match_statement = {}
 
+    if code:
+        match_statement["created_by_info.code"] = code
+
+    query.append({"$match": match_statement})
     # Fetch matching customers
     customers_cursor = db.potential_customers.aggregate(query)
     customers = [serialize_mongo_document(doc) for doc in customers_cursor]

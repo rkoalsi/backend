@@ -16,8 +16,7 @@ import re, requests, os, json
 from dotenv import load_dotenv
 import boto3, io, csv, openpyxl
 from botocore.exceptions import BotoCoreError, NoCredentialsError
-from pytz import timezone
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from .admin_trainings import router as admin_trainings_router
 from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
@@ -30,6 +29,9 @@ from .admin_potential_customers import router as admin_potential_customers_route
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
 from backend.config.auth import JWTBearer  # type: ignore
+import pandas as pd
+from io import BytesIO
+from pymongo.errors import OperationFailure
 
 load_dotenv()
 router = APIRouter()
@@ -721,6 +723,11 @@ def read_all_orders(
         None, description="Filter by whether estimate was created"
     ),
     amount: Optional[str] = Query(None, description="Filter by amount"),
+    estimate_number: Optional[str] = Query(
+        None, description="Search by estimate number"
+    ),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
 ):
     """
     Retrieve all orders for admin, with pagination and optional filters,
@@ -729,7 +736,27 @@ def read_all_orders(
     # Build the match stage based on filters
     match_stage = {"$match": {}}
     second_match_stage = {"$match": {}}
+    date_filter = {}
 
+    if start_date:
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        date_filter["$gte"] = start_date
+    if end_date:
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=timezone.utc
+        )
+        date_filter["$lte"] = end_date
+
+    if date_filter:
+        match_stage["$match"]["created_at"] = date_filter
+    # Estimate number search
+    if estimate_number:
+        match_stage["$match"]["estimate_number"] = {
+            "$regex": f"^{re.escape(estimate_number.strip())}",
+            "$options": "i",
+        }
     if status:
         match_stage["$match"]["status"] = status.lower()
 
@@ -742,8 +769,6 @@ def read_all_orders(
     if sales_person:
         # Assuming 'created_by_info.name' is the field to filter
         second_match_stage["$match"]["created_by_info.code"] = sales_person
-    # Count total orders (for the frontend) without pagination but with filters
-    total_count = orders_collection.count_documents(match_stage["$match"])
     # Now build our aggregation pipeline
     pipeline = [
         match_stage,
@@ -813,7 +838,11 @@ def read_all_orders(
 
     # Execute the pipeline
     orders_cursor = orders_collection.aggregate(pipeline)
-
+    del pipeline[2:4]
+    pipeline.append({"$count": "total"})
+    total_count = list(orders_collection.aggregate(pipeline))
+    total = total_count[0] if total_count else None
+    total_count = total.get("total", 0)
     # Convert each Mongo document to JSON-serializable Python dict
     orders_with_user_info = [serialize_mongo_document(doc) for doc in orders_cursor]
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
@@ -828,6 +857,164 @@ def read_all_orders(
         "per_page": limit,
         "total_pages": total_pages,
     }
+
+
+@router.get("/orders/export")
+async def export_orders(
+    response: Response,
+    sales_person: Optional[str] = Query(None),  # Fix 1: Match parameter type
+    status: Optional[str] = Query(None),
+    estimate_created: Optional[bool] = Query(None),
+    amount: Optional[str] = Query(None),  # Fix 2: Change to Optional[str]
+    estimate_number: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    # Build the match stage based on filters
+    match_stage = {"$match": {}}
+    second_match_stage = {"$match": {}}
+    date_filter = {}
+
+    if start_date:
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        date_filter["$gte"] = start_date
+    if end_date:
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=timezone.utc
+        )
+        date_filter["$lte"] = end_date
+
+    if date_filter:
+        match_stage["$match"]["created_at"] = date_filter
+    # Estimate number search
+    if estimate_number:
+        match_stage["$match"]["estimate_number"] = {
+            "$regex": f"^{re.escape(estimate_number.strip())}",
+            "$options": "i",
+        }
+    if status:
+        match_stage["$match"]["status"] = status.lower()
+
+    if estimate_created is not None:
+        match_stage["$match"]["estimate_created"] = estimate_created
+
+    if amount:
+        match_stage["$match"]["total_amount"] = {"$gt": 0}
+    print(sales_person)
+    if sales_person:
+        # Assuming 'created_by_info.name' is the field to filter
+        second_match_stage["$match"]["Sales Person Code"] = sales_person
+    # Now build our aggregation pipeline
+    pipeline = [
+        match_stage,
+        {"$sort": {"created_at": -1}},  # sort descending by created_at
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "created_by_info",
+            }
+        },
+        # Unwind the created_by_info array so it's a single object
+        {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
+        # Convert created_at (UTC) to a string in IST
+        {
+            "$project": {
+                # Keep the original fields (except created_by_info is now an object)
+                "Sales Person Name": "$created_by_info.name",
+                "Sales Person Code": "$created_by_info.code",
+                "Customer Name": "$customer_name",
+                "Total Amount": "$total_amount",
+                "Total GST": "$total_gst",
+                "GST Type": "$gst_type",
+                "Status": "$status",
+                "Products": {"$size": {"$ifNull": ["$products", []]}},
+                "Estimate Url": "$estimate_url",
+                "Estimate Number": "$estimate_number",
+                "Reference Number": "$reference_number",
+                # ... include any other fields you want
+                # Convert the "created_at" date to a string in IST
+                "Created At": {
+                    "$dateToString": {
+                        "date": "$created_at",
+                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+                "Updated At": {
+                    "$dateToString": {
+                        "date": "$updated_at",
+                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+                "Shipping Address Address": "$shipping_address.address",
+                "Shipping Address State": "$shipping_address.state",
+                "Shipping Address City": "$shipping_address.city",
+                "Billing Address Address": "$billing_address.address",
+                "Billing Address State": "$billing_address.state",
+                "Billing Address City": "$billing_address.city",
+            }
+        },
+        second_match_stage,
+    ]
+
+    try:
+        # Execute pipeline
+        cursor = orders_collection.aggregate(pipeline)
+        pipeline.append({"$count": "total"})
+        total_count = list(orders_collection.aggregate(pipeline))
+        total = total_count[0] if total_count else None
+        total_count = total.get("total", 0)
+        data = [serialize_mongo_document(doc) for doc in cursor]
+    except OperationFailure as e:
+        print(f"MongoDB aggregation failed: {e}")
+        return Response(content="Export failed", status_code=500)
+
+    if not data:
+        return Response(content="No data found", status_code=404)
+
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
+
+    # Create Excel file in memory
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Orders")
+
+        # Get worksheet and apply formatting
+        worksheet = writer.sheets["Orders"]
+
+        # Set column widths
+        column_widths = {
+            "A": 20,  # Estimate Number
+            "B": 20,  # Created At
+            "C": 25,  # Customer Name
+            "D": 15,  # Status
+            "E": 15,  # Sales Person
+            "F": 15,  # Total Amount
+            "G": 15,  # GST Amount
+            "H": 15,  # Grand Total
+            "I": 20,  # Reference Number
+            "J": 15,  # Products Count
+        }
+
+        for col, width in column_widths.items():
+            worksheet.column_dimensions[col].width = width
+
+    # Prepare response
+    output.seek(0)
+    filename = f"orders_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    response.headers["Content-Type"] = (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    return Response(content=output.getvalue())
 
 
 @router.get("/payments_due")
