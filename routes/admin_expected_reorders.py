@@ -9,6 +9,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, openpyxl, io
+from datetime import timezone, datetime
 
 load_dotenv()
 router = APIRouter()
@@ -44,9 +45,30 @@ def format_address(address):
 def get_expected_reorders(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
+    code: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ):
     try:
         match_statement = {}
+        date_filter = {}
+        if code:
+            match_statement["created_by_info.code"] = code
+        if start_date:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+            date_filter["$gte"] = start_date
+        if end_date:
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc
+            )
+            date_filter["$lte"] = end_date
+
+        if date_filter:
+            match_statement["created_at"] = date_filter
+        if code:
+            match_statement["created_by_info.code"] = code
         pipeline = [
             {
                 "$lookup": {
@@ -66,9 +88,14 @@ def get_expected_reorders(
             {"$skip": page * limit},
             {"$limit": limit},
         ]
-        total_count = db.expected_reorders.count_documents(match_statement)
         cursor = db.expected_reorders.aggregate(pipeline)
         cat = [serialize_mongo_document(doc) for doc in cursor]
+        del pipeline[-2:]
+        total_count = list(
+            db.expected_reorders.aggregate([*pipeline, {"$count": "total"}])
+        )
+        total = total_count[0] if total_count else None
+        total_count = total.get("total", 0)
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
         # Validate page number
@@ -86,7 +113,11 @@ def get_expected_reorders(
 
 
 @router.get("/report")
-def get_expected_reorders_report():
+def get_expected_reorders_report(
+    code: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
     # Corrected query definition
     query = [
         {
@@ -99,7 +130,25 @@ def get_expected_reorders_report():
         },
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
     ]
+    match_statement = {}
+    date_filter = {}
 
+    if start_date:
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        date_filter["$gte"] = start_date
+    if end_date:
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=timezone.utc
+        )
+        date_filter["$lte"] = end_date
+
+    if date_filter:
+        match_statement["created_at"] = date_filter
+    if code:
+        match_statement["created_by_info.code"] = code
+    query.append({"$match": match_statement})
     # Fetch matching customers
     customers_cursor = db.expected_reorders.aggregate(query)
     customers = [serialize_mongo_document(doc) for doc in customers_cursor]
