@@ -552,8 +552,8 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            estimate_response.raise_for_status()
-
+            # estimate_response.raise_for_status()
+            print(estimate_response.json())
             estimate_data = estimate_response.json()["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
