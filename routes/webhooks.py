@@ -361,7 +361,7 @@ def get_zoho_stock(day=None, month=None, year=None):
             warehouse_name = w.get("warehouse_name", "").strip().lower()
             if warehouse_name == target_warehouse:
                 try:
-                    stock_quantity = int(w.get("quantity_available", 0))
+                    stock_quantity = int(w.get("quantity_available_for_sale", 0))
                     arr.append(
                         {
                             "name": item_name,
@@ -371,7 +371,7 @@ def get_zoho_stock(day=None, month=None, year=None):
                     print(f"Added stock for '{item_name}': {stock_quantity}")
                 except ValueError:
                     print(
-                        f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available')}"
+                        f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}"
                     )
     print(f"Total stock items after filtering: {len(arr)}")
     print("Data fetching complete. Proceeding to update the database.")
