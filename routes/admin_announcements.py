@@ -86,9 +86,10 @@ async def create_announcement(
     description: Optional[str] = Form(None),
     is_active: bool = Form(True),
     audio_file: Optional[UploadFile] = File(None),
+    image_file: Optional[UploadFile] = File(None),
 ):
     """
-    Create a new announcement with optional audio file upload.
+    Create a new announcement with optional audio and image file uploads.
     """
     try:
         # Prepare announcement data
@@ -129,6 +130,38 @@ async def create_announcement(
                     status_code=500, detail="Failed to upload audio file"
                 )
 
+        # Handle image file if provided
+        if image_file:
+            # Read file content
+            image_content = await image_file.read()
+
+            # Generate a unique filename
+            image_extension = os.path.splitext(image_file.filename)[1]
+            unique_image_filename = (
+                f"announcements/images/{uuid.uuid4()}{image_extension}"
+            )
+
+            # Upload to S3
+            try:
+                s3_client.upload_fileobj(
+                    io.BytesIO(image_content),
+                    AWS_S3_BUCKET_NAME,
+                    unique_image_filename,
+                    ExtraArgs={
+                        "ContentType": image_file.content_type,
+                        "ACL": "public-read",  # Make the file publicly accessible
+                    },
+                )
+
+                # Store the S3 URL in the database
+                announcement_data["image_url"] = f"{AWS_S3_URL}/{unique_image_filename}"
+
+            except ClientError as e:
+                print(f"Error uploading to S3: {e}")
+                raise HTTPException(
+                    status_code=500, detail="Failed to upload image file"
+                )
+
         # Insert into database
         result = db.announcements.insert_one(announcement_data)
 
@@ -150,13 +183,14 @@ async def update_announcement(
     description: Optional[str] = Form(None),
     is_active: bool = Form(True),
     audio_file: Optional[UploadFile] = File(None),
+    image_file: Optional[UploadFile] = File(None),
 ):
     """
-    Update an existing announcement with optional audio file update.
+    Update an existing announcement with optional audio and image file updates.
     """
     try:
-        # Get existing announcement to check if there's an audio file to replace
-        existing = db.announcements.find_one({"_id": announcement_id})
+        # Get existing announcement to check if there are files to replace
+        existing = db.announcements.find_one({"_id": ObjectId(announcement_id)})
         if not existing:
             raise HTTPException(status_code=404, detail="Announcement not found")
 
@@ -207,9 +241,52 @@ async def update_announcement(
                     status_code=500, detail="Failed to upload audio file"
                 )
 
+        # Handle image file if provided
+        if image_file:
+            # Delete old image from S3 if it exists
+            if existing.get("image_url"):
+                try:
+                    # Extract the key from the URL
+                    old_image_key = existing["image_url"].replace(f"{AWS_S3_URL}/", "")
+                    s3_client.delete_object(
+                        Bucket=AWS_S3_BUCKET_NAME, Key=old_image_key
+                    )
+                except ClientError as e:
+                    print(f"Warning: Could not delete old image from S3: {e}")
+
+            # Read file content
+            image_content = await image_file.read()
+
+            # Generate a unique filename
+            image_extension = os.path.splitext(image_file.filename)[1]
+            unique_image_filename = (
+                f"announcements/images/{uuid.uuid4()}{image_extension}"
+            )
+
+            # Upload to S3
+            try:
+                s3_client.upload_fileobj(
+                    io.BytesIO(image_content),
+                    AWS_S3_BUCKET_NAME,
+                    unique_image_filename,
+                    ExtraArgs={
+                        "ContentType": image_file.content_type,
+                        "ACL": "public-read",  # Make the file publicly accessible
+                    },
+                )
+
+                # Store the S3 URL in the database
+                update_data["image_url"] = f"{AWS_S3_URL}/{unique_image_filename}"
+
+            except ClientError as e:
+                print(f"Error uploading to S3: {e}")
+                raise HTTPException(
+                    status_code=500, detail="Failed to upload image file"
+                )
+
         # Update the database
         result = db.announcements.update_one(
-            {"_id": announcement_id}, {"$set": update_data}
+            {"_id": ObjectId(announcement_id)}, {"$set": update_data}
         )
 
         if result.modified_count > 0:
