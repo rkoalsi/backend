@@ -119,18 +119,29 @@ async def create_daily_visit(
                     }
                 )
         else:
-            result = db.potential_customers.insert_one(
+            doc = db.potential_customers.find_one(
                 {
                     "name": shop["potential_customer_name"],
                     "address": shop["potential_customer_address"],
-                    "tier": shop["potential_customer_tier"],
-                    "mobile": shop.get("potential_customer_mobile", ""),
                     "created_by": ObjectId(created_by),
-                    "created_at": datetime.datetime.now(),
                 }
             )
-            potential_customer_id = str(result.inserted_id)
-            shop["potential_customer_id"] = ObjectId(potential_customer_id)
+            if doc:
+                potential_customer_id = str(doc["_id"])
+                shop["potential_customer_id"] = ObjectId(potential_customer_id)
+            else:
+                result = db.potential_customers.insert_one(
+                    {
+                        "name": shop["potential_customer_name"],
+                        "address": shop["potential_customer_address"],
+                        "tier": shop["potential_customer_tier"],
+                        "mobile": shop.get("potential_customer_mobile", ""),
+                        "created_by": ObjectId(created_by),
+                        "created_at": datetime.datetime.now(),
+                    }
+                )
+                potential_customer_id = str(result.inserted_id)
+                shop["potential_customer_id"] = ObjectId(potential_customer_id)
     # Create the daily visit record with the shops data
     daily_visit = {
         "shops": shops_data,
