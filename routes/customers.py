@@ -91,28 +91,20 @@ def get_customers(
     # Filter by role and status
     if role == "salesperson":
         query["status"] = "active"
-        # If salesperson, restrict to assigned customers or special cases
         if user_code:
             query["$or"] = [
-                {"cf_sales_person": {"$regex": f"\\b{user_code}\\b", "$options": "i"}},
+                {"cf_sales_person": user_code},
+                {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
                 {"cf_sales_person": "Defaulter"},
                 {"cf_sales_person": "Company customers"},
+                {"cf_sales_person": {"$elemMatch": {"$eq": "Defaulter"}}},
+                {"cf_sales_person": {"$elemMatch": {"$eq": "Company customers"}}},
             ]
-
-    # Filter by name if provided
     if name:
-        query["contact_name"] = re.compile(name, re.IGNORECASE)
+        query["contact_name"] = {"$regex": name, "$options": "i"}
 
-    # Sort logic
-    sort_order = [("status", 1)]  # Default: Ascending order of status
-    if sort and sort.lower() == "desc":
-        sort_order = [("status", -1)]  # Descending order
+    customers = [serialize_mongo_document(doc) for doc in db.customers.find(query)]
 
-    customers = [
-        serialize_mongo_document(doc)
-        for doc in db.customers.find(query).sort(sort_order)
-    ]
-    # Return the response as JSON
     return {"customers": customers}
 
 
@@ -145,7 +137,6 @@ def get_customers_for_sales_person(
     if search:
         # We can push this into the $and array
         query["$and"].append({"contact_name": {"$regex": search, "$options": "i"}})
-
     total_count = db.customers.count_documents(query)
 
     skip = (page - 1) * limit
