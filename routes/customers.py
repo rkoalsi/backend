@@ -82,7 +82,7 @@ def create_address_on_zoho(address, customer):
 def get_customers(
     name: Optional[str] = None,
     role: str = "salesperson",
-    user_code: Optional[str] = None,  # Salesperson's code (if applicable)
+    user_code: Optional[str] = None,  # Salesperson's code (single string)
     sort: Optional[str] = None,
 ):
     customers = []
@@ -92,18 +92,44 @@ def get_customers(
     if role == "salesperson":
         query["status"] = "active"
         if user_code:
-            query["$or"] = [
-                {"cf_sales_person": user_code},
-                {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
-                {"cf_sales_person": "Defaulter"},
-                {"cf_sales_person": "Company customers"},
-                {"cf_sales_person": {"$elemMatch": {"$eq": "Defaulter"}}},
-                {"cf_sales_person": {"$elemMatch": {"$eq": "Company customers"}}},
-            ]
+            or_conditions = []
+            or_conditions.extend(
+                [
+                    {"cf_sales_person": user_code},
+                    {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
+                    {
+                        "cf_sales_person": {
+                            "$regex": f"\\b{user_code}\\b",
+                            "$options": "i",
+                        }
+                    },
+                ]
+            )
+
+            default_values = ["Defaulter", "Company customers"]
+            for default_value in default_values:
+                or_conditions.extend(
+                    [
+                        {"cf_sales_person": default_value},
+                        {"cf_sales_person": {"$elemMatch": {"$eq": default_value}}},
+                        {
+                            "cf_sales_person": {
+                                "$regex": f"\\b{default_value}\\b",
+                                "$options": "i",
+                            }
+                        },
+                    ]
+                )
+
+            query["$or"] = or_conditions
+
     if name:
         query["contact_name"] = {"$regex": name, "$options": "i"}
 
     customers = [serialize_mongo_document(doc) for doc in db.customers.find(query)]
+
+    if sort:
+        pass
 
     return {"customers": customers}
 
