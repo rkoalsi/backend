@@ -978,6 +978,33 @@ def handle_draft_invoice(data: dict):
         print("Invoice Does Not Exist. Webhook Received")
 
 
+def handle_shipment(data: dict):
+    shipment = data.get("shipmentorder")
+    invoices = shipment.get("invoices", [])
+    invoice_number = invoices[-1].get("invoice_number", "")
+    invoice_id = invoices[-1].get("invoice_id", "")
+    if invoice_id != "":
+        print(invoice_id)
+        # member1 = serialize_mongo_document(
+        #     dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
+        # )
+        # member2 = serialize_mongo_document(
+        #     dict(db.users.find_one({"designation": "Customer Care"}))
+        # )
+
+        # template = serialize_mongo_document(
+        #     dict(db.templates.find_one({"name": "draft_invoice"}))
+        # )
+        # for person in [member1, member2]:
+        #     params = {
+        #         "name": person.get("first_name"),
+        #         "invoice_number": invoice_number,
+        #     }
+        #     send_whatsapp(person.get("phone"), {**template}, {**params})
+    else:
+        print("Invoice Does Not Exist. Webhook Received")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -1024,3 +1051,11 @@ def draft_invoice(
 ):
     handle_draft_invoice(data)
     return "Draft Invoice Webhook Received Successfully"
+
+
+@router.post("/shipment")
+def shipment(
+    data: dict,
+):
+    handle_shipment(data)
+    return "Shipment Webhook Received Successfully"
