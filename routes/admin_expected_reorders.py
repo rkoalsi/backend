@@ -48,6 +48,7 @@ def get_expected_reorders(
     code: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    has_ordered: bool | None = None,
 ):
     try:
         match_statement = {}
@@ -64,12 +65,14 @@ def get_expected_reorders(
                 hour=23, minute=59, second=59, tzinfo=timezone.utc
             )
             date_filter["$lte"] = end_date
-
+        if has_ordered:
+            match_statement["has_ordered"] = has_ordered
         if date_filter:
             match_statement["created_at"] = date_filter
         if code:
             match_statement["created_by_info.code"] = code
         pipeline = [
+            {"$sort": {"created_at": -1}},
             {
                 "$lookup": {
                     "from": "users",
@@ -94,7 +97,7 @@ def get_expected_reorders(
         total_count = list(
             db.expected_reorders.aggregate([*pipeline, {"$count": "total"}])
         )
-        total = total_count[0] if total_count else None
+        total = total_count[0] if len(total_count) > 0 else {"total": 0}
         total_count = total.get("total", 0)
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
@@ -117,6 +120,7 @@ def get_expected_reorders_report(
     code: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    has_ordered: bool | None = None,
 ):
     # Corrected query definition
     query = [
@@ -148,6 +152,8 @@ def get_expected_reorders_report(
         match_statement["created_at"] = date_filter
     if code:
         match_statement["created_by_info.code"] = code
+    if has_ordered:
+        match_statement["has_ordered"] = has_ordered
     query.append({"$match": match_statement})
     # Fetch matching customers
     customers_cursor = db.expected_reorders.aggregate(query)
@@ -159,7 +165,7 @@ def get_expected_reorders_report(
     ws.title = "Expected Reorders Report"
 
     # Define the header row
-    headers = ["Created At", "Name", "Address", "Created By"]
+    headers = ["Created At", "Name", "Address", "Created By", "Has Ordered"]
     ws.append(headers)
 
     for cust in customers:
@@ -168,6 +174,7 @@ def get_expected_reorders_report(
             cust.get("customer_name", ""),
             format_address(cust.get("address")),
             cust.get("created_by_info", {}).get("name", ""),
+            cust.get("has_ordered", False),
         ]
         ws.append(row)
 
@@ -202,9 +209,12 @@ def update_potential_customer(
         )
         if not existing_customer:
             raise HTTPException(status_code=404, detail="Data not found")
-        update_data.pop("_id")
-        update_data.pop("created_by")
-        update_data.pop("created_by_info", "")
+        if "_id" in update_data:
+            update_data.pop("_id")
+        if "created_by" in update_data:
+            update_data.pop("created_by")
+        if "created_by_info" in update_data:
+            update_data.pop("created_by_info")
         expected_reorders_collection.update_one(
             {"_id": customer_obj_id}, {"$set": update_data}
         )
