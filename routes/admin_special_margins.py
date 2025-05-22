@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Body, Query, Request
+from fastapi import APIRouter, HTTPException, Body, Query
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo import UpdateOne
@@ -17,7 +17,6 @@ def create_audit_entry(
     customer_id: ObjectId,
     old_data: Optional[Dict[Any, Any]] = None,
     new_data: Optional[Dict[Any, Any]] = None,
-    user_id: Optional[str] = None,
     additional_info: Optional[Dict[Any, Any]] = None,
 ):
     """
@@ -29,7 +28,6 @@ def create_audit_entry(
         customer_id: Customer ID
         old_data: Previous state of the document (for updates/deletes)
         new_data: New state of the document (for creates/updates)
-        user_id: ID of the user performing the action (optional)
         additional_info: Any additional context (e.g., brand operations, bulk operation details)
     """
     audit_entry = {
@@ -40,7 +38,6 @@ def create_audit_entry(
         "customer_id": customer_id,
         "old_data": old_data,
         "new_data": new_data,
-        "user_id": user_id,
         "additional_info": additional_info or {},
     }
 
@@ -87,9 +84,7 @@ def get_customer_special_margins(customer_id: str):
 
 
 @router.post("/bulk/{customer_id}")
-def bulk_create_or_update_special_margins(
-    customer_id: str, data: list = Body(...), request: Request = None
-):
+def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(...)):
     """
     Create or update multiple special margin entries in bulk for a given customer.
     """
@@ -100,9 +95,6 @@ def bulk_create_or_update_special_margins(
         if not ObjectId.is_valid(customer_id):
             raise HTTPException(status_code=400, detail="Invalid customer_id")
         customer_obj_id = ObjectId(customer_id)
-
-        # Get user_id from request headers if available
-        user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
 
         bulk_operations_info = []
         current_time = get_current_timestamp()
@@ -169,7 +161,6 @@ def bulk_create_or_update_special_margins(
                 customer_id=customer_obj_id,
                 old_data=old_data,
                 new_data=copy.deepcopy(new_data),
-                user_id=user_id,
                 additional_info={
                     "bulk_operation": True,
                     "item_index": data.index(item),
@@ -195,7 +186,7 @@ def bulk_create_or_update_special_margins(
 
 @router.put("/{customer_id}/product/{product_id}")
 def update_customer_special_margin(
-    customer_id: str, product_id: str, data: dict = Body(...), request: Request = None
+    customer_id: str, product_id: str, data: dict = Body(...)
 ):
     """
     Update the special margin for a single product for a given customer.
@@ -208,7 +199,6 @@ def update_customer_special_margin(
 
     customer_obj_id = ObjectId(customer_id)
     product_obj_id = ObjectId(product_id)
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
 
     # Get existing document for audit trail
     existing_doc = db.special_margins.find_one(
@@ -254,16 +244,13 @@ def update_customer_special_margin(
         customer_id=customer_obj_id,
         old_data=old_data,
         new_data=copy.deepcopy(update_data),
-        user_id=user_id,
     )
 
     return {"message": "Special margin updated successfully."}
 
 
 @router.post("/brand/{customer_id}")
-def create_brand_special_margins(
-    customer_id: str, data: dict = Body(...), request: Request = None
-):
+def create_brand_special_margins(customer_id: str, data: dict = Body(...)):
     """
     Create special margins for all products of a specific brand for a customer.
     """
@@ -275,7 +262,6 @@ def create_brand_special_margins(
     customer_obj_id = ObjectId(customer_id)
     brand = data["brand"]
     margin = data["margin"]
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
 
     # Fetch all active products for the given brand
     products = list(db.products.find({"brand": brand, "status": "active"}))
@@ -300,7 +286,6 @@ def create_brand_special_margins(
             customer_id=customer_obj_id,
             old_data={k: v for k, v in existing.items() if k != "_id"},
             new_data=None,
-            user_id=user_id,
             additional_info={
                 "brand_operation": True,
                 "brand": brand,
@@ -339,7 +324,6 @@ def create_brand_special_margins(
                 customer_id=customer_obj_id,
                 old_data=None,
                 new_data=copy.deepcopy(doc),
-                user_id=user_id,
                 additional_info={"brand_operation": True, "brand": brand},
             )
 
@@ -354,7 +338,6 @@ def delete_brand_special_margins(
     brand: str = Query(
         ..., description="The brand name for which to delete special margins"
     ),
-    request: Request = None,
 ):
     """
     Delete all special margin entries for a specific customer and brand.
@@ -363,7 +346,6 @@ def delete_brand_special_margins(
         raise HTTPException(status_code=400, detail="Invalid customer_id")
 
     customer_obj_id = ObjectId(customer_id)
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
 
     # Fetch all active products for the given brand
     products = list(db.products.find({"brand": brand, "status": "active"}))
@@ -394,7 +376,6 @@ def delete_brand_special_margins(
             customer_id=customer_obj_id,
             old_data={k: v for k, v in margin.items() if k != "_id"},
             new_data=None,
-            user_id=user_id,
             additional_info={"brand_operation": True, "brand": brand},
         )
 
@@ -408,9 +389,7 @@ def delete_brand_special_margins(
 
 
 @router.post("/{customer_id}")
-def create_customer_special_margin(
-    customer_id: str, data: dict = Body(...), request: Request = None
-):
+def create_customer_special_margin(customer_id: str, data: dict = Body(...)):
     """
     Create a new special margin entry for a given customer.
     """
@@ -418,8 +397,6 @@ def create_customer_special_margin(
         raise HTTPException(
             status_code=400, detail="product_id, name, and margin are required."
         )
-
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
 
     existing = db.special_margins.find_one(
         {
@@ -451,7 +428,6 @@ def create_customer_special_margin(
         customer_id=ObjectId(customer_id),
         old_data=None,
         new_data=copy.deepcopy(new_margin),
-        user_id=user_id,
     )
 
     # Convert for the response
@@ -471,11 +447,10 @@ def create_customer_special_margin(
 
 
 @router.delete("/{customer_id}/bulk")
-def delete_all_customer_special_margins(customer_id: str, request: Request = None):
+def delete_all_customer_special_margins(customer_id: str):
     """
     Delete all special margin entries for a specific customer.
     """
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
     customer_obj_id = ObjectId(customer_id)
 
     # Get existing documents for audit trail
@@ -495,7 +470,6 @@ def delete_all_customer_special_margins(customer_id: str, request: Request = Non
             customer_id=customer_obj_id,
             old_data={k: v for k, v in margin.items() if k != "_id"},
             new_data=None,
-            user_id=user_id,
             additional_info={"bulk_customer_delete": True},
         )
 
@@ -507,14 +481,10 @@ def delete_all_customer_special_margins(customer_id: str, request: Request = Non
 
 
 @router.delete("/{customer_id}/{special_margin_id}")
-def delete_customer_special_margin(
-    customer_id: str, special_margin_id: str, request: Request = None
-):
+def delete_customer_special_margin(customer_id: str, special_margin_id: str):
     """
     Delete a specific special margin entry by _id (special_margin_id).
     """
-    user_id = getattr(request, "headers", {}).get("x-user-id") if request else None
-
     # Get existing document for audit trail
     existing_doc = db.special_margins.find_one(
         {"_id": ObjectId(special_margin_id), "customer_id": ObjectId(customer_id)}
@@ -532,7 +502,6 @@ def delete_customer_special_margin(
         customer_id=ObjectId(customer_id),
         old_data={k: v for k, v in existing_doc.items() if k != "_id"},
         new_data=None,
-        user_id=user_id,
     )
 
     result = db.special_margins.delete_one(
