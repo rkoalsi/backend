@@ -31,6 +31,7 @@ def get_targeted_customers(
 
         pipeline = [
             # Lookup created_by details
+            {"$sort": {"created_at": -1}},
             {
                 "$lookup": {
                     "from": "users",

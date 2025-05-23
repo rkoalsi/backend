@@ -14,12 +14,13 @@ client, db = connect_to_mongo()
 
 
 @router.post("")
-async def create_potential_customer(data: dict):
+async def create_expected_reorder(data: dict):
     expected_reorders_collection = db["expected_reorders"]
     # # Remove the id field if present, so MongoDB can generate it.
     data["customer_id"] = ObjectId(data["customer_id"])
     data["created_by"] = ObjectId(data["created_by"])
     data["created_at"] = datetime.now()
+    data["has_ordered"] = False
     result = expected_reorders_collection.insert_one(data)
     if not result:
         raise HTTPException(status_code=404, detail="Potential Customer not created")

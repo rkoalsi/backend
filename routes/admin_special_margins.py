@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Body, Query
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from pymongo import UpdateOne
+from datetime import datetime
 
 client, db = connect_to_mongo()
 
@@ -75,6 +76,7 @@ def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(..
                         "margin": item["margin"],
                         "customer_id": customer_obj_id,
                         "product_id": product_obj_id,
+                        "updated_at": datetime.now(),
                     }
                 },
                 upsert=True,
@@ -106,7 +108,7 @@ def update_customer_special_margin(
 
     customer_obj_id = ObjectId(customer_id)
     product_obj_id = ObjectId(product_id)
-    update_data = {"margin": data["margin"]}
+    update_data = {"margin": data["margin"], "updated_at": datetime.now()}
     if data.get("name"):
         update_data["name"] = data["name"]
 
@@ -145,6 +147,7 @@ def create_brand_special_margins(customer_id: str, data: dict = Body(...)):
     # Build new special margin documents.
     new_docs = [
         {
+            "created_at": datetime.now(),
             "customer_id": customer_obj_id,
             "product_id": p["_id"],
             "name": p.get("name", "Unnamed"),
@@ -232,6 +235,7 @@ def create_customer_special_margin(customer_id: str, data: dict = Body(...)):
         "product_id": ObjectId(data["product_id"]),
         "name": data["name"],
         "margin": data["margin"],
+        "created_at": datetime.now(),
     }
 
     result = db.special_margins.insert_one(new_margin)
