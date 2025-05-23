@@ -66,21 +66,25 @@ def bulk_create_or_update_special_margins(customer_id: str, data: list = Body(..
                 )
 
             product_obj_id = ObjectId(item["product_id"])
-
-            # Use update_many to update or insert
-            db.special_margins.update_one(
-                {"customer_id": customer_obj_id, "product_id": product_obj_id},
-                {
-                    "$set": {
-                        "name": item["name"],
-                        "margin": item["margin"],
-                        "customer_id": customer_obj_id,
-                        "product_id": product_obj_id,
-                        "updated_at": datetime.now(),
-                    }
-                },
-                upsert=True,
+            existing_margin = db.special_margins.find_one(
+                {"customer_id": customer_obj_id, "product_id": product_obj_id}
             )
+            if existing_margin and existing_margin.get("margin") == item["margin"]:
+                continue
+            else:
+                db.special_margins.update_one(
+                    {"customer_id": customer_obj_id, "product_id": product_obj_id},
+                    {
+                        "$set": {
+                            "name": item["name"],
+                            "margin": item["margin"],
+                            "customer_id": customer_obj_id,
+                            "product_id": product_obj_id,
+                            "updated_at": datetime.now(),
+                        }
+                    },
+                    upsert=True,
+                )
 
         return {"message": "Bulk operation completed successfully."}
 
