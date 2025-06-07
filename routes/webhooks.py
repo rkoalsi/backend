@@ -991,7 +991,6 @@ def handle_shipment(data: dict):
             {
                 "customer_name": customer_name,
                 "tracking_number": tracking_number,
-                "tracking_url": tracking_url,
             },
             indent=4,
         ),
@@ -999,6 +998,7 @@ def handle_shipment(data: dict):
     delivery_partner = serialize_mongo_document(
         dict(db["delivery_partners"].find_one({"name": tracking_partner}))
     )
+    print({"tracking_url": tracking_url})
     tracking_url = delivery_partner.get("tracking_url", "")
     invoice = serialize_mongo_document(
         dict(db["invoices"].find_one({"invoice_number": invoice_number}))
