@@ -1003,7 +1003,7 @@ def handle_shipment(data: dict):
     invoice = serialize_mongo_document(
         dict(db["invoices"].find_one({"invoice_number": invoice_number}))
     )
-    button_url = f"{os.getenv('URL')}/api/invoices/download_pdf/{invoice.get('_id')}"
+    button_url = f"{invoice.get('_id')}"
     if invoice_number != "":
         print(invoice_number)
         member1 = serialize_mongo_document(
