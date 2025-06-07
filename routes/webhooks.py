@@ -985,16 +985,16 @@ def handle_shipment(data: dict):
     customer_name = shipment.get("customer_name", "")
     tracking_number = shipment.get("reference_number", "")
     tracking_partner = shipment.get("carrier", "")
-    print(json.dumps(shipment), indent=4)
+    print(json.dumps(shipment, indent=4))
     print(
         json.dumps(
             {
                 "customer_name": customer_name,
                 "tracking_number": tracking_number,
                 "tracking_url": tracking_url,
-            }
+            },
+            indent=4,
         ),
-        indent=4,
     )
     delivery_partner = serialize_mongo_document(
         dict(db["delivery_partners"].find_one({"name": tracking_partner}))
