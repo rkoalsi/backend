@@ -980,6 +980,7 @@ def handle_draft_invoice(data: dict):
 
 def handle_shipment(data: dict):
     shipment = data.get("shipmentorder")
+    print(json.dumps(shipment, indent=4))
     invoices = shipment.get("invoices", [])
     invoice_number = invoices[-1].get("invoice_number", "")
     invoice_id = invoices[-1].get("invoice_id", "")
