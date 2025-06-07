@@ -980,28 +980,36 @@ def handle_draft_invoice(data: dict):
 
 def handle_shipment(data: dict):
     shipment = data.get("shipmentorder")
-    print(json.dumps(shipment, indent=4))
     invoices = shipment.get("invoices", [])
     invoice_number = invoices[-1].get("invoice_number", "")
-    invoice_id = invoices[-1].get("invoice_id", "")
-    if invoice_id != "":
-        print(invoice_id)
-        # member1 = serialize_mongo_document(
-        #     dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
-        # )
-        # member2 = serialize_mongo_document(
-        #     dict(db.users.find_one({"designation": "Customer Care"}))
-        # )
-
-        # template = serialize_mongo_document(
-        #     dict(db.templates.find_one({"name": "draft_invoice"}))
-        # )
-        # for person in [member1, member2]:
-        #     params = {
-        #         "name": person.get("first_name"),
-        #         "invoice_number": invoice_number,
-        #     }
-        #     send_whatsapp(person.get("phone"), {**template}, {**params})
+    customer_name = shipment.get("customer_name", "")
+    tracking_number = shipment.get("reference_number", "")
+    tracking_partner = shipment.get("carrier", "")
+    delivery_partner = serialize_mongo_document(
+        dict(db["delivery_partners"].find_one({"name": tracking_partner}))
+    )
+    tracking_url = delivery_partner.get("tracking_url", "")
+    invoice = serialize_mongo_document(
+        dict(db["invoices"].find_one({"invoice_number": invoice_number}))
+    )
+    button_url = f"{os.getenv('URL')}/api/invoices/download_pdf/{invoice.get('_id')}"
+    if invoice_number != "":
+        print(invoice_number)
+        member1 = serialize_mongo_document(
+            dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
+        )
+        template = serialize_mongo_document(
+            dict(db.templates.find_one({"name": "shipment_notification"}))
+        )
+        for person in [member1]:
+            params = {
+                "invoice_number": invoice_number,
+                "customer_name": customer_name,
+                "tracking_url": tracking_url,
+                "tracking_number": tracking_number,
+                "button_url": button_url,
+            }
+            send_whatsapp(person.get("phone"), {**template}, {**params})
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
