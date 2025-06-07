@@ -992,24 +992,64 @@ def handle_shipment(data: dict):
     invoice = serialize_mongo_document(
         dict(db["invoices"].find_one({"invoice_number": invoice_number}))
     )
+    invoice_sales_person = invoice.get("cf_sales_person", "")
+    salesperson = invoice.get("salesperson_name", "")
     button_url = f"{invoice.get('_id')}"
     if invoice_number != "":
         print(invoice_number)
-        member1 = serialize_mongo_document(
+        sales_admin = serialize_mongo_document(
             dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
         )
         template = serialize_mongo_document(
             dict(db.templates.find_one({"name": "shipment_notification"}))
         )
-        for person in [member1]:
-            params = {
-                "invoice_number": invoice_number,
-                "customer_name": customer_name,
-                "tracking_url": tracking_url,
-                "tracking_number": tracking_number,
-                "button_url": button_url,
-            }
-            send_whatsapp(person.get("phone"), {**template}, {**params})
+        all_salespeople = set()
+        print("Custom Field Invoice Sales Person", invoice_sales_person)
+        print("Invoice Sales Person", salesperson)
+        if invoice_sales_person:
+            for name in invoice_sales_person.split(","):
+                name = name.strip()
+                if name:
+                    all_salespeople.add(name)
+
+        if salesperson:
+            for name in salesperson.split(","):
+                name = name.strip()
+                if name:
+                    all_salespeople.add(name)
+        print("All Sales People:", all_salespeople)
+        # 2) Filter out any forbidden names
+        params = {
+            "invoice_number": invoice_number,
+            "customer_name": customer_name,
+            "tracking_url": tracking_url,
+            "tracking_number": tracking_number,
+            "button_url": button_url,
+        }
+        valid_salespeople = []
+
+        if any(is_forbidden(sp.strip()) for sp in all_salespeople):
+            for person in [sales_admin]:
+                send_whatsapp(person.get("phone"), {**template}, {**params})
+        else:
+            for sp in all_salespeople:
+                user = db.users.find_one({"code": sp})
+                if user:
+                    valid_salespeople.append(
+                        {
+                            "email": user.get("email", ""),
+                            "name": user.get("name"),
+                            "phone": user.get("phone"),
+                        }
+                    )
+            valid_salespeople.append(sales_admin)
+            for sp in valid_salespeople:
+                name = sp.get("name")
+                phone = sp.get("phone")
+                if not phone:
+                    print(f"Phone does not exist for SP:{name}")
+                send_whatsapp(phone, {**template}, {**params})
+
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
