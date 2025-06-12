@@ -91,9 +91,10 @@ def return_order_notification(params, created_by):
         sp = db.users.find_one({"_id": created_by})
         sales_admin = db.users.find_one({"email": "pupscribeinvoicee@gmail.com"})
         warehouse_admin = db.users.find_one({"email": "barkbutleracc@gmail.com"})
+        customer_care_admin = db.users.find_one({"designation": "Customer Care"})
 
         template = db.templates.find({"name": "return_order_notification"})
-        for salesperson in [sp, sales_admin, warehouse_admin]:
+        for salesperson in [sp, sales_admin, warehouse_admin, customer_care_admin]:
             phone = salesperson.get("phone")
             template_doc = {**template}
             parameters = {**params}
