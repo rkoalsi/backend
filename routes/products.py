@@ -257,6 +257,68 @@ def get_products(
     }
 
 
+@router.get("/all")
+def get_all_products(
+    page: int = Query(1, ge=1, description="Page number, starting from 1"),
+    per_page: int = Query(25, ge=1, le=100, description="Number of items per page"),
+    search: Optional[str] = Query(None, description="Search term for name or SKU code"),
+):
+    # Define base query
+    query = {"is_deleted": {"$exists": False}}
+
+    if search:
+        regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
+
+    three_months_ago = datetime.now() - relativedelta(months=3)
+
+    # Build the aggregation pipeline
+    pipeline = [
+        {"$match": query},
+        {
+            "$addFields": {
+                "new": {
+                    "$cond": [
+                        {"$gte": ["$created_at", three_months_ago]},
+                        True,
+                        False,
+                    ]
+                }
+            }
+        },
+    ]
+
+    try:
+        fetched_products = list(db.products.aggregate(pipeline))
+    except Exception as e:
+        print(f"Error during aggregation: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    all_products = [serialize_mongo_document(doc) for doc in fetched_products]
+
+    try:
+        total_products = db.products.count_documents(query)
+    except Exception as e:
+        print(f"Error counting documents: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    total_pages = (
+        ((total_products + per_page - 1) // per_page) if total_products > 0 else 1
+    )
+
+    if page > total_pages and total_pages != 0:
+        raise HTTPException(status_code=400, detail="Page number out of range")
+
+    return {
+        "products": all_products,
+        "total": total_products,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "search": search,
+    }
+
+
 @router.get("/all_categories", response_model=dict)
 def get_all_product_categories():
     """
