@@ -16,6 +16,7 @@ from .webhooks import router as webhooks
 from .attendance import router as attendence
 from .potential_customers import router as potential_customers
 from .expected_reorders import router as expected_reorders
+from .return_orders import router as return_orders
 from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from backend.config.auth import JWTBearer  # type: ignore
@@ -48,6 +49,7 @@ router.include_router(
 router.include_router(
     expected_reorders, prefix="/expected_reorders", tags=["Expected Reorders"]
 )
+router.include_router(return_orders, prefix="/return_orders", tags=["Return Reorders"])
 
 router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
 

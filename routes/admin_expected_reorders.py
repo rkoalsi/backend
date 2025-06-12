@@ -29,7 +29,7 @@ def format_address(address):
     parts = [
         address.get("attention"),
         address.get("address"),
-        address.get("streetz"),
+        address.get("street2"),
         address.get("city"),
         address.get("state"),
         address.get("zip"),

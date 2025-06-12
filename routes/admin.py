@@ -30,6 +30,7 @@ from .admin_potential_customers import router as admin_potential_customers_route
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
 from .admin_delivery_partners import router as admin_delivery_partners_router
+from .admin_return_orders import router as admin_return_orders_router
 from backend.config.auth import JWTBearer  # type: ignore
 import pandas as pd
 from io import BytesIO
@@ -170,6 +171,7 @@ async def get_stats():
             {"created_at": {"$gte": start_of_today_ist}}
         )
         delivery_partners = db["delivery_partners"].count_documents({})
+        return_orders = db["return_orders"].count_documents({})
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
@@ -205,6 +207,7 @@ async def get_stats():
             "submitted_targeted_customers": submitted_targeted_customers,
             "submitted_expected_reorders": submitted_expected_reorders,
             "delivery_partners": delivery_partners,
+            "return_orders": return_orders,
         }
 
     except Exception as e:
@@ -1525,5 +1528,11 @@ router.include_router(
     admin_delivery_partners_router,
     prefix="/delivery_partners",
     tags=["Admin Delivery Partners"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_return_orders_router,
+    prefix="/return_orders",
+    tags=["Admin Return Orders"],
     dependencies=[Depends(JWTBearer())],
 )
