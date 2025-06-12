@@ -455,3 +455,18 @@ def notify_all_sales_admins(db, template, params):
         if phone != "":
             send_whatsapp(phone, template_doc, parameters)
     pass
+
+
+def notify_office_coordinator_and_sales_admins(db, template, params):
+    office_coordinator = db.users.find_one(
+        {"email": "pupscribeoffcoordinator@gmail.com"}
+    )
+    sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    for person in [office_coordinator, sales_admin]:
+        phone = person.get("phone")
+        name = person.get("first_name")
+        template_doc = {**template}
+        parameters = {"name": name, **params}
+        if phone != "":
+            send_whatsapp(phone, template_doc, parameters)
+    pass

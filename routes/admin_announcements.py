@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Form, UploadFile, File
 from fastapi.responses import JSONResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-from .helpers import notify_all_salespeople
+from .helpers import notify_all_salespeople, notify_office_coordinator_and_sales_admins
 from dotenv import load_dotenv
 import os, datetime, uuid, boto3, io
 from typing import Optional
@@ -169,6 +169,7 @@ async def create_announcement(
             # Notify salespeople about the new announcement
             template = db.templates.find_one({"name": "update_notification_1"})
             notify_all_salespeople(db, template, {})
+            notify_office_coordinator_and_sales_admins(db, template, {})
             return "Document Created"
         else:
             raise HTTPException(status_code=500, detail="Failed to create announcement")
