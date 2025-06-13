@@ -1201,3 +1201,81 @@ async def purchase_order_webhook(request: Request):
     except Exception as e:
         print(f"Error processing purchase order webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/vendor")
+async def vendor_webhook(request: Request):
+    """
+    Webhook endpoint to receive vendor data from Zoho Books
+    """
+    try:
+        # Get the raw JSON data
+        raw_data = await request.json()
+        print(f"Received vendor webhook data: {raw_data}")
+        raw_data = raw_data["contact"]
+        # Validate that we have the required contact_id field
+        if "contact_id" not in raw_data:
+            raise HTTPException(
+                status_code=400, detail="Missing required field: contact_id"
+            )
+
+        contact_id = raw_data["contact_id"]
+
+        # Check if vendor exists in database
+        existing_vendor = db.vendor.find_one({"contact_id": contact_id})
+
+        # Sort all keys alphabetically
+        sorted_data = sort_dict_keys(raw_data)
+
+        # Prepare the document for MongoDB
+        current_time = datetime.datetime.now()
+
+        if existing_vendor:
+            # Update existing vendor
+            sorted_data["updated_at"] = current_time
+            # Keep the original created_at if it exists
+            if "created_at" not in sorted_data and "created_at" in existing_vendor:
+                sorted_data["created_at"] = existing_vendor["created_at"]
+            elif "created_at" not in sorted_data:
+                sorted_data["created_at"] = current_time
+
+            # Update the document
+            result = db.vendor.update_one(
+                {"contact_id": contact_id}, {"$set": sorted_data}
+            )
+
+            print(f"Updated vendor with contact_id {contact_id}")
+
+            return {
+                "status": "success",
+                "action": "updated",
+                "contact_id": contact_id,
+                "vendor_name": sorted_data.get("contact_name", "Unknown"),
+                "modified_count": result.modified_count,
+            }
+
+        else:
+            # Create new vendor
+            sorted_data["created_at"] = current_time
+            sorted_data["updated_at"] = current_time
+
+            # Insert the new document
+            result = db.vendor.insert_one(sorted_data)
+
+            print(f"Created new vendor with contact_id {contact_id}")
+
+            return {
+                "status": "success",
+                "action": "created",
+                "contact_id": contact_id,
+                "vendor_name": sorted_data.get("contact_name", "Unknown"),
+                "inserted_id": str(result.inserted_id),
+            }
+
+    except ValueError as e:
+        print(f"Invalid JSON data: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON data")
+
+    except Exception as e:
+        print(f"Error processing vendor webhook: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
