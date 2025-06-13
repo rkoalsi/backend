@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
 from backend.config.whatsapp import send_whatsapp  # type: ignore
@@ -9,6 +9,7 @@ from dateutil.parser import parse
 from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .helpers import send_email
+from typing import Dict, Any
 
 load_dotenv()
 
@@ -1113,3 +1114,90 @@ def shipment(
 ):
     handle_shipment(data)
     return "Shipment Webhook Received Successfully"
+
+
+def sort_dict_keys(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively sort dictionary keys alphabetically
+    """
+    if isinstance(data, dict):
+        return {key: sort_dict_keys(value) for key, value in sorted(data.items())}
+    elif isinstance(data, list):
+        return [sort_dict_keys(item) for item in data]
+    else:
+        return data
+
+
+@router.post("/purchase_order")
+async def purchase_order_webhook(request: Request):
+    try:
+        # Get the raw JSON data
+        raw_data = await request.json()
+        print(f"Received webhook data: {raw_data}")
+        raw_data = raw_data["purchaseorder"]
+        # Validate that we have the required purchaseorder_number field
+        if "purchaseorder_number" not in raw_data:
+            raise HTTPException(
+                status_code=400, detail="Missing required field: purchaseorder_number"
+            )
+
+        purchaseorder_number = raw_data["purchaseorder_number"]
+
+        # Check if purchase order exists in database
+        existing_po = db.purchase_orders.find_one(
+            {"purchaseorder_number": purchaseorder_number}
+        )
+
+        # Sort all keys alphabetically
+        sorted_data = sort_dict_keys(raw_data)
+
+        # Prepare the document for MongoDB
+        current_time = datetime.now()
+
+        if existing_po:
+            # Update existing purchase order
+            sorted_data["updated_at"] = current_time
+            # Keep the original created_at if it exists
+            if "created_at" not in sorted_data and "created_at" in existing_po:
+                sorted_data["created_at"] = existing_po["created_at"]
+            elif "created_at" not in sorted_data:
+                sorted_data["created_at"] = current_time
+
+            # Update the document
+            result = db.purchase_orders.update_one(
+                {"purchaseorder_number": purchaseorder_number}, {"$set": sorted_data}
+            )
+
+            print(f"Updated purchase order {purchaseorder_number}")
+
+            return {
+                "status": "success",
+                "action": "updated",
+                "purchaseorder_number": purchaseorder_number,
+                "modified_count": result.modified_count,
+            }
+
+        else:
+            # Create new purchase order
+            sorted_data["created_at"] = current_time
+            sorted_data["updated_at"] = current_time
+
+            # Insert the new document
+            result = db.purchase_orders.insert_one(sorted_data)
+
+            print(f"Created new purchase order {purchaseorder_number}")
+
+            return {
+                "status": "success",
+                "action": "created",
+                "purchaseorder_number": purchaseorder_number,
+                "inserted_id": str(result.inserted_id),
+            }
+
+    except ValueError as e:
+        print(f"Invalid JSON data: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON data")
+
+    except Exception as e:
+        print(f"Error processing purchase order webhook: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
