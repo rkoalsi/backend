@@ -1222,7 +1222,7 @@ async def vendor_webhook(request: Request):
         contact_id = raw_data["contact_id"]
 
         # Check if vendor exists in database
-        existing_vendor = db.vendor.find_one({"contact_id": contact_id})
+        existing_vendor = db.vendors.find_one({"contact_id": contact_id})
 
         # Sort all keys alphabetically
         sorted_data = sort_dict_keys(raw_data)
@@ -1240,7 +1240,7 @@ async def vendor_webhook(request: Request):
                 sorted_data["created_at"] = current_time
 
             # Update the document
-            result = db.vendor.update_one(
+            result = db.vendors.update_one(
                 {"contact_id": contact_id}, {"$set": sorted_data}
             )
 
@@ -1260,7 +1260,7 @@ async def vendor_webhook(request: Request):
             sorted_data["updated_at"] = current_time
 
             # Insert the new document
-            result = db.vendor.insert_one(sorted_data)
+            result = db.vendors.insert_one(sorted_data)
 
             print(f"Created new vendor with contact_id {contact_id}")
 
