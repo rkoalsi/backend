@@ -1152,7 +1152,7 @@ async def purchase_order_webhook(request: Request):
         sorted_data = sort_dict_keys(raw_data)
 
         # Prepare the document for MongoDB
-        current_time = datetime.now()
+        current_time = datetime.datetime.now()
 
         if existing_po:
             # Update existing purchase order
