@@ -982,7 +982,11 @@ def handle_draft_invoice(data: dict):
 def handle_shipment(data: dict):
     shipment = data.get("shipmentorder")
     invoices = shipment.get("invoices", [])
-    invoice_number = invoices[-1].get("invoice_number", "")
+    invoice_number = (
+        invoices[-1].get("invoice_number", "")
+        if len(invoices) > 0
+        else shipment.get("salesorder_number", "")
+    )
     customer_name = shipment.get("customer_name", "")
     tracking_number = shipment.get("reference_number", "")
     tracking_partner = shipment.get("carrier", "")
