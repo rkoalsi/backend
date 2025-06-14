@@ -982,10 +982,9 @@ def handle_draft_invoice(data: dict):
 def handle_shipment(data: dict):
     shipment = data.get("shipmentorder")
     invoices = shipment.get("invoices", [])
-    invoice_number = (
-        invoices[-1].get("invoice_number", "")
-        if len(invoices) > 0
-        else shipment.get("salesorder_number", "")
+    invoice_number = invoices[-1].get("invoice_number", "") if len(invoices) > 0 else ""
+    salesorder_number = (
+        shipment.get("salesorder_number", "") if len(invoices) == 0 else ""
     )
     customer_name = shipment.get("customer_name", "")
     tracking_number = shipment.get("reference_number", "")
@@ -994,13 +993,23 @@ def handle_shipment(data: dict):
         dict(db["delivery_partners"].find_one({"name": tracking_partner}))
     )
     tracking_url = delivery_partner.get("tracking_url", "")
-    invoice = serialize_mongo_document(
-        dict(db["invoices"].find_one({"invoice_number": invoice_number}))
-    )
-    invoice_sales_person = invoice.get("cf_sales_person", "")
-    salesperson = invoice.get("salesperson_name", "")
-    button_url = f"{invoice.get('_id')}"
     if invoice_number != "":
+        invoice = serialize_mongo_document(
+            dict(db["invoices"].find_one({"invoice_number": invoice_number}))
+        )
+        invoice_sales_person = invoice.get("cf_sales_person", "")
+        salesperson = invoice.get("salesperson_name", "")
+        button_url = f"{invoice.get('_id')}"
+
+    if salesorder_number != "":
+        invoice = serialize_mongo_document(
+            dict(db["invoices"].find_one({"reference_number": salesorder_number}))
+        )
+
+    if salesorder_number != "" or invoice_number != "":
+        invoice_sales_person = invoice.get("cf_sales_person", "")
+        salesperson = invoice.get("salesperson_name", "")
+        button_url = f"{invoice.get('_id')}"
         print(invoice_number)
         sales_admin_1 = serialize_mongo_document(
             dict(db.users.find_one({"designation": "Customer Care"}))
@@ -1059,9 +1068,6 @@ def handle_shipment(data: dict):
                 if not phone:
                     print(f"Phone does not exist for SP:{name}")
                 send_whatsapp(phone, {**template}, {**params})
-
-    else:
-        print("Invoice Does Not Exist. Webhook Received")
 
 
 @router.post("/estimate")
