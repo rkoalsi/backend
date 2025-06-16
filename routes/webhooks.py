@@ -1046,7 +1046,9 @@ def handle_shipment(data: dict):
         print("All Sales People:", all_salespeople)
 
         params = {
-            "invoice_number": invoice_number,
+            "invoice_number": (
+                invoice_number if invoice_number != "" else salesorder_number
+            ),
             "customer_name": customer_name,
             "tracking_url": tracking_url,
             "tracking_number": tracking_number,
