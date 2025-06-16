@@ -989,10 +989,12 @@ def handle_shipment(data: dict):
     customer_name = shipment.get("customer_name", "")
     tracking_number = shipment.get("reference_number", "")
     tracking_partner = shipment.get("carrier", "")
+
     delivery_partner = serialize_mongo_document(
         dict(db["delivery_partners"].find_one({"name": tracking_partner}))
     )
     tracking_url = delivery_partner.get("tracking_url", "")
+
     if invoice_number != "":
         invoice = serialize_mongo_document(
             dict(db["invoices"].find_one({"invoice_number": invoice_number}))
@@ -1005,12 +1007,14 @@ def handle_shipment(data: dict):
         invoice = serialize_mongo_document(
             dict(db["invoices"].find_one({"reference_number": salesorder_number}))
         )
+        salesorder_number = invoice.get("invoice_number", salesorder_number)
 
     if salesorder_number != "" or invoice_number != "":
         invoice_sales_person = invoice.get("cf_sales_person", "")
         salesperson = invoice.get("salesperson_name", "")
         button_url = f"{invoice.get('_id')}"
         print(invoice_number)
+
         sales_admin_1 = serialize_mongo_document(
             dict(db.users.find_one({"designation": "Customer Care"}))
         )
@@ -1023,9 +1027,11 @@ def handle_shipment(data: dict):
         template = serialize_mongo_document(
             dict(db.templates.find_one({"name": "shipment_notification"}))
         )
+
         all_salespeople = set()
         print("Custom Field Invoice Sales Person", invoice_sales_person)
         print("Invoice Sales Person", salesperson)
+
         if invoice_sales_person:
             for name in invoice_sales_person.split(","):
                 name = name.strip()
@@ -1037,10 +1043,13 @@ def handle_shipment(data: dict):
                 name = name.strip()
                 if name:
                     all_salespeople.add(name)
+
         print("All Sales People:", all_salespeople)
-        # 2) Filter out any forbidden names
+
         params = {
-            "invoice_number": invoice_number,
+            "invoice_number": (
+                invoice_number if invoice_number != "" else salesorder_number
+            ),
             "customer_name": customer_name,
             "tracking_url": tracking_url,
             "tracking_number": tracking_number,
@@ -1049,9 +1058,23 @@ def handle_shipment(data: dict):
         valid_salespeople = [sales_admin_1, sales_admin_2]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
+            # Send to admin users
             for person in [sales_admin_1, sales_admin_2, sales_admin_3]:
-                send_whatsapp(person.get("phone"), {**template}, {**params})
+                phone = int(person.get("phone"))
+                print("if", phone)
+                if phone:  # Validate phone exists and is not empty
+                    try:
+                        send_whatsapp(phone, {**template}, {**params})
+                    except Exception as e:
+                        print(
+                            f"Failed to send WhatsApp to admin {person.get('name', 'Unknown')}: {e}"
+                        )
+                else:
+                    print(
+                        f"No valid phone number for admin: {person.get('name', 'Unknown')}"
+                    )
         else:
+            # Send to specific salespeople
             for sp in all_salespeople:
                 user = db.users.find_one({"code": sp})
                 if user:
@@ -1062,12 +1085,15 @@ def handle_shipment(data: dict):
                             "phone": user.get("phone"),
                         }
                     )
+
             for sp in valid_salespeople:
-                name = sp.get("name")
-                phone = sp.get("phone")
-                if not phone:
-                    print(f"Phone does not exist for SP:{name}")
-                send_whatsapp(phone, {**template}, {**params})
+                name = sp.get("name", "Unknown")
+                phone = int(sp.get("phone"))
+                print("else", phone)
+                try:
+                    send_whatsapp(phone, {**template}, {**params})
+                except Exception as e:
+                    print(f"Failed to send WhatsApp to {name}: {e}")
 
 
 @router.post("/estimate")
