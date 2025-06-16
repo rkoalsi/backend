@@ -1004,10 +1004,13 @@ def handle_shipment(data: dict):
         button_url = f"{invoice.get('_id')}"
 
     if salesorder_number != "":
-        invoice = serialize_mongo_document(
-            dict(db["invoices"].find_one({"reference_number": salesorder_number}))
-        )
-        salesorder_number = invoice.get("invoice_number", salesorder_number)
+        # Use regex to find invoice where reference_number contains salesorder_number
+        invoice_query = {"reference_number": {"$regex": salesorder_number}}
+        found_invoice = db["invoices"].find_one(invoice_query)
+
+        if found_invoice:
+            invoice = serialize_mongo_document(dict(found_invoice))
+            salesorder_number = invoice.get("invoice_number", salesorder_number)
 
     if salesorder_number != "" or invoice_number != "":
         invoice_sales_person = invoice.get("cf_sales_person", "")
