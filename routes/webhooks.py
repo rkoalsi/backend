@@ -1007,6 +1007,7 @@ def handle_shipment(data: dict):
         invoice = serialize_mongo_document(
             dict(db["invoices"].find_one({"reference_number": salesorder_number}))
         )
+        salesorder_number = invoice.get("invoice_number", salesorder_number)
 
     if salesorder_number != "" or invoice_number != "":
         invoice_sales_person = invoice.get("cf_sales_person", "")
