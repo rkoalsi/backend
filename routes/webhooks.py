@@ -1054,13 +1054,12 @@ def handle_shipment(data: dict):
             "tracking_number": tracking_number,
             "button_url": button_url,
         }
-        print(params)
         valid_salespeople = [sales_admin_1, sales_admin_2]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
             for person in [sales_admin_1, sales_admin_2, sales_admin_3]:
-                phone = person.get("phone")
+                phone = str(person.get("phone"))
                 print(phone)
                 if (
                     phone and str(phone).strip()
@@ -1090,7 +1089,7 @@ def handle_shipment(data: dict):
 
             for sp in valid_salespeople:
                 name = sp.get("name", "Unknown")
-                phone = sp.get("phone")
+                phone = str(sp.get("phone"))
                 print(phone)
                 if not phone or not str(phone).strip():
                     print(f"Phone does not exist or is empty for SP: {name}")
