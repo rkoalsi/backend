@@ -1060,13 +1060,11 @@ def handle_shipment(data: dict):
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
             for person in [sales_admin_1, sales_admin_2, sales_admin_3]:
-                phone = str(person.get("phone"))
-                print(phone)
-                if (
-                    phone and str(phone).strip()
-                ):  # Validate phone exists and is not empty
+                phone = int(person.get("phone"))
+                print("if", phone)
+                if phone:  # Validate phone exists and is not empty
                     try:
-                        send_whatsapp(str(phone).strip(), {**template}, {**params})
+                        send_whatsapp(phone, {**template}, {**params})
                     except Exception as e:
                         print(
                             f"Failed to send WhatsApp to admin {person.get('name', 'Unknown')}: {e}"
@@ -1090,14 +1088,10 @@ def handle_shipment(data: dict):
 
             for sp in valid_salespeople:
                 name = sp.get("name", "Unknown")
-                phone = str(sp.get("phone"))
-                print(phone)
-                if not phone or not str(phone).strip():
-                    print(f"Phone does not exist or is empty for SP: {name}")
-                    continue  # Skip this person
-
+                phone = int(sp.get("phone"))
+                print("else", phone)
                 try:
-                    send_whatsapp(str(phone).strip(), {**template}, {**params})
+                    send_whatsapp(phone, {**template}, {**params})
                 except Exception as e:
                     print(f"Failed to send WhatsApp to {name}: {e}")
 
