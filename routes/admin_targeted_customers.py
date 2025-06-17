@@ -9,6 +9,7 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, openpyxl, io, datetime
+from .helpers import notify_person
 
 load_dotenv()
 router = APIRouter()
@@ -141,6 +142,16 @@ def create_targeted_customer(
         data["created_at"] = datetime.datetime.now()
         if "sales_people" in data:
             data["sales_people"] = [ObjectId(sp) for sp in data.get("sales_people", [])]
+            for sp in data["sales_people"]:
+                person = db.users.find_one({"_id": ObjectId(sp)})
+                customer = db.customers.find_one(
+                    {"_id": ObjectId(data.get("customer_id"))}
+                )
+                template = db.templates.find_one({"name": "targeted_customers"})
+                params = {
+                    "name_of_customer": customer.get("contact_name", ""),
+                }
+                notify_person(db, template, params, person)
         targeted_customers_collection.insert_one({**data})
         return {"message": "Target Customer created successfully"}
     except Exception as e:
