@@ -31,6 +31,7 @@ from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
 from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
+from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from backend.config.auth import JWTBearer  # type: ignore
 import pandas as pd
 from io import BytesIO
@@ -87,6 +88,74 @@ async def get_stats():
         active_customers = db["customers"].count_documents({"status": "active"})
         inactive_customers = db["customers"].count_documents({"status": "inactive"})
 
+        # Calculate date 6 months ago
+        ist = tz("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        six_months_ago = now_ist - timedelta(days=180)  # Approximately 6 months
+
+        # Billed Customers (last 6 months)
+        # Get distinct customer_ids from invoices in the last 6 months (excluding void and draft)
+        billed_customers_pipeline = [
+            {
+                "$match": {
+                    "status": {"$nin": ["void", "draft"]},
+                    "created_time": {"$exists": True},
+                }
+            },
+            {
+                "$addFields": {
+                    "parsed_date": {
+                        "$dateFromString": {
+                            "dateString": {"$substr": ["$created_time", 0, 19]}
+                        }
+                    }
+                }
+            },
+            {"$match": {"parsed_date": {"$gte": six_months_ago}}},
+            {"$group": {"_id": "$customer_id"}},
+            {"$count": "total_billed_customers"},
+        ]
+
+        billed_result = list(db["invoices"].aggregate(billed_customers_pipeline))
+        total_billed_customers_6_months = (
+            billed_result[0]["total_billed_customers"] if billed_result else 0
+        )
+
+        # Get the list of billed customer IDs for unbilled calculation
+        billed_customer_ids_pipeline = [
+            {
+                "$match": {
+                    "status": {"$nin": ["void", "draft"]},
+                    "created_time": {"$exists": True},
+                }
+            },
+            {
+                "$addFields": {
+                    "parsed_date": {
+                        "$dateFromString": {
+                            "dateString": {"$substr": ["$created_time", 0, 19]}
+                        }
+                    }
+                }
+            },
+            {"$match": {"parsed_date": {"$gte": six_months_ago}}},
+            {"$group": {"_id": "$customer_id"}},
+        ]
+
+        billed_customer_ids = [
+            doc["_id"] for doc in db["invoices"].aggregate(billed_customer_ids_pipeline)
+        ]
+
+        # Unbilled Customers (last 6 months)
+        # Count active customers who are NOT in the billed customers list
+        unbilled_customers_query = {
+            "status": "active",
+            "contact_id": {"$nin": billed_customer_ids},
+        }
+        total_unbilled_customers_6_months = db["customers"].count_documents(
+            unbilled_customers_query
+        )
+
         # Sales People Statistics
         active_sales_people = db["users"].count_documents(
             {"status": "active", "role": "sales_person"}
@@ -97,8 +166,6 @@ async def get_stats():
         total_sales_people = active_sales_people + inactive_sales_people
 
         # Orders Statistics
-        ist = tz("Asia/Kolkata")
-        now_ist = datetime.now(ist)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
         recent_orders = db["orders"].count_documents(
             {"created_at": {"$gte": start_of_today_ist}}
@@ -125,14 +192,15 @@ async def get_stats():
         inactive_announcements = db["announcements"].count_documents(
             {"is_active": False}
         )
+
         # Get today's date
         today = date.today()
-
         day_before_yesterday = today - timedelta(days=2)
 
         # Convert both dates to ISO format (YYYY-MM-DD)
         day_before_yesterday_str = day_before_yesterday.isoformat()
         today_str = today.isoformat()
+
         # Get the overdue invoices for yesterday
         total_due_payments = db["invoices"].count_documents(
             {
@@ -172,6 +240,7 @@ async def get_stats():
         )
         delivery_partners = db["delivery_partners"].count_documents({})
         return_orders = db["return_orders"].count_documents({})
+
         return {
             "active_stock_products": active_stock_products,
             "active_products": active_products,
@@ -182,6 +251,9 @@ async def get_stats():
             "unassigned_customers": unassigned_customers,
             "active_customers": active_customers,
             "inactive_customers": inactive_customers,
+            # New 6-month billing statistics
+            "total_billed_customers_6_months": total_billed_customers_6_months,
+            "total_unbilled_customers_6_months": total_unbilled_customers_6_months,
             "active_sales_people": active_sales_people,
             "inactive_sales_people": inactive_sales_people,
             "total_sales_people": total_sales_people,
@@ -1283,9 +1355,9 @@ def get_sales_people():
     """
     # Replace 'sales' with the actual role identifier
     sales_people_cursor = users_collection.find(
-        {"role": "sales_person"}, {"code": 1, "_id": 0}
+        {"role": "sales_person"}, {"code": 1, "_id": 1, "name": 1}
     )
-    sales_people = [f"{user['code']}" for user in sales_people_cursor]
+    sales_people = [serialize_mongo_document(user) for user in sales_people_cursor]
     return {"sales_people": sales_people}
 
 
@@ -1532,5 +1604,11 @@ router.include_router(
     admin_return_orders_router,
     prefix="/return_orders",
     tags=["Admin Return Orders"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_sales_by_customer_router,
+    prefix="/sales_by_customer",
+    tags=["Admin Sales By Customer"],
     dependencies=[Depends(JWTBearer())],
 )
