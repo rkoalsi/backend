@@ -165,7 +165,14 @@ def get_expected_reorders_report(
     ws.title = "Expected Reorders Report"
 
     # Define the header row
-    headers = ["Created At", "Name", "Address", "Created By", "Has Ordered"]
+    headers = [
+        "Created At",
+        "Name",
+        "Address",
+        "Created By",
+        "Expected Amount",
+        "Has Ordered",
+    ]
     ws.append(headers)
 
     for cust in customers:
@@ -174,6 +181,7 @@ def get_expected_reorders_report(
             cust.get("customer_name", ""),
             format_address(cust.get("address")),
             cust.get("created_by_info", {}).get("name", ""),
+            cust.get("expected_amount", 0),
             cust.get("has_ordered", False),
         ]
         ws.append(row)
