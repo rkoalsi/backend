@@ -134,6 +134,8 @@ def update_order(
     customer_collection: Collection,
 ):
     order_update["updated_at"] = datetime.utcnow()
+    if "created_by" in order_update:
+        order_update["created_by"] = ObjectId(order_update.get("created_by"))
     # Handle customer updates
     if "customer_id" in order_update:
         customer_id = order_update.get("customer_id")
@@ -977,6 +979,7 @@ def update_existing_order(order_id: str, order_update: dict):
     """
     Update an existing order with raw dictionary data.
     """
+    print(order_update)
     update_order(order_id, order_update, orders_collection, customers_collection)
     updated_order = get_order(order_id, orders_collection)
     if not updated_order:

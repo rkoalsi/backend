@@ -4,6 +4,7 @@ from .helpers import validate_file, process_upload
 import pytz, logging
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from datetime import datetime
+from .helpers import notify_sales_admin
 
 router = APIRouter()
 
@@ -18,8 +19,15 @@ async def create_potential_customer(data: dict):
     potential_customers_collection = db["potential_customers"]
     # # Remove the id field if present, so MongoDB can generate it.
     data["created_by"] = ObjectId(data["created_by"])
+    sales_person = db.users.find_one({"_id": ObjectId(data["created_by"])})
     data["created_at"] = datetime.now()
     result = potential_customers_collection.insert_one(data)
+    template = db.templates.find_one({"name": "potential_customer"})
+    params = {
+        "sales_person_name": sales_person.get("name"),
+        "name_of_customer": data.get("name"),
+    }
+    notify_sales_admin(db, template, params)
     if not result:
         raise HTTPException(status_code=404, detail="Potential Customer not created")
     return "Document Created"

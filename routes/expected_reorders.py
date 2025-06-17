@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Body, status
 from bson import ObjectId
-from .helpers import validate_file, process_upload
+from .helpers import notify_sales_admin
 import pytz, logging
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from datetime import datetime
@@ -21,6 +21,13 @@ async def create_expected_reorder(data: dict):
     data["created_by"] = ObjectId(data["created_by"])
     data["created_at"] = datetime.now()
     data["has_ordered"] = False
+    data["expected_amount"] = int(data["expected_amount"])
+    customer = db.customers.find_one({"_id": ObjectId(data["customer_id"])})
+    template = db.templates.find_one({"name": "expected_reorder"})
+    params = {
+        "name_of_customer": customer.get("contact_name", ""),
+    }
+    notify_sales_admin(db, template, params)
     result = expected_reorders_collection.insert_one(data)
     if not result:
         raise HTTPException(status_code=404, detail="Potential Customer not created")
@@ -80,6 +87,7 @@ async def update_potential_customer(potential_customer_id: str, data: dict = Bod
     # Convert customer and created_by fields to ObjectId.
     # Set an updated timestamp (or update created_at if desired).
     data["updated_at"] = datetime.now()
+    data["expected_amount"] = int(data["expected_amount"])
     # Convert each hook's category_id to category_id as ObjectId.
     data.pop("_id")
     result = expected_reorders_collection.update_one(
