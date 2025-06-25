@@ -193,6 +193,9 @@ def build_aggregation_pipeline(
                     "quantity": "$line_items.quantity",
                     "rate": "$line_items.rate",
                     "amount": "$line_items.item_total",
+                    "sales_person": {
+                        "$ifNull": ["$cf_sales_person", "$salesperson_name"]
+                    },
                 }
             }
         )
@@ -209,6 +212,9 @@ def build_aggregation_pipeline(
                     "pincode": "$shipping_address.zip",
                     "quantity": "$line_items.quantity",
                     "amount": "$line_items.item_total",
+                    "sales_person": {
+                        "$ifNull": ["$cf_sales_person", "$salesperson_name"]
+                    },
                 }
             }
         )
@@ -319,6 +325,7 @@ def process_summary_report_data(invoice_data: List[Dict]) -> List[Dict]:
                 "total_amount": 0,
                 "unique_items": set(),
                 "invoice_count": 0,
+                "sales_person": "",
             }
         )
 
@@ -341,6 +348,9 @@ def process_summary_report_data(invoice_data: List[Dict]) -> List[Dict]:
                     quantity = 0.0
                     amount = 0.0
 
+                customer_data[customer_key]["sales_person"] = record.get(
+                    "sales_person", ""
+                )
                 customer_data[customer_key]["total_quantity"] += quantity
                 customer_data[customer_key]["total_amount"] += amount
                 customer_data[customer_key]["invoice_count"] += 1
@@ -365,6 +375,7 @@ def process_summary_report_data(invoice_data: List[Dict]) -> List[Dict]:
                     "total_quantity": data["total_quantity"],
                     "total_amount": data["total_amount"],
                     "invoice_count": data["invoice_count"],
+                    "sales_person": data["sales_person"],
                 }
 
                 report_list.append(row_data)
@@ -506,7 +517,7 @@ async def generate_billed_customers_report(date_range: DateRange):
                 }
             else:  # summary view
                 report_list = process_summary_report_data(invoice_data)
-
+                print(report_list)
                 # Calculate summary statistics for summary view
                 total_records = len(report_list)
                 total_customers = len(
@@ -602,6 +613,7 @@ async def generate_billed_customers_report_xlsx(
                     "Pincode": record["pincode"],
                     "Item Name": record["item_name"],
                     "Total Quantity": record["total_quantity"],
+                    "Sales Person": record["sales_person"],
                 }
                 # Add date columns
                 for date, quantity in record["date_wise_quantities"].items():
@@ -615,6 +627,7 @@ async def generate_billed_customers_report_xlsx(
                     "Total Quantity": record["total_quantity"],
                     "Total Amount": record["total_amount"],
                     "Invoice Count": record["invoice_count"],
+                    "Sales Person": record["sales_person"],
                 }
                 rows.append(row)
 
