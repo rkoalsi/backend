@@ -241,14 +241,14 @@ def process_detailed_report_data(
                 contact_name = record.get("contact_name") or "Unknown Customer"
                 pincode = record.get("pincode") or "Unknown Pincode"
                 item_name = record.get("item_name") or "Unknown Item"
+                sales_person = record.get("sales_person") or "Unknown Sales Person"
 
                 # Ensure pincode is string
                 if pincode and not isinstance(pincode, str):
                     pincode = str(pincode)
 
-                row_key = f"{contact_name} | {pincode} | {item_name}"
+                row_key = f"{contact_name} | {pincode} | {item_name} | {sales_person}"
                 date_key = record.get("created_date")
-
                 # Safely convert quantity
                 try:
                     quantity = float(record.get("quantity", 0))
@@ -269,10 +269,10 @@ def process_detailed_report_data(
             try:
                 # Safely split the row key
                 parts = row_key.split(" | ")
-                if len(parts) != 3:
+                if len(parts) != 4:
                     continue
 
-                contact_name, pincode, item_name = parts
+                contact_name, pincode, item_name, sales_person = parts
 
                 row_data = {
                     "contact_name": contact_name,
@@ -280,6 +280,7 @@ def process_detailed_report_data(
                     "item_name": item_name,
                     "date_wise_quantities": {},
                     "total_quantity": sum(date_quantities.values()),
+                    "sales_person": sales_person,
                 }
 
                 # Add quantities for each date
