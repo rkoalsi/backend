@@ -1107,7 +1107,7 @@ async def finalise(order_dict: dict):
                 headers=headers,
             )
             if y.status_code != 200:
-                return {"status": "error", "message": f"{y.json().get('message',"")}"}
+                return {"status": "error", "message": f"{y.json().get('message','')}"}
             last_estimate_number = str(
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
@@ -1230,7 +1230,7 @@ async def finalise(order_dict: dict):
                 json=payload,
             )
             if y.status_code != 200:
-                return {"status": "error", "message": f"{y.json().get('message',"")}"}
+                return {"status": "error", "message": f"{y.json().get('message','')}"}
             estimate_data = y.json()["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
