@@ -501,7 +501,8 @@ async def finalise(order_dict: dict):
                 + "&filter_by=Status.All&per_page=200&sort_column=estimate_number&sort_order=D",
                 headers=headers,
             )
-            y.raise_for_status()
+            if y.status_code != 200:
+                return {"status": "error", "message": f"{y.json().get('message',"")}"}
             last_estimate_number = str(
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
@@ -623,7 +624,8 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            y.raise_for_status()
+            if y.status_code != 200:
+                return {"status": "error", "message": f"{y.json().get('message',"")}"}
             estimate_data = y.json()["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
@@ -662,8 +664,7 @@ async def download_pdf(order_id: str = ""):
             {"_id": ObjectId(order_id), "estimate_created": True}
         )
         if order is None:
-            raise HTTPException(status_code=404, detail="Draft Estimate Not Created")
-
+            return {"status": "error", "message": "Draft Estimate Not Created"}
         # Get the estimate_id and make the request to Zoho
         estimate_id = order.get("estimate_id", "")
         headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
