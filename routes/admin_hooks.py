@@ -52,6 +52,7 @@ async def get_hooks(page: int = Query(0, ge=0), limit: int = Query(25, ge=1)):
 def get_shop_hooks_report():
     # Corrected query definition with proper lookup for created_by
     query = [
+        {"$sort": {"created_at": -1}},
         {
             "$lookup": {
                 "from": "users",
