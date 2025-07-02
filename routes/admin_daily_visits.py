@@ -111,6 +111,29 @@ async def get_daily_visits(request: Request):
     try:
         daily_visits_cursor = db.daily_visits.aggregate(pipeline)
         daily_visits = list(daily_visits_cursor)
+        for dv in daily_visits:
+            updates = dv.get("updates", [])
+            created_by = dv.get("created_by", "")
+            if len(updates) > 0:
+                for update in updates:
+                    potential_customer = update.get("potential_customer")
+                    if not potential_customer:
+                        customer_id = update.get("customer_id")
+                        address_id = update.get("address", {"address_id": ""}).get(
+                            "address_id"
+                        )
+                        shop_hooks = list(
+                            db.shop_hooks.find(
+                                {
+                                    "customer_id": ObjectId(customer_id),
+                                    "created_by": ObjectId(created_by),
+                                    "customer_address.address_id": address_id,
+                                }
+                            ).sort({"created_at": -1})
+                        )
+                        update["shop_hooks"] = (
+                            shop_hooks[0].get("hooks") if len(shop_hooks) > 0 else []
+                        )
         total_count = db.daily_visits.count_documents(filter_condition)
         total_pages = math.ceil(total_count / limit)
     except Exception as e:
@@ -241,6 +264,35 @@ def get_daily_visits_report(request: Request):
     daily_visits_cursor = db.daily_visits.aggregate(query)
     daily_visits = [serialize_mongo_document(doc) for doc in daily_visits_cursor]
 
+    # Add shop_hooks data similar to get_daily_visits API
+    for dv in daily_visits:
+        updates = dv.get("updates", [])
+        created_by = dv.get("created_by", "")
+        if len(updates) > 0:
+            for update in updates:
+                potential_customer = update.get("potential_customer")
+                if not potential_customer:
+                    customer_id = update.get("customer_id")
+                    address_id = update.get("address", {"address_id": ""}).get(
+                        "address_id"
+                    )
+                    shop_hooks = list(
+                        db.shop_hooks.find(
+                            {
+                                "customer_id": ObjectId(customer_id),
+                                "created_by": ObjectId(created_by),
+                                "customer_address.address_id": address_id,
+                            },
+                        ).sort({"created_at": -1})
+                    )
+                    update["shop_hooks"] = (
+                        shop_hooks[0].get("hooks") if len(shop_hooks) > 0 else []
+                    )
+                    for shop_hook in update["shop_hooks"]:
+                        del shop_hook["entryId"]
+                        del shop_hook["editing"]
+                        del shop_hook["category_id"]
+
     # Create an Excel workbook using openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -313,9 +365,11 @@ def get_daily_visits_report(request: Request):
 
                 # Add other fields
                 for key in sorted(update_keys):
-                    row.append(
-                        str(update.get(key, "")) if update.get(key) is not None else ""
-                    )
+                    value = update.get(key, "")
+                    # Handle shop_hooks specially - convert list to string
+                    if key == "shop_hooks" and isinstance(value, list):
+                        value = ", ".join(str(hook) for hook in value) if value else ""
+                    row.append(str(value) if value is not None else "")
             else:
                 # Fill empty cells for missing updates
                 # +1 for the customer column
