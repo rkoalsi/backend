@@ -125,6 +125,10 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "name": os.getenv("NOTIFY_NUMBER_TO_CC6_NAME"),
                     "phone": os.getenv("NOTIFY_NUMBER_TO_CC6"),
                 },
+                {
+                    "name": os.getenv("NOTIFY_NUMBER_TO_CC7_NAME"),
+                    "phone": os.getenv("NOTIFY_NUMBER_TO_CC7"),
+                },
             ]
             for person in to_notify:
                 params = {
