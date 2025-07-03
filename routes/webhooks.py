@@ -180,6 +180,8 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 update_data["sub_category"] = item.get("custom_field_hash", {}).get(
                     "cf_sub_category", ""
                 )
+            if "manufacturer" in item:
+                update_data["manufacturer"] = item.get("manufacturer", "")
             # Iterate over other fields to detect changes
             for field, value in item.items():
                 # Exclude 'status', 'created_time', 'last_modified_time', and 'created_at' from updates
