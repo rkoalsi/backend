@@ -63,14 +63,14 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
         exists = serialize_mongo_document(db.products.find_one({"item_id": item_id}))
         if not exists:
             item_name = str(item.get("name"))
-            brand_name = item_name.split(" ", 1)[0]
+            brand_name = str(item.get("brand"))
             db.products.insert_one(
                 {
                     "item_id": item.get("item_id", ""),
                     "name": item.get("name", ""),
-                    "item_name": item.get("name", ""),
+                    "item_name": item_name,
                     "unit": item.get("unit", "pcs"),
-                    "brand": brands.get(brand_name.lower(), brand_name.capitalize()),
+                    "brand": brand_name,
                     "status": item.get("status", "inactive"),
                     "is_combo_product": item.get("is_combo_product", False),
                     "rate": item.get("rate", 1),
@@ -83,6 +83,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "track_batch_number": item.get("track_batch_number", False),
                     "hsn_or_sac": item.get("hsn_or_sac", ""),
                     "sku": item.get("sku", ""),
+                    "manufacturer": item.get("manufacturer", ""),
                     "cf_item_code": item.get("custom_field_hash", {}).get(
                         "cf_item_code", ""
                     ),
@@ -155,13 +156,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 print(
                     f"Parsed updated_at: {parsed_updated} (Type: {type(parsed_updated)})"
                 )
-            if "brand" in item:
-                item_name = str(item.get("name"))
-                brand_name = item_name.split(" ", 1)[0]
+            # if "brand" in item:
+            #     item_name = str(item.get("name"))
+            #     brand_name = item_name.split(" ", 1)[0]
 
-                update_data["brand"] = brands.get(
-                    brand_name.lower(), brand_name.capitalize()
-                )
+            #     update_data["brand"] = brands.get(
+            #         brand_name.lower(), brand_name.capitalize()
+            #     )
 
             if "custom_field_hash" in item:
                 update_data["cf_sku_code"] = item.get("custom_field_hash", {}).get(
@@ -187,7 +188,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "created_time",
                     "last_modified_time",
                     "created_at",
-                    "brand",
+                    # "brand",
                 ]:
                     continue
 
