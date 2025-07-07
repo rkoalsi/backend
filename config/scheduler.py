@@ -69,7 +69,7 @@ def send_overdue_msg(obj: dict):
         "language": "en_US",
     }
     params = {
-        "name": salesperson_name,
+        # "name": salesperson_name,
         "invoice_number": invoice_number,
         "invoice_date": created_at,
         "invoice_due_date": due_date,
