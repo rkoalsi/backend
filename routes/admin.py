@@ -813,49 +813,44 @@ def read_all_orders(
     Retrieve all orders for admin, with pagination and optional filters,
     converting created_at to IST in MongoDB.
     """
-    # Build the match stage based on filters
-    match_stage = {"$match": {}}
-    second_match_stage = {"$match": {}}
-    date_filter = {}
+    # Initialize the match stage for the main pipeline
+    initial_match_conditions = {}
 
+    date_filter = {}
     if start_date:
-        start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").replace(
             tzinfo=timezone.utc
         )
-        date_filter["$gte"] = start_date
+        date_filter["$gte"] = start_date_obj
     if end_date:
-        end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").replace(
             hour=23, minute=59, second=59, tzinfo=timezone.utc
         )
-        date_filter["$lte"] = end_date
+        date_filter["$lte"] = end_date_obj
 
     if date_filter:
-        match_stage["$match"]["created_at"] = date_filter
-    # Estimate number search
+        initial_match_conditions["created_at"] = date_filter
+
     if estimate_number:
-        match_stage["$match"]["estimate_number"] = {
+        initial_match_conditions["estimate_number"] = {
             "$regex": f"^{re.escape(estimate_number.strip())}",
             "$options": "i",
         }
     if status:
-        match_stage["$match"]["status"] = status.lower()
+        initial_match_conditions["status"] = status.lower()
 
     if estimate_created is not None:
-        match_stage["$match"]["estimate_created"] = estimate_created
+        initial_match_conditions["estimate_created"] = estimate_created
 
     if amount:
-        match_stage["$match"]["total_amount"] = {"$gt": 0}
+        # Assuming you want to filter for total_amount > 0 when 'amount' is provided
+        initial_match_conditions["total_amount"] = {"$gt": 0}
 
-    if sales_person:
-        # Assuming 'created_by_info.name' is the field to filter
-        second_match_stage["$match"]["created_by_info.code"] = sales_person
     # Now build our aggregation pipeline
     pipeline = [
-        match_stage,
-        {"$sort": {"created_at": -1}},  # sort descending by created_at
-        {"$skip": page * limit},  # skip
-        {"$limit": limit},  # limit
-        # Optional: Join user info from "users" collection
+        # 1. Initial match stage for basic filters (date, estimate number, status, estimate_created, amount)
+        {"$match": initial_match_conditions},
+        # 2. Join user info from "users" collection (do this early if sales_person filter is based on joined data)
         {
             "$lookup": {
                 "from": "users",
@@ -864,12 +859,34 @@ def read_all_orders(
                 "as": "created_by_info",
             }
         },
-        # Unwind the created_by_info array so it's a single object
+        # 3. Unwind the created_by_info array so it's a single object
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
-        # Convert created_at (UTC) to a string in IST
+        # 4. Match by sales_person code after the lookup and unwind
+        # This allows filtering on the 'created_by_info.code' field.
+        # Only add this stage if sales_person is provided.
+    ]
+
+    if sales_person:
+        pipeline.append({"$match": {"created_by_info.code": sales_person}})
+
+    # 5. Sort the results
+    pipeline.append({"$sort": {"created_at": -1}})
+
+    # Create a pipeline for total count before applying skip and limit
+    count_pipeline = list(pipeline)  # Copy the current pipeline up to sorting
+    count_pipeline.append({"$count": "total"})
+
+    total_count_result = list(orders_collection.aggregate(count_pipeline))
+    total_count = total_count_result[0]["total"] if total_count_result else 0
+
+    # 6. Apply pagination
+    pipeline.append({"$skip": page * limit})
+    pipeline.append({"$limit": limit})
+
+    # 7. Project stage to format fields (including date conversion)
+    pipeline.append(
         {
             "$project": {
-                # Keep the original fields (except created_by_info is now an object)
                 "created_by": 1,
                 "total_amount": 1,
                 "total_gst": 1,
@@ -885,47 +902,36 @@ def read_all_orders(
                 "estimate_number": 1,
                 "estimate_id": 1,
                 "reference_number": 1,
-                # ... include any other fields you want
-                # Convert the "created_at" date to a string in IST
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
-                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "format": "%Y-%m-%d %H:%M:%S",
                         "timezone": "Asia/Kolkata",
                     }
                 },
                 "updated_at": {
                     "$dateToString": {
                         "date": "$updated_at",
-                        "format": "%Y-%m-%d %H:%M:%S",  # date/time format
+                        "format": "%Y-%m-%d %H:%M:%S",
                         "timezone": "Asia/Kolkata",
                     }
                 },
-                # Flatten out or rename fields from created_by_info:
                 "created_by_info.id": {"$toString": "$created_by_info._id"},
                 "created_by_info.name": "$created_by_info.name",
                 "created_by_info.email": "$created_by_info.email",
                 "created_by_info.code": "$created_by_info.code",
-                # Or keep the entire object if you prefer:
-                # "created_by_info": 1
-                # but then you'd still need to convert _id to string, if you want
             }
-        },
-        second_match_stage,
-    ]
+        }
+    )
 
-    # Execute the pipeline
+    # Execute the pipeline for orders data
     orders_cursor = orders_collection.aggregate(pipeline)
-    del pipeline[2:4]
-    pipeline.append({"$count": "total"})
-    total_count = list(orders_collection.aggregate(pipeline))
-    total = total_count[0] if total_count else None
-    total_count = total.get("total", 0)
-    # Convert each Mongo document to JSON-serializable Python dict
     orders_with_user_info = [serialize_mongo_document(doc) for doc in orders_cursor]
+
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
-    # Validate page number
-    if page > total_pages and total_pages != 0:
+
+    # Validate page number - this check should use the *actual* total pages
+    if total_pages > 0 and page >= total_pages:
         raise HTTPException(status_code=400, detail="Page number out of range")
 
     return {
