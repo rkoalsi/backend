@@ -10,6 +10,8 @@ from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .helpers import send_email
 from typing import Dict, Any
+from bson import ObjectId
+from collections import defaultdict
 
 load_dotenv()
 
@@ -56,6 +58,111 @@ brands = {
 }
 
 
+def extract_brand_from_product(product_name):
+    """Extract brand name from product name."""
+    words = product_name.split()
+    if not words:
+        return ""
+
+    if words[0].lower() in brands.keys():
+        return brands[words[0].lower()]
+
+
+def create_special_margins_for_new_product(
+    product_id: str, product_name: str, brand_name: str
+):
+    """
+    Background task to create special margins for a new product based on existing brand margins.
+    """
+    try:
+        # MongoDB connection (you might want to use your existing db connection)
+
+        print(
+            f"Creating special margins for new product: {product_name} (Brand: {brand_name})"
+        )
+
+        # Get all existing special margins to find customers with this brand
+        existing_margins = list(
+            db.special_margins.find({}, {"customer_id": 1, "name": 1, "margin": 1})
+        )
+
+        # Group by customer and extract brand margins
+        customer_brand_margins = defaultdict(dict)
+
+        for margin_doc in existing_margins:
+            customer_id = str(margin_doc.get("customer_id"))
+            product_name_in_margin = str(margin_doc.get("name", ""))
+            margin_value = margin_doc.get("margin")
+
+            if customer_id and margin_value is not None:
+                # Extract brand from the product name in special margins
+                brand_from_margin = extract_brand_from_product(product_name_in_margin)
+
+                # If this customer doesn't have this brand margin yet, add it
+                if (
+                    brand_from_margin
+                    and brand_from_margin not in customer_brand_margins[customer_id]
+                ):
+                    customer_brand_margins[customer_id][
+                        brand_from_margin
+                    ] = margin_value
+
+        # Check if any customers have margins for this brand
+        customers_with_brand_margins = []
+        for customer_id, brand_margins in customer_brand_margins.items():
+            if brand_name in brand_margins:
+                customers_with_brand_margins.append(
+                    {
+                        "customer_id": customer_id,
+                        "margin": brand_margins[brand_name],
+                    }
+                )
+
+        print(
+            f"Found {len(customers_with_brand_margins)} customers with margins for brand '{brand_name}'"
+        )
+
+        # Create special margins for the new product
+        special_margins_to_insert = []
+
+        for customer_data in customers_with_brand_margins:
+            customer_id = customer_data["customer_id"]
+            margin = customer_data["margin"]
+
+            # Check if this customer-product combination already exists
+            existing_special_margin = db.special_margins.find_one(
+                {
+                    "customer_id": ObjectId(customer_id),
+                    "product_id": ObjectId(product_id),
+                }
+            )
+
+            if not existing_special_margin:
+                special_margins_to_insert.append(
+                    {
+                        "customer_id": ObjectId(customer_id),
+                        "product_id": ObjectId(product_id),
+                        "margin": margin,
+                        "name": product_name,
+                    }
+                )
+                print(
+                    f"Will create special margin for customer {customer_id}: {product_name} with margin {margin}"
+                )
+
+        # Bulk insert special margins
+        if special_margins_to_insert:
+            result = db.special_margins.insert_many(special_margins_to_insert)
+            print(
+                f"Successfully created {len(result.inserted_ids)} special margins for new product"
+            )
+        else:
+            print("No new special margins needed for this product")
+
+    except Exception as e:
+        print(f"Error creating special margins for new product: {e}")
+
+
 def handle_item(data: dict, background_tasks: BackgroundTasks):
     item = data.get("item")
     item_id = item.get("item_id", "")
@@ -64,7 +171,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
         if not exists:
             item_name = str(item.get("name"))
             brand_name = str(item.get("brand"))
-            db.products.insert_one(
+            result = db.products.insert_one(
                 {
                     "item_id": item.get("item_id", ""),
                     "name": item.get("name", ""),
@@ -142,6 +249,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     params=params,
                 )
             background_tasks.add_task(run_update_stock)
+            new_product_id = str(result.inserted_id)
+            background_tasks.add_task(
+                create_special_margins_for_new_product,
+                new_product_id,
+                item_name,
+                brand_name,
+            )
         else:
             print("Item Exists")
             update_data = {}
@@ -801,16 +915,18 @@ def handle_customer(data: dict):
 
     import json  # make sure to import json if not already
 
-    def is_address_present(address, existing_addresses):
-        # Check by address_id instead of deep equality
-        address_id = address.get("address_id")
-        return any(addr.get("address_id") == address_id for addr in existing_addresses)
-
     def clean_data(document):
         # Remove unwanted keys from the document
         for key in UNWANTED_KEYS:
             document.pop(key, None)
         return document
+
+    def addresses_are_equal(addr1, addr2):
+        """Compare two addresses for equality, ignoring order of keys"""
+        # Remove None values and compare
+        clean_addr1 = {k: v for k, v in addr1.items() if v is not None}
+        clean_addr2 = {k: v for k, v in addr2.items() if v is not None}
+        return clean_addr1 == clean_addr2
 
     # Clean contact data
     contact = clean_data(contact)
@@ -858,47 +974,73 @@ def handle_customer(data: dict):
                 and existing_customer.get(key) != value
             ):
                 update_fields[key] = value
-        existing_addresses = existing_customer.get("addresses", [])
-        existing_address_ids = {addr.get("address_id") for addr in existing_addresses}
 
-        new_addresses = []
-        new_address_ids = set()
+        # Handle address updates
+        existing_addresses = existing_customer.get("addresses", [])
+        existing_address_map = {
+            addr.get("address_id"): addr for addr in existing_addresses
+        }
+
+        updated_addresses = list(existing_addresses)  # Start with existing addresses
+        addresses_changed = False
+
+        # Collect all addresses from the contact
+        incoming_addresses = []
 
         # Add billing address
         if "billing_address" in contact and contact["billing_address"]:
-            addr = contact["billing_address"]
-            addr_id = addr.get("address_id")
-            if addr_id not in existing_address_ids and addr_id not in new_address_ids:
-                new_addresses.append(addr)
-                new_address_ids.add(addr_id)
+            incoming_addresses.append(contact["billing_address"])
 
         # Add shipping address
         if "shipping_address" in contact and contact["shipping_address"]:
-            addr = contact["shipping_address"]
-            addr_id = addr.get("address_id")
-            if addr_id not in existing_address_ids and addr_id not in new_address_ids:
-                new_addresses.append(addr)
-                new_address_ids.add(addr_id)
+            incoming_addresses.append(contact["shipping_address"])
 
         # Add addresses from contact.addresses
         if "addresses" in contact and isinstance(contact["addresses"], list):
-            for addr in contact["addresses"]:
-                addr_id = addr.get("address_id")
-                if (
-                    addr_id not in existing_address_ids
-                    and addr_id not in new_address_ids
-                ):
-                    new_addresses.append(addr)
-                    new_address_ids.add(addr_id)
+            incoming_addresses.extend(contact["addresses"])
 
-        if new_addresses:
-            update_fields["addresses"] = existing_addresses + new_addresses
+        # Remove duplicates based on address_id
+        unique_incoming = {}
+        for addr in incoming_addresses:
+            addr_id = addr.get("address_id")
+            if addr_id:
+                unique_incoming[addr_id] = addr
 
+        # Process each incoming address
+        for addr_id, new_addr in unique_incoming.items():
+            if addr_id in existing_address_map:
+                # Address exists, check if it needs updating
+                existing_addr = existing_address_map[addr_id]
+                if not addresses_are_equal(existing_addr, new_addr):
+                    # Update the address in the list
+                    for i, addr in enumerate(updated_addresses):
+                        if addr.get("address_id") == addr_id:
+                            updated_addresses[i] = new_addr
+                            addresses_changed = True
+                            print(f"Address {addr_id} updated")
+                            break
+            else:
+                # New address, add it
+                updated_addresses.append(new_addr)
+                addresses_changed = True
+                print(f"New address {addr_id} added")
+
+        # Update addresses if there were changes
+        if addresses_changed:
+            update_fields["addresses"] = updated_addresses
+
+        # Clean up fields we don't want to store separately
         update_fields.pop("billing_address", None)
         update_fields.pop("shipping_address", None)
         update_fields.pop("cf_margin", None)
         update_fields.pop("cf_in_ex", None)
-        print(existing_addresses, new_addresses)
+
+        print("Existing addresses:", existing_addresses)
+        print(
+            "Updated addresses:",
+            updated_addresses if addresses_changed else "No changes",
+        )
+
         # Update the customer if there are changes
         if update_fields:
             update_fields["updated_at"] = datetime.datetime.now()
