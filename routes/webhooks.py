@@ -208,6 +208,13 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "updated_at": parse_datetime(item.get("last_modified_time")),
                 }
             )
+            new_product_id = str(result.inserted_id)
+            background_tasks.add_task(
+                create_special_margins_for_new_product,
+                new_product_id,
+                item_name,
+                brand_name,
+            )
             template = serialize_mongo_document(
                 dict(db.templates.find_one({"name": "item_creation_update"}))
             )
@@ -248,14 +255,8 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     template_doc=template,
                     params=params,
                 )
+
             background_tasks.add_task(run_update_stock)
-            new_product_id = str(result.inserted_id)
-            background_tasks.add_task(
-                create_special_margins_for_new_product,
-                new_product_id,
-                item_name,
-                brand_name,
-            )
         else:
             print("Item Exists")
             update_data = {}
