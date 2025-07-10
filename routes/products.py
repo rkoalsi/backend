@@ -71,18 +71,26 @@ def get_all_brands():
     Retrieve a list of all distinct brands.
     """
     try:
-        brands = products_collection.distinct(
+        # Get distinct brand names
+        brand_names = products_collection.distinct(
             "brand",
             {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
         )
-        brands = [
-            {
-                "brand": brand,
-                "url": f"""{os.getenv('S3_URL')}/product_images/{(brand.lower().replace(" ", "_") if len(brand.split()) == 2 else brand.lower())}.jpeg""",
-            }
-            for brand in brands
-            if brand
-        ]  # Remove empty or null brands
+        brands = []
+        for brand_name in brand_names:
+            # Find brand document in brands collection
+            brand_doc = db.brands.find_one(
+                {"name": {"$regex": brand_name, "$options": "i"}}
+            )
+
+            if brand_doc:
+                # Create brand object with name and image
+                brand = {"brand": brand_name, "image": brand_doc.get("image_url")}
+            else:
+                # If no brand document found, just include the name
+                brand = {"brand": brand_name, "image": None}
+
+            brands.append(brand)
 
         return {"brands": brands}
     except Exception as e:
