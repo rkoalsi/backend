@@ -36,6 +36,7 @@ from backend.config.auth import JWTBearer  # type: ignore
 import pandas as pd
 from io import BytesIO
 from pymongo.errors import OperationFailure
+from botocore.exceptions import ClientError
 
 load_dotenv()
 router = APIRouter()
@@ -240,6 +241,7 @@ async def get_stats():
         )
         delivery_partners = db["delivery_partners"].count_documents({})
         return_orders = db["return_orders"].count_documents({})
+        brands = db["brands"].count_documents({})
 
         return {
             "active_stock_products": active_stock_products,
@@ -280,6 +282,7 @@ async def get_stats():
             "submitted_expected_reorders": submitted_expected_reorders,
             "delivery_partners": delivery_partners,
             "return_orders": return_orders,
+            "brands": brands,
         }
 
     except Exception as e:
@@ -1536,6 +1539,158 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         raise HTTPException(status_code=500, detail="Error uploading file to S3.")
     finally:
         file.file.close()
+
+
+def slugify(brand: str):
+    return brand.lower().replace(" ", "_") if len(brand.split()) >= 2 else brand.lower()
+
+
+@router.get("/brands_with_images")
+def get_all_brands(search: Optional[str] = Query(None)):  # Make search optional
+    """
+    Retrieve a list of all distinct brands with associated image URLs.
+    """
+    try:
+        condition = {}
+        if search:
+            # Case-insensitive regex search
+            condition["name"] = {"$regex": search, "$options": "i"}
+
+        brands = list(db.brands.find(condition))
+        print(serialize_mongo_document(brands))
+        return {"brands": serialize_mongo_document(brands)}
+    except Exception as e:
+        print("Failed to fetch brands from MongoDB.")
+        raise HTTPException(status_code=500, detail="Failed to fetch brands.")
+
+
+@router.get("/brands/refresh")
+def refresh_brands():  # Make search optional
+    try:
+        brands = products_collection.distinct(
+            "brand",
+            {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
+        )
+        product_brands = [brand for brand in brands if brand]
+
+        for brand in product_brands:
+            exists = db.brands.find_one({"name": brand})
+            if not exists:
+                db.brands.insert_one({"name": brands, "image_url": ""})
+
+        return "Updated Brands Collection"
+    except Exception as e:
+        print("Failed to fetch brands from MongoDB.")
+        raise HTTPException(status_code=500, detail="Failed to fetch brands.")
+
+
+@router.put("/brands/image")
+async def update_brand_image(file: UploadFile = File(...), brand_name: str = Form(...)):
+    # Input validation
+    if not brand_name or not brand_name.strip():
+        raise HTTPException(status_code=400, detail="Brand name is required")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    brand_name = brand_name.strip()
+    print(f"Processing brand: {brand_name}")
+
+    # Environment variables
+    S3_URL_BASE = os.getenv("S3_URL")
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+
+    if not s3_client or not S3_BUCKET_NAME or not S3_URL_BASE:
+        raise HTTPException(
+            status_code=500, detail="S3 configuration missing or failed to initialize."
+        )
+
+    # File extension validation
+    file_extension = (
+        file.filename.split(".")[-1].lower() if "." in file.filename else "svg"
+    )
+    ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "svg", "webp", "gif"}
+
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+        )
+
+    # Read and validate file content
+    try:
+        file_content = await file.read()
+
+        # File size validation
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
+
+    # S3 upload
+    image_s3_key = f"brands/{slugify(brand_name.lower())}.{file_extension}"
+
+    try:
+        file_obj = io.BytesIO(file_content)
+
+        s3_client.upload_fileobj(
+            file_obj,  # Now this is a file-like object
+            S3_BUCKET_NAME,
+            image_s3_key,
+            ExtraArgs={
+                "ACL": "public-read",
+                "ContentType": file.content_type,
+            },
+        )
+        print(f"Successfully uploaded {image_s3_key} to S3.")
+
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        print(f"S3 upload failed: {error_code} - {e}")
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {error_code}")
+    except Exception as e:
+        print(f"Unexpected error during S3 upload: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload image to S3")
+
+    # Database update
+    new_image_url = (
+        f"{S3_URL_BASE}/brands/{slugify(brand_name.lower())}.{file_extension}"
+    )
+    try:
+        update_result = db.brands.update_one(
+            {"name": brand_name},
+            {"$set": {"image_url": new_image_url}},
+        )
+
+        print(
+            f"MongoDB update for brand '{brand_name}': Matched {update_result.matched_count}, Modified {update_result.modified_count}."
+        )
+
+        if update_result.matched_count == 0:
+            print(f"No brand found for '{brand_name}' to update image for.")
+            return {
+                "message": f"Image uploaded for '{brand_name}', but no brand was found to update.",
+                "image_url": new_image_url,
+            }
+
+        return {
+            "message": f"Brand image updated successfully for '{brand_name}'.",
+            "image_url": new_image_url,
+            "matched_count": update_result.matched_count,
+            "modified_count": update_result.modified_count,
+        }
+
+    except Exception as e:
+        print(f"Database update error for brand '{brand_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
 
 
 router.include_router(
