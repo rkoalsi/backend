@@ -752,6 +752,7 @@ def get_customers_report(
         "Sales Person",
         "GST Number",
         "Status",
+        "Whatsapp group",
         "Place Of Supply",
     ]
     ws.append(headers)
@@ -778,6 +779,7 @@ def get_customers_report(
             sales_person_val,
             cust.get("gst_no", "-"),
             cust.get("status", ""),
+            cust.get("cf_whatsapp_group", "-"),
             place_of_supply,
         ]
         ws.append(row)
