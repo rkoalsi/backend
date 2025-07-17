@@ -19,6 +19,7 @@ from .expected_reorders import router as expected_reorders
 from .return_orders import router as return_orders
 from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
+from .external_links import router as external_links
 from backend.config.auth import JWTBearer  # type: ignore
 
 router = APIRouter()
@@ -50,6 +51,8 @@ router.include_router(
     expected_reorders, prefix="/expected_reorders", tags=["Expected Reorders"]
 )
 router.include_router(return_orders, prefix="/return_orders", tags=["Return Reorders"])
+
+router.include_router(external_links, prefix="/external_links", tags=["External Links"])
 
 router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
 
