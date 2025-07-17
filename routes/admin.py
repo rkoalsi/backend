@@ -32,6 +32,7 @@ from .admin_targeted_customers import router as admin_targeted_customers_router
 from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
+from .admin_external_links import router as admin_external_links_router
 from backend.config.auth import JWTBearer  # type: ignore
 import pandas as pd
 from io import BytesIO
@@ -242,6 +243,7 @@ async def get_stats():
         delivery_partners = db["delivery_partners"].count_documents({})
         return_orders = db["return_orders"].count_documents({})
         brands = db["brands"].count_documents({})
+        external_links = db["external_links"].count_documents({})
 
         return {
             "active_stock_products": active_stock_products,
@@ -283,6 +285,7 @@ async def get_stats():
             "delivery_partners": delivery_partners,
             "return_orders": return_orders,
             "brands": brands,
+            "external_links": external_links,
         }
 
     except Exception as e:
@@ -1773,5 +1776,11 @@ router.include_router(
     admin_sales_by_customer_router,
     prefix="/sales_by_customer",
     tags=["Admin Sales By Customer"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_external_links_router,
+    prefix="/external_links",
+    tags=["Admin External Links"],
     dependencies=[Depends(JWTBearer())],
 )
