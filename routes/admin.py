@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
 from .helpers import get_access_token
-from typing import Optional
+from typing import Optional, List
 import re, requests, os, json
 from dotenv import load_dotenv
 import boto3, io, csv, openpyxl
@@ -1502,6 +1502,7 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
     # Validate file type
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type.")
+
     # Validate file size
     file.file.seek(0, 2)  # Move the cursor to the end of the file
     file_size = file.file.tell()  # Get the current position (file size in bytes)
@@ -1512,11 +1513,18 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
             status_code=400,
             detail=f"File is too large. Maximum allowed size is {MAX_FILE_SIZE_MB} MB.",
         )
+
     try:
         product = products_collection.find_one({"_id": ObjectId(product_id)})
-        # Generate a unique filename
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Generate a unique filename with timestamp to avoid conflicts
         file_extension = os.path.splitext(file.filename)[1]
-        unique_filename = f"product_images/{product.get('item_id')}{file_extension}"
+        timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
+        unique_filename = (
+            f"product_images/{product.get('item_id')}_{timestamp}{file_extension}"
+        )
 
         # Upload the file to S3
         s3_client.upload_fileobj(
@@ -1528,18 +1536,240 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
 
         # Construct the S3 URL
         s3_url = f"{AWS_S3_URL}/{unique_filename}"
+
         if s3_url:
+            # Get current images array or initialize empty array
+            current_images = product.get("images", [])
+
+            # Add new image to the end of the array
+            updated_images = current_images + [s3_url]
+
+            # Update the product with the new images array
             products_collection.update_one(
-                {"_id": ObjectId(product_id)}, {"$set": {"image_url": s3_url}}
+                {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
             )
-            return {"image_url": s3_url}
+
+            return {
+                "image_url": s3_url,
+                "images": updated_images,
+                "message": "Image uploaded successfully",
+            }
 
     except NoCredentialsError:
         raise HTTPException(status_code=500, detail="AWS credentials not configured.")
     except BotoCoreError as e:
         raise HTTPException(status_code=500, detail="Error uploading file to S3.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     finally:
         file.file.close()
+
+
+@router.post("/reorder-images")
+async def reorder_images(product_id: str = Form(...), images: str = Form(...)):
+    """
+    Reorder images for a product.
+    images should be a JSON string array of image URLs in the desired order.
+    """
+    try:
+        # Parse the images JSON string
+        import json
+
+        images_list = json.loads(images)
+
+        if not isinstance(images_list, list):
+            raise HTTPException(status_code=400, detail="Images must be an array.")
+
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Update the product with reordered images
+        result = products_collection.update_one(
+            {"_id": ObjectId(product_id)}, {"$set": {"images": images_list}}
+        )
+
+        if result.modified_count > 0:
+            return {"images": images_list, "message": "Images reordered successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to reorder images.")
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format for images.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@router.delete("/delete-image")
+async def delete_image(product_id: str = Form(...), image_url: str = Form(...)):
+    """
+    Delete a specific image from a product and remove it from S3.
+    """
+    try:
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        current_images = product.get("images", [])
+
+        if image_url not in current_images:
+            raise HTTPException(status_code=404, detail="Image not found in product.")
+
+        # Remove image from array
+        updated_images = [img for img in current_images if img != image_url]
+
+        # Update the product
+        result = products_collection.update_one(
+            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+        )
+
+        if result.modified_count > 0:
+            # Try to delete from S3 (optional - you might want to keep files for backup)
+            try:
+                # Extract S3 key from URL
+                s3_key = image_url.replace(f"{AWS_S3_URL}/", "")
+                s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=s3_key)
+            except Exception as s3_error:
+                # Log the error but don't fail the request
+                print(f"Warning: Could not delete file from S3: {s3_error}")
+
+            return {"images": updated_images, "message": "Image deleted successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to delete image.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@router.post("/make-primary-image")
+async def make_primary_image(product_id: str = Form(...), image_url: str = Form(...)):
+    """
+    Make a specific image the primary image (move it to first position).
+    """
+    try:
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        current_images = product.get("images", [])
+
+        if image_url not in current_images:
+            raise HTTPException(status_code=404, detail="Image not found in product.")
+
+        # Remove the image from its current position
+        updated_images = [img for img in current_images if img != image_url]
+        # Insert it at the beginning (primary position)
+        updated_images.insert(0, image_url)
+
+        # Update the product
+        result = products_collection.update_one(
+            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+        )
+
+        if result.modified_count > 0:
+            return {
+                "images": updated_images,
+                "primary_image": image_url,
+                "message": "Primary image updated successfully",
+            }
+        else:
+            raise HTTPException(
+                status_code=400, detail="Failed to update primary image."
+            )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+# Optional: Bulk upload endpoint for multiple images at once
+@router.post("/upload-multiple-images")
+async def upload_multiple_images(
+    files: List[UploadFile] = File(...), product_id: str = Form(...)
+):
+    """
+    Upload multiple images at once for a product.
+    """
+    if len(files) > 10:  # Limit to prevent abuse
+        raise HTTPException(
+            status_code=400, detail="Maximum 10 files allowed per upload."
+        )
+
+    try:
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        uploaded_urls = []
+        current_images = product.get("images", [])
+
+        for file in files:
+            # Validate each file
+            if not file.content_type.startswith("image/"):
+                continue  # Skip non-image files
+
+            # Check file size
+            file.file.seek(0, 2)
+            file_size = file.file.tell()
+            file.file.seek(0)
+
+            if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                continue  # Skip oversized files
+
+            # Generate unique filename
+            file_extension = os.path.splitext(file.filename)[1]
+            timestamp = int(time.time() * 1000)
+            unique_filename = (
+                f"product_images/{product.get('item_id')}_{timestamp}_{file.filename}"
+            )
+
+            # Upload to S3
+            s3_client.upload_fileobj(
+                file.file,
+                AWS_S3_BUCKET_NAME,
+                unique_filename,
+                ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+            )
+
+            # Construct S3 URL
+            s3_url = f"{AWS_S3_URL}/{unique_filename}"
+            uploaded_urls.append(s3_url)
+
+            file.file.close()
+
+        if uploaded_urls:
+            # Add all new images to the existing array
+            updated_images = current_images + uploaded_urls
+
+            # Update the product
+            products_collection.update_one(
+                {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+            )
+
+            return {
+                "uploaded_images": uploaded_urls,
+                "total_images": len(updated_images),
+                "images": updated_images,
+                "message": f"Successfully uploaded {len(uploaded_urls)} images",
+            }
+        else:
+            raise HTTPException(
+                status_code=400, detail="No valid images were uploaded."
+            )
+
+    except NoCredentialsError:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured.")
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail="Error uploading files to S3.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    finally:
+        # Ensure all files are closed
+        for file in files:
+            if hasattr(file, "file") and not file.file.closed:
+                file.file.close()
 
 
 def slugify(brand: str):
