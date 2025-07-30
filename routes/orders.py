@@ -613,6 +613,8 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                         "Sub Category",
                         "Series",
                         "SKU",
+                        "Stock",
+                        "UPC Code",
                         "Price",
                         "Margin",
                         "Selling Price",
@@ -635,6 +637,8 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                             product.get("sub_category", ""),
                             product.get("series", ""),
                             product.get("cf_sku_code", ""),
+                            product.get("stock", ""),
+                            product.get("upc_code", ""),
                             product.get("rate", 0),
                             margin,
                             product.get("rate", 0) * margin_value,
@@ -879,6 +883,8 @@ async def update_order_from_sheet(order_id: str):
                 "series": headers.index("Series") if "Series" in headers else -1,
                 "sku": headers.index("SKU") if "SKU" in headers else -1,
                 "price": headers.index("Price") if "Price" in headers else -1,
+                "stock": headers.index("Stock") if "Stock" in headers else -1,
+                "upc_code": headers.index("UPC Code") if "UPC Code" in headers else -1,
                 "margin": headers.index("Margin") if "Margin" in headers else -1,
                 "selling_price": (
                     headers.index("Selling Price") if "Selling Price" in headers else -1
@@ -908,7 +914,9 @@ async def update_order_from_sheet(order_id: str):
                                 updated_products.append(
                                     {
                                         "product_id": ObjectId(product["_id"]),
-                                        "tax_percentage": 18,  # Adjust based on product data if available
+                                        "tax_percentage": product.get(
+                                            "item_tax_preferences", [{}]
+                                        )[0].get("tax_percentage", 0),
                                         "brand": product.get("brand", "Unknown"),
                                         "product_code": product_sku,
                                         "quantity": quantity,
