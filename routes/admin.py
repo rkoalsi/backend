@@ -12,9 +12,8 @@ from backend.config.root import connect_to_mongo, serialize_mongo_document  # ty
 from bson.objectid import ObjectId
 from .helpers import get_access_token
 from typing import Optional, List
-import re, requests, os, json
+import re, requests, os, json, time, boto3, io, csv, openpyxl
 from dotenv import load_dotenv
-import boto3, io, csv, openpyxl
 from pytz import timezone as tz
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from datetime import date, timedelta, datetime, timezone
@@ -38,6 +37,7 @@ import pandas as pd
 from io import BytesIO
 from pymongo.errors import OperationFailure
 from botocore.exceptions import ClientError
+
 
 load_dotenv()
 router = APIRouter()
@@ -910,6 +910,8 @@ def read_all_orders(
                 "estimate_number": 1,
                 "estimate_id": 1,
                 "reference_number": 1,
+                "spreadsheet_url": 1,
+                "spreadsheet_created": 1,
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
