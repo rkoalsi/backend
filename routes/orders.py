@@ -1,12 +1,12 @@
 from types import NoneType
 from pymongo.collection import Collection
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Tuple
 from .helpers import get_access_token, send_email
 from fastapi import APIRouter, HTTPException
 from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
 from bson.objectid import ObjectId
-import time, os, httpx, requests, asyncio, random, json
+import time, os, httpx, requests, asyncio, ssl, socket
 from dotenv import load_dotenv
 from fastapi.responses import Response
 from backend.config.constants import terms, STATE_CODES  # type: ignore
@@ -17,6 +17,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from pymongo import DESCENDING, ASCENDING
 from pathlib import Path
+from collections import defaultdict
 
 load_dotenv()
 
@@ -34,8 +35,88 @@ users_collection = db["users"]
 router = APIRouter()
 
 timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
+# Rate limiting to prevent API quota exhaustion
+class APIRateLimiter:
+    def __init__(self, max_calls_per_minute=100):
+        self.max_calls = max_calls_per_minute
+        self.calls = defaultdict(list)
+    
+    async def wait_if_needed(self, key="default"):
+        """Wait if rate limit would be exceeded"""
+        now = time.time()
+        minute_ago = now - 60
+        
+        # Clean old calls
+        self.calls[key] = [call_time for call_time in self.calls[key] if call_time > minute_ago]
+        
+        # Check if we need to wait
+        if len(self.calls[key]) >= self.max_calls:
+            sleep_time = 60 - (now - self.calls[key][0])
+            if sleep_time > 0:
+                print(f"⏱️ Rate limiting: waiting {sleep_time:.1f} seconds")
+                await asyncio.sleep(sleep_time)
+        
+        # Record this call
+        self.calls[key].append(now)
 
+# Global rate limiter
+rate_limiter = APIRateLimiter(max_calls_per_minute=100)
 
+def create_fresh_sheets_service():
+    """Create a new service instance to avoid threading/memory issues"""
+    credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+async def robust_api_call(operation_name: str, func, max_retries: int = 3):
+    """
+    Execute Google API calls with robust error handling for SSL and connection issues
+    """
+    # Apply rate limiting
+    await rate_limiter.wait_if_needed()
+    
+    for attempt in range(max_retries):
+        try:
+            result = await asyncio.to_thread(func)
+            print(f"✓ {operation_name} succeeded")
+            return result, None
+        except (ssl.SSLError, socket.error, ConnectionError) as e:
+            if attempt < max_retries - 1:
+                wait_time = min((attempt + 1) * 2, 10)  # Cap at 10 seconds
+                print(f"🔄 {operation_name} SSL/Connection error (attempt {attempt + 1}), retrying in {wait_time}s: {type(e).__name__}")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                error_msg = f"{operation_name} failed after {max_retries} attempts: {str(e)}"
+                print(f"✗ {error_msg}")
+                return None, error_msg
+        except HttpError as e:
+            if e.resp.status == 429:  # Rate limit
+                wait_time = 60
+                print(f"⏱️ {operation_name} rate limited, waiting {wait_time}s")
+                await asyncio.sleep(wait_time)
+                if attempt < max_retries - 1:
+                    continue
+            error_msg = f"{operation_name} HTTP error: {e.resp.status} - {str(e)}"
+            print(f"✗ {error_msg}")
+            return None, error_msg
+        except Exception as e:
+            error_msg = f"{operation_name} unexpected error: {str(e)}"
+            print(f"✗ {error_msg}")
+            return None, error_msg
+    
+    return None, f"{operation_name} failed after all retries"
+
+async def safe_execute(operation_name: str, func, critical: bool = True):
+    """
+    Execute an operation with proper error handling
+    critical=True: Will raise HTTPException if fails
+    critical=False: Will log error but continue
+    """
+    result, error = await robust_api_call(operation_name, func)
+    
+    if error and critical:
+        raise HTTPException(status_code=500, detail=error)
+    
+    return result, error
 # Create a new order
 def create_order(order: dict, collection: Collection) -> str:
     # Explicitly convert customer_id and product_ids to ObjectId
@@ -360,600 +441,877 @@ def get_active_products(sort: dict):
     return products
 
 
-BASE_DIR = (
-    Path(__file__).resolve().parent.parent
-)  # Get the directory of the current script
-SERVICE_ACCOUNT_FILE = (
-    BASE_DIR / "creds.json"
-)  # Adjust based on where the file is stored
+import asyncio
+import json
+import traceback
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+import time
+
+from fastapi import HTTPException
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google.oauth2.service_account import Credentials
+from bson import ObjectId
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+SERVICE_ACCOUNT_FILE = BASE_DIR / "creds.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/script.projects",
 ]
 
+# Global service instances
+_sheets_service = None
+_drive_service = None
 
-# Authenticate and create a service client
 def get_sheets_service():
-    credentials = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES
-    )
-    service = build("sheets", "v4", credentials=credentials)
-    return service
-
+    global _sheets_service
+    if _sheets_service is None:
+        credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        _sheets_service = build("sheets", "v4", credentials=credentials)
+    return _sheets_service
 
 def get_drive_service():
-    credentials = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    service = build("drive", "v3", credentials=credentials)
-    return service
+    global _drive_service
+    if _drive_service is None:
+        credentials = Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, 
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        _drive_service = build("drive", "v3", credentials=credentials)
+    return _drive_service
 
-
-def get_apps_script_service():
-    creds = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,  # Update this path
-        scopes=[
-            "https://www.googleapis.com/auth/script.projects",
-            "https://www.googleapis.com/auth/drive",
-        ],
-    )
-    return build("script", "v1", credentials=creds)
-
-
-# Helper function to implement retry logic for API requests
-def execute_with_retry(request, retries=5, backoff=1):
-    for attempt in range(retries):
-        try:
-            return request.execute()
-        except HttpError as err:
-            if err.resp.status == 429:  # Rate limit exceeded
-                print(f"Rate limit exceeded, retrying in {backoff} seconds...")
-                time.sleep(backoff)
-                backoff *= 2  # Exponential backoff
-            else:
-                raise  # If it's another error, raise it
-    raise Exception("Exceeded maximum retry attempts")
-
-
-async def execute_with_retry_async(request, max_retries=5, initial_delay=1.0):
+async def safe_execute(operation_name: str, func, critical: bool = True):
     """
-    Executes a Google API request with automatic exponential backoff retry.
-
-    Parameters:
-        - request: The Google API request object.
-        - max_retries: Maximum retry attempts.
-        - initial_delay: Initial wait time before retry (in seconds).
-
-    Returns:
-        - API response if successful.
-
-    Raises:
-        - HttpError if all retries fail.
+    Execute an operation with proper error handling
+    critical=True: Will raise HTTPException if fails
+    critical=False: Will log error but continue
     """
-    delay = initial_delay
-    for attempt in range(max_retries):
-        try:
-            return await asyncio.to_thread(request.execute)  # Run in async mode
-        except HttpError as err:
-            if err.resp.status in [500, 502, 503, 504]:  # Retry on transient errors
-                if attempt < max_retries - 1:
-                    wait_time = delay + random.uniform(0, 0.5)  # Add jitter
-                    print(
-                        f"Retry {attempt + 1}/{max_retries} after {wait_time:.2f}s due to error: {err}"
-                    )
-                    await asyncio.sleep(wait_time)
-                    delay *= 2  # Exponential backoff
-                else:
-                    raise HTTPException(
-                        status_code=500, detail=f"Google API Error: {err}"
-                    )
-            else:
-                raise  # If it's a permanent error, don't retry
+    try:
+        result = await asyncio.to_thread(func)
+        print(f"✓ {operation_name} succeeded")
+        return result, None
+    except HttpError as e:
+        error_msg = f"{operation_name} failed: HTTP {e.resp.status} - {str(e)}"
+        print(f"✗ {error_msg}")
+        if critical:
+            raise HTTPException(status_code=500, detail=error_msg)
+        return None, error_msg
+    except Exception as e:
+        error_msg = f"{operation_name} failed: {str(e)}"
+        print(f"✗ {error_msg}")
+        if critical:
+            raise HTTPException(status_code=500, detail=error_msg)
+        return None, error_msg
 
+def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> Dict[str, List]:
+    """Prepare all data upfront"""
+    brand_data = {}
+    
+    for brand_name, products in brands.items():
+        rows = [[
+            "Image", "Name", "Sub Category", "Series", "SKU", 
+            "Stock", "UPC Code", "Price", "Margin", "Selling Price", 
+            "Quantity", "Total"
+        ]]
+        
+        for idx, product in enumerate(products, start=2):
+            margin = special_margins.get(
+                str(product.get("_id")), 
+                customer.get("cf_margin", "40%")
+            )
+            try:
+                margin_value = int(margin.replace("%", "")) / 100
+            except:
+                margin_value = 0.4
+                
+            rate = product.get("rate", 0)
+            
+            rows.append([
+                f'=IMAGE("{product.get("image_url", "")}", 1)',
+                product.get("name", ""),
+                product.get("sub_category", ""),
+                product.get("series", ""),
+                product.get("cf_sku_code", ""),
+                product.get("stock", ""),
+                product.get("upc_code", ""),
+                rate,
+                margin,
+                rate * margin_value,
+                "",
+                f"=K{idx}*H{idx}"
+            ])
+        
+        brand_data[brand_name] = rows
+    
+    return brand_data
+
+def create_format_requests(sheet_id: int, rows_count: int) -> List[Dict]:
+    """Create formatting requests for a sheet"""
+    return [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 12,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
+                    }
+                },
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment,backgroundColor)",
+            }
+        },
+        {
+            "updateBorders": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": rows_count,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 12,
+                },
+                "top": {"style": "SOLID"},
+                "bottom": {"style": "SOLID"},
+                "left": {"style": "SOLID"},
+                "right": {"style": "SOLID"},
+                "innerHorizontal": {"style": "SOLID"},
+                "innerVertical": {"style": "SOLID"},
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0,
+                    "endIndex": 1,
+                },
+                "properties": {"pixelSize": 150},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 1,
+                    "endIndex": 2,
+                },
+                "properties": {"pixelSize": 250},
+                "fields": "pixelSize",
+            }
+        },
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": rows_count,
+                },
+                "properties": {"pixelSize": 80},
+                "fields": "pixelSize",
+            }
+        },
+    ]
+
+async def try_set_permissions(drive_service, spreadsheet_id: str, user_email: Optional[str] = None) -> Dict[str, str]:
+    """Try different permission methods and return status"""
+    permission_status = {}
+    
+    # Method 1: Anyone with link (most important)
+    result, error = await safe_execute(
+        "Setting 'anyone with link' permissions",
+        lambda: drive_service.permissions().create(
+            fileId=spreadsheet_id,
+            body={"type": "anyone", "role": "writer"},
+            sendNotificationEmail=False
+        ).execute(),
+        critical=False
+    )
+    permission_status["anyone_with_link"] = "success" if result else f"failed: {error}"
+    
+    # Method 2: Specific user if provided
+    if user_email:
+        result, error = await safe_execute(
+            f"Setting user permissions for {user_email}",
+            lambda: drive_service.permissions().create(
+                fileId=spreadsheet_id,
+                body={"type": "user", "role": "writer", "emailAddress": user_email},
+                sendNotificationEmail=False
+            ).execute(),
+            critical=False
+        )
+        permission_status["user_specific"] = "success" if result else f"failed: {error}"
+    
+    # Method 3: Try to make it publicly viewable as fallback
+    if permission_status["anyone_with_link"].startswith("failed"):
+        result, error = await safe_execute(
+            "Setting public view permissions",
+            lambda: drive_service.permissions().create(
+                fileId=spreadsheet_id,
+                body={"type": "anyone", "role": "reader"},
+                sendNotificationEmail=False
+            ).execute(),
+            critical=False
+        )
+        permission_status["public_readonly"] = "success" if result else f"failed: {error}"
+    
+    return permission_status
 
 @router.get("/download_order_form")
-async def download_order_form(customer_id: str, order_id: str, sort: str = "default"):
-    if not customer_id:
-        raise HTTPException(status_code=400, detail="Customer is Required")
-    if not order_id:
-        raise HTTPException(status_code=400, detail="Order is Required")
+async def download_order_form(customer_id: str, order_id: str, sort: str = "default", user_email: Optional[str] = None):
+    """
+    Create order form spreadsheet with robust error handling
+    user_email: Optional email to grant specific access to
+    """
+    
+    if not customer_id or not order_id:
+        raise HTTPException(status_code=400, detail="Customer and Order IDs are required")
 
+    # Check existing order
     order = db.orders.find_one({"_id": ObjectId(order_id)})
     if not order:
-        raise HTTPException(status_code=400, detail="Order does not exist")
-
-    spreadsheet_created = order.get("spreadsheet_created", False)
-    if spreadsheet_created:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    if order.get("spreadsheet_created", False):
         return {"google_sheet_url": order.get("spreadsheet_url", "")}
 
-    sort_stage = {"brand": 1, "rate": 1, "name": 1}
-    if sort == "price_asc":
-        sort_stage = {"rate": 1}
-    elif sort == "price_desc":
-        sort_stage = {"rate": -1}
-    elif sort == "catalogue":
-        sort_stage = {"catalogue_order": 1}
-
-    products = get_active_products(sort_stage)
-    brands = {}
-    for product in products:
-        brands.setdefault(product.get("brand", "Unknown"), []).append(product)
-
-    # Enhanced retry function with exponential backoff for SSL errors
-    async def execute_with_robust_retry(func, max_retries=5, initial_delay=1):
-        retries = 0
-        last_exception = None
-
-        while retries < max_retries:
-            try:
-                return await asyncio.to_thread(func)
-            except (HttpError, ConnectionError, TimeoutError) as e:
-                last_exception = e
-                wait_time = initial_delay * (2**retries)  # Exponential backoff
-                print(
-                    f"Connection error. Retry {retries + 1}/{max_retries} after {wait_time}s: {str(e)}"
-                )
-                await asyncio.sleep(wait_time)
-                retries += 1
-
-        # If we get here, all retries failed
-        raise last_exception
-
+    # Track operations for detailed response
+    operations_status = {}
+    sheet_url = None
+    spreadsheet_id = None
+    
     try:
-        # Get services with robust retry
-        try:
-            service = await execute_with_robust_retry(get_sheets_service)
-            drive_service = await execute_with_robust_retry(get_drive_service)
-        except Exception as e:
-            print(f"Failed to initialize services after retries: {e}")
-            raise HTTPException(
-                status_code=503, detail="Google services temporarily unavailable"
+        print(f"Starting order form creation for order {order_id}")
+        
+        # Step 1: Get all required data (CRITICAL)
+        print("📊 Fetching data...")
+        
+        customer_task = asyncio.create_task(
+            asyncio.to_thread(db.customers.find_one, {"_id": ObjectId(customer_id)})
+        )
+        
+        sort_stage = {"brand": 1, "rate": 1, "name": 1}
+        if sort == "price_asc":
+            sort_stage = {"rate": 1}
+        elif sort == "price_desc":
+            sort_stage = {"rate": -1}
+        elif sort == "catalogue":
+            sort_stage = {"catalogue_order": 1}
+            
+        products_task = asyncio.create_task(
+            asyncio.to_thread(get_active_products, sort_stage)
+        )
+        
+        special_margins_task = asyncio.create_task(
+            asyncio.to_thread(
+                lambda: {
+                    str(sm["product_id"]): sm["margin"]
+                    for sm in db.special_margins.find({"customer_id": ObjectId(customer_id)})
+                }
             )
+        )
+        
+        customer, products, special_margins = await asyncio.gather(
+            customer_task, products_task, special_margins_task
+        )
+        
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+            
+        brands = {}
+        for product in products:
+            brand = product.get("brand", "Unknown")
+            brands.setdefault(brand, []).append(product)
+            
+        if not brands:
+            raise HTTPException(status_code=404, detail="No active products found")
 
-        # Create spreadsheet
-        try:
-            spreadsheet = await execute_with_robust_retry(
-                lambda: service.spreadsheets()
-                .create(body={"properties": {"title": "Order Form"}})
-                .execute()
-            )
-            spreadsheet_id = spreadsheet["spreadsheetId"]
-            sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-        except Exception as e:
-            print(f"Failed to create spreadsheet: {e}")
-            raise HTTPException(status_code=500, detail="Failed to create spreadsheet")
-
-        # Update DB
+        operations_status["data_fetch"] = f"✓ Loaded {len(products)} products in {len(brands)} brands"
+        
+        # Step 2: Create spreadsheet (CRITICAL)
+        print("📝 Creating spreadsheet...")
+        
+        sheets_service = get_sheets_service()
+        drive_service = get_drive_service()
+        
+        spreadsheet_body = {
+            "properties": {
+                "title": f"Order Form - {customer.get('display_name', 'Customer')} - {order_id[:8]}"
+            }
+        }
+        
+        spreadsheet, error = await safe_execute(
+            "Creating spreadsheet",
+            lambda: sheets_service.spreadsheets().create(body=spreadsheet_body).execute(),
+            critical=True
+        )
+        
+        spreadsheet_id = spreadsheet["spreadsheetId"]
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        operations_status["spreadsheet_creation"] = "✓ Spreadsheet created successfully"
+        
+        # Update DB immediately after successful creation
         db.orders.update_one(
             {"_id": ObjectId(order_id)},
             {"$set": {"spreadsheet_created": True, "spreadsheet_url": sheet_url}},
         )
-
-        # Get customer data
-        customer = db.customers.find_one({"_id": ObjectId(customer_id)})
-        special_margins = {
-            str(sm["product_id"]): sm["margin"]
-            for sm in db.special_margins.find({"customer_id": ObjectId(customer_id)})
-        }
-
-        # Get spreadsheet details
-        try:
-            spreadsheet_details = await execute_with_robust_retry(
-                lambda: service.spreadsheets()
-                .get(spreadsheetId=spreadsheet_id)
-                .execute()
-            )
-            existing_sheets = {
-                sheet["properties"]["title"]: sheet["properties"]["sheetId"]
-                for sheet in spreadsheet_details["sheets"]
-            }
-            sheet1_id = existing_sheets.get("Sheet1")
-        except Exception as e:
-            print(f"Failed to get spreadsheet details: {e}")
-            # Continue with the process, we can still try to add sheets
-
-        # Sort brands alphabetically
-        sorted_brands = sorted(brands.keys())
-
-        # Add sheets in smaller batches to reduce connection load
-        brand_sheets = {}
-        for brand in sorted_brands:
-            if brand in existing_sheets:
-                brand_sheets[brand] = existing_sheets[brand]
-
-        # Process brands in chunks to reduce API load
-        chunk_size = 5  # Process 5 brands at a time
-        for i in range(0, len(sorted_brands), chunk_size):
-            chunk_brands = sorted_brands[i : i + chunk_size]
-            chunk_requests = []
-
-            for brand in chunk_brands:
-                if brand not in brand_sheets:
-                    chunk_requests.append(
-                        {"addSheet": {"properties": {"title": brand}}}
-                    )
-
-            if chunk_requests:
-                try:
-                    batch_response = await execute_with_robust_retry(
-                        lambda: service.spreadsheets()
-                        .batchUpdate(
-                            spreadsheetId=spreadsheet_id,
-                            body={"requests": chunk_requests},
-                        )
-                        .execute()
-                    )
-
-                    for j, brand in enumerate(
-                        [b for b in chunk_brands if b not in brand_sheets]
-                    ):
-                        brand_sheets[brand] = batch_response["replies"][j]["addSheet"][
-                            "properties"
-                        ]["sheetId"]
-                except Exception as e:
-                    print(f"Error adding sheets for chunk {i//chunk_size + 1}: {e}")
-                    # Continue with sheets we successfully created
-
-        # Process data in chunks
-        for i in range(0, len(sorted_brands), chunk_size):
-            chunk_brands = sorted_brands[i : i + chunk_size]
-            data_updates = []
-            format_requests = []
-
-            for brand in chunk_brands:
-                if brand not in brand_sheets:
-                    continue  # Skip brands without sheets
-
-                sheet_id = brand_sheets[brand]
-                products_in_brand = brands[brand]
-                rows = [
-                    [
-                        "Image",
-                        "Name",
-                        "Sub Category",
-                        "Series",
-                        "SKU",
-                        "Stock",
-                        "UPC Code",
-                        "Price",
-                        "Margin",
-                        "Selling Price",
-                        "Quantity",
-                        "Total",
-                    ]
-                ]
-
-                for idx, product in enumerate(products_in_brand, start=2):
-                    image_url = product.get("image_url", "")
-                    margin = special_margins.get(
-                        str(product.get("_id")), customer.get("cf_margin", "40%")
-                    )
-                    margin_value = int(margin.replace("%", "")) / 100
-
-                    rows.append(
-                        [
-                            f'=IMAGE("{image_url}", 1)',
-                            product.get("name", ""),
-                            product.get("sub_category", ""),
-                            product.get("series", ""),
-                            product.get("cf_sku_code", ""),
-                            product.get("stock", ""),
-                            product.get("upc_code", ""),
-                            product.get("rate", 0),
-                            margin,
-                            product.get("rate", 0) * margin_value,
-                            "",
-                            f"=I{idx}*H{idx}",
-                        ]
-                    )
-
-                data_updates.append(
-                    {"range": f"{brand}!A1:J{len(rows)}", "values": rows}
-                )
-                rows_count = len(products_in_brand) + 1
-
-                # Add formatting requests for this brand
-                format_requests.extend(
-                    [
-                        # Bold headers
-                        {
-                            "repeatCell": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "startRowIndex": 0,
-                                    "endRowIndex": 1,
-                                    "startColumnIndex": 0,
-                                    "endColumnIndex": 10,
-                                },
-                                "cell": {
-                                    "userEnteredFormat": {
-                                        "textFormat": {"bold": True},
-                                        "horizontalAlignment": "CENTER",
-                                        "verticalAlignment": "MIDDLE",
-                                    }
-                                },
-                                "fields": "userEnteredFormat(textFormat,horizontalAlignment,verticalAlignment)",
-                            }
-                        },
-                        # Table borders
-                        {
-                            "updateBorders": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "startRowIndex": 0,
-                                    "endRowIndex": rows_count,
-                                    "startColumnIndex": 0,
-                                    "endColumnIndex": 10,
-                                },
-                                "top": {"style": "SOLID"},
-                                "bottom": {"style": "SOLID"},
-                                "left": {"style": "SOLID"},
-                                "right": {"style": "SOLID"},
-                                "innerHorizontal": {"style": "SOLID"},
-                                "innerVertical": {"style": "SOLID"},
-                            }
-                        },
-                        # Column widths
-                        {
-                            "updateDimensionProperties": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "dimension": "COLUMNS",
-                                    "startIndex": 0,
-                                    "endIndex": 1,
-                                },
-                                "properties": {"pixelSize": 120},
-                                "fields": "pixelSize",
-                            }
-                        },
-                        {
-                            "updateDimensionProperties": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "dimension": "COLUMNS",
-                                    "startIndex": 1,
-                                    "endIndex": 2,
-                                },
-                                "properties": {"pixelSize": 250},
-                                "fields": "pixelSize",
-                            }
-                        },
-                        {
-                            "updateDimensionProperties": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "dimension": "COLUMNS",
-                                    "startIndex": 2,
-                                    "endIndex": 4,
-                                },
-                                "properties": {"pixelSize": 150},
-                                "fields": "pixelSize",
-                            }
-                        },
-                        {
-                            "updateDimensionProperties": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "dimension": "COLUMNS",
-                                    "startIndex": 4,
-                                    "endIndex": 10,
-                                },
-                                "properties": {"pixelSize": 120},
-                                "fields": "pixelSize",
-                            }
-                        },
-                        # Row height
-                        {
-                            "updateDimensionProperties": {
-                                "range": {
-                                    "sheetId": sheet_id,
-                                    "dimension": "ROWS",
-                                    "startIndex": 0,
-                                    "endIndex": rows_count,
-                                },
-                                "properties": {"pixelSize": 100},
-                                "fields": "pixelSize",
-                            }
-                        },
-                    ]
-                )
-
-            # Update data for this chunk if we have any
-            if data_updates:
-                try:
-                    await execute_with_robust_retry(
-                        lambda: service.spreadsheets()
-                        .values()
-                        .batchUpdate(
-                            spreadsheetId=spreadsheet_id,
-                            body={
-                                "valueInputOption": "USER_ENTERED",
-                                "data": data_updates,
-                            },
-                        )
-                        .execute()
-                    )
-                except Exception as e:
-                    print(f"Error updating data for chunk {i//chunk_size + 1}: {e}")
-
-            # Apply formatting for this chunk if we have any
-            if format_requests:
-                try:
-                    await execute_with_robust_retry(
-                        lambda: service.spreadsheets()
-                        .batchUpdate(
-                            spreadsheetId=spreadsheet_id,
-                            body={"requests": format_requests},
-                        )
-                        .execute()
-                    )
-                except Exception as e:
-                    print(
-                        f"Error applying formatting for chunk {i//chunk_size + 1}: {e}"
-                    )
-
-        # Delete Sheet1 if it exists - attempt multiple times
-        if sheet1_id is not None:
-            for attempt in range(3):  # Try 3 times to delete Sheet1
-                try:
-                    await execute_with_robust_retry(
-                        lambda: service.spreadsheets()
-                        .batchUpdate(
-                            spreadsheetId=spreadsheet_id,
-                            body={
-                                "requests": [{"deleteSheet": {"sheetId": sheet1_id}}]
-                            },
-                        )
-                        .execute()
-                    )
-                    break  # If successful, break out of the retry loop
-                except Exception as e:
-                    print(f"Error deleting Sheet1 (attempt {attempt+1}/3): {e}")
-                    if attempt == 2:  # If this was the last attempt
-                        print("Failed to delete Sheet1 after multiple attempts")
-
-        # Set permissions
-        try:
-            await execute_with_robust_retry(
-                lambda: drive_service.permissions()
-                .create(
-                    fileId=spreadsheet_id, body={"type": "anyone", "role": "writer"}
-                )
-                .execute()
-            )
-        except Exception as e:
-            print(f"Error setting permissions: {e}")
-            # We'll return the URL anyway since the sheet is created
-
-        return {"google_sheet_url": sheet_url}
-
-    except Exception as err:
-        print(f"Unexpected error: {err}")
-        raise HTTPException(
-            status_code=500, detail=f"Error creating Google Sheet: {str(err)}"
+        operations_status["database_update"] = "✓ Order updated in database"
+        
+        # Step 3: Create sheets and add data (SEMI-CRITICAL)
+        print("📋 Adding sheets and data...")
+        
+        brand_data = prepare_brand_data(brands, customer, special_margins)
+        sorted_brands = sorted(brand_data.keys())
+        
+        # Create sheets
+        sheet_requests = [
+            {"addSheet": {"properties": {"title": brand}}}
+            for brand in sorted_brands
+        ]
+        sheet_requests.append({"deleteSheet": {"sheetId": 0}})  # Remove Sheet1
+        
+        batch_response, error = await safe_execute(
+            "Creating brand sheets",
+            lambda: sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": sheet_requests}
+            ).execute(),
+            critical=False
         )
+        
+        if batch_response:
+            operations_status["sheets_creation"] = f"✓ Created {len(sorted_brands)} brand sheets"
+            
+            # Map brand names to sheet IDs
+            brand_sheets = {}
+            for i, brand in enumerate(sorted_brands):
+                brand_sheets[brand] = batch_response["replies"][i]["addSheet"]["properties"]["sheetId"]
+            
+            # Add data to sheets
+            data_updates = []
+            all_format_requests = []
+            
+            for brand_name in sorted_brands:
+                sheet_id = brand_sheets[brand_name]
+                rows = brand_data[brand_name]
+                
+                data_updates.append({
+                    "range": f"{brand_name}!A1:L{len(rows)}",
+                    "values": rows
+                })
+                
+                format_requests = create_format_requests(sheet_id, len(rows))
+                all_format_requests.extend(format_requests)
+            
+            # Add data
+            data_result, error = await safe_execute(
+                "Adding data to sheets",
+                lambda: sheets_service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={
+                        "valueInputOption": "USER_ENTERED",
+                        "data": data_updates,
+                    },
+                ).execute(),
+                critical=False
+            )
+            
+            if data_result:
+                operations_status["data_population"] = "✓ Data added to all sheets"
+            else:
+                operations_status["data_population"] = f"✗ Data population failed: {error}"
+            
+            # Format sheets
+            format_result, error = await safe_execute(
+                "Formatting sheets",
+                lambda: sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": all_format_requests},
+                ).execute(),
+                critical=False
+            )
+            
+            if format_result:
+                operations_status["formatting"] = "✓ Sheets formatted successfully"
+            else:
+                operations_status["formatting"] = f"✗ Formatting failed: {error}"
+        else:
+            operations_status["sheets_creation"] = f"✗ Failed to create sheets: {error}"
+        
+        # Step 4: Set permissions (NON-CRITICAL)
+        print("🔐 Setting permissions...")
+        
+        permission_status = await try_set_permissions(drive_service, spreadsheet_id, user_email)
+        operations_status["permissions"] = permission_status
+        
+        # Determine if we have any working access method
+        has_access = any(status.startswith("success") for status in permission_status.values())
+        
+        response_data = {
+            "google_sheet_url": sheet_url,
+            "spreadsheet_id": spreadsheet_id,
+            "status": "success",
+            "operations": operations_status,
+            "access_methods": permission_status,
+            "message": f"Order form created with {len(sorted_brands)} brand sheets"
+        }
+        
+        if not has_access:
+            response_data["warning"] = "Sheet created but permission setting failed. You may need to manually share the sheet."
+            response_data["manual_access_instructions"] = [
+                f"1. Open {sheet_url}",
+                "2. Click 'Share' button in top right",
+                "3. Change 'Restricted' to 'Anyone with the link'",
+                "4. Set permission to 'Editor'",
+                "5. Click 'Done'"
+            ]
+        
+        print("✅ Order form creation completed")
+        return response_data
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Log the full error for debugging
+        print(f"❌ Unexpected error: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        
+        # If we have a sheet URL, return it with error details
+        if sheet_url:
+            return {
+                "google_sheet_url": sheet_url,
+                "spreadsheet_id": spreadsheet_id,
+                "status": "partial_success",
+                "error": str(e),
+                "operations": operations_status,
+                "message": "Sheet was created but some operations failed. Check the sheet manually."
+            }
+        else:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to create order form: {str(e)}"
+            )
+async def read_sheet_with_retry(service, spreadsheet_id: str, sheet_title: str, max_retries: int = 3, 
+                               initial_delay: float = 1.0, backoff_factor: float = 2.0) -> Tuple[Optional[dict], Optional[str]]:
+    """
+    Read a single sheet with exponential backoff retry logic
+    """
+    last_error = None
+    delay = initial_delay
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"Reading sheet '{sheet_title}' (attempt {attempt + 1}/{max_retries})")
+            
+            result = await safe_execute(
+                f"Reading sheet {sheet_title}",
+                lambda: service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id, 
+                    range=f"{sheet_title}!A1:L"
+                ).execute(),
+                critical=False
+            )
+            
+            data, error = result
+            if not error:
+                print(f"✓ Successfully read sheet '{sheet_title}'")
+                return data, None
+            
+            last_error = error
+            print(f"✗ Attempt {attempt + 1} failed for sheet '{sheet_title}': {error}")
+            
+        except Exception as e:
+            last_error = str(e)
+            print(f"✗ Attempt {attempt + 1} failed for sheet '{sheet_title}': {e}")
+        
+        # Wait before retry (except on last attempt)
+        if attempt < max_retries - 1:
+            print(f"Waiting {delay:.1f}s before retry...")
+            await asyncio.sleep(delay)
+            delay *= backoff_factor
+    
+    return None, f"Failed after {max_retries} attempts: {last_error}"
 
+async def read_sheets_batch(service, spreadsheet_id: str, sheet_titles: List[str], 
+                           batch_size: int = 3, max_concurrent: int = 2) -> List[Tuple[str, Optional[dict], Optional[str]]]:
+    """
+    Read sheets in smaller batches to avoid overwhelming the API and network
+    """
+    results = []
+    
+    # Process sheets in batches
+    for i in range(0, len(sheet_titles), batch_size):
+        batch = sheet_titles[i:i + batch_size]
+        print(f"Processing batch {i//batch_size + 1}: {batch}")
+        
+        # Limit concurrent requests within each batch
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def read_with_semaphore(title):
+            async with semaphore:
+                data, error = await read_sheet_with_retry(service, spreadsheet_id, title)
+                return title, data, error
+        
+        batch_tasks = [read_with_semaphore(title) for title in batch]
+        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        
+        for result in batch_results:
+            if isinstance(result, Exception):
+                # Handle any unexpected exceptions
+                results.append((f"unknown_sheet", None, str(result)))
+            else:
+                results.append(result)
+        
+        # Small delay between batches to be gentle on the API
+        if i + batch_size < len(sheet_titles):
+            await asyncio.sleep(0.5)
+    
+    return results
+def process_sheet_data_fast(values: List[List], sheet_name: str, products_cache: Dict) -> tuple[List[Dict], List[str]]:
+    """
+    Optimized sheet data processing with pre-cached products
+    """
+    updated_products = []
+    processing_errors = []
+    
+    if len(values) < 2:
+        return updated_products, [f"Sheet {sheet_name}: No data rows found"]
+        
+    headers = values[0]
+    
+    # Find required columns
+    try:
+        sku_idx = headers.index("SKU")
+        quantity_idx = headers.index("Quantity")
+        name_idx = headers.index("Name") if "Name" in headers else -1
+        margin_idx = headers.index("Margin") if "Margin" in headers else -1
+    except ValueError as e:
+        return updated_products, [f"Sheet {sheet_name}: Missing required columns - {str(e)}"]
+    
+    # Process rows in batches for better performance
+    valid_rows = []
+    for row_num, row in enumerate(values[1:], start=2):
+        # Quick validation
+        if (len(row) <= max(quantity_idx, sku_idx) or 
+            not row[quantity_idx].strip() or 
+            not row[sku_idx].strip()):
+            continue
+        
+        try:
+            quantity = int(float(row[quantity_idx].strip()))
+            if quantity <= 0:
+                continue
+                
+            valid_rows.append((row_num, row, quantity))
+        except ValueError:
+            processing_errors.append(f"Sheet {sheet_name} row {row_num}: Invalid quantity")
+    
+    # Process valid rows with cached products
+    for row_num, row, quantity in valid_rows:
+        try:
+            product_sku = row[sku_idx].strip()
+            
+            # Use cached product lookup instead of database query
+            product = products_cache.get(product_sku)
+            if not product:
+                processing_errors.append(f"Sheet {sheet_name} row {row_num}: Product not found for SKU '{product_sku}'")
+                continue
+            
+            # Extract additional data safely
+            product_name = row[name_idx] if name_idx >= 0 and len(row) > name_idx else ""
+            margin = row[margin_idx] if margin_idx >= 0 and len(row) > margin_idx else ""
+            
+            # Create product entry
+            updated_products.append({
+                "product_id": ObjectId(product["_id"]),
+                "tax_percentage": product.get("item_tax_preferences", [{}])[0].get("tax_percentage", 0),
+                "brand": product.get("brand", "Unknown"),
+                "product_code": product_sku,
+                "quantity": quantity,
+                "name": product_name or product.get("name", ""),
+                "image_url": product.get("image_url"),
+                "margin": margin,
+                "price": float(product.get("rate", 0)),
+                "added_by": "sales_person",
+            })
+            
+        except Exception as e:
+            processing_errors.append(f"Sheet {sheet_name} row {row_num}: Processing error - {str(e)}")
+            continue
+    
+    return updated_products, processing_errors
+
+async def fallback_individual_read(order_id: str, spreadsheet_id: str, sheet_titles: List[str], products_cache: Dict, service):
+    """
+    Fallback method: Read sheets individually if batch read fails
+    """
+    print("🔄 Using fallback individual read method")
+    start_time = time.time()
+    
+    all_updated_products = []
+    all_processing_errors = []
+    successful_sheets = 0
+    
+    for sheet_title in sheet_titles:
+        try:
+            # Read individual sheet
+            escaped_title = f"'{sheet_title}'" if " " in sheet_title or "'" in sheet_title else sheet_title
+            sheet_data, error = await robust_api_call(
+                f"Reading {sheet_title}",
+                lambda: service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{escaped_title}!A1:L1000"
+                ).execute()
+            )
+            
+            if not sheet_data:
+                all_processing_errors.append(f"Sheet {sheet_title}: {error}")
+                continue
+            
+            values = sheet_data.get("values", [])
+            if values:
+                sheet_products, sheet_errors = process_sheet_data_fast(
+                    values, sheet_title, products_cache
+                )
+                
+                all_updated_products.extend(sheet_products)
+                all_processing_errors.extend(sheet_errors)
+                
+                if sheet_products:
+                    successful_sheets += 1
+                    print(f"✅ {sheet_title}: {len(sheet_products)} products")
+            
+        except Exception as e:
+            all_processing_errors.append(f"Sheet {sheet_title}: Exception - {str(e)}")
+    
+    if not all_updated_products:
+        error_summary = "; ".join(all_processing_errors[:5])
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Fallback method failed - No valid products found. Errors: {error_summary}"
+        )
+    
+    # Update database
+    db.orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {
+            "$set": {
+                "products": all_updated_products, 
+                "updated_from_sheet": True,
+                "last_sheet_update": datetime.now()
+            }
+        },
+    )
+    
+    processing_time = round(time.time() - start_time, 2)
+    
+    return {
+        "message": "Order updated successfully (fallback method)",
+        "products_count": len(all_updated_products),
+        "sheets_processed": len(sheet_titles),
+        "successful_sheets": successful_sheets,
+        "processing_time_seconds": processing_time,
+        "method": "fallback_individual",
+        "updated_products": serialize_mongo_document(all_updated_products),
+        "warnings": all_processing_errors[:5] if all_processing_errors else []
+    }
 
 @router.get("/update_cart")
 async def update_order_from_sheet(order_id: str):
-    # Fetch order details from DB
+    """
+    Fast and reliable update order from spreadsheet using proper batch operations
+    """
+    
+    # Validate order
     order = db.orders.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
     spreadsheet_url = order.get("spreadsheet_url", "")
     if not spreadsheet_url:
-        raise HTTPException(
-            status_code=400, detail="No spreadsheet associated with order"
-        )
+        raise HTTPException(status_code=400, detail="No spreadsheet associated with order")
 
+    # Extract spreadsheet ID
     try:
         spreadsheet_id = spreadsheet_url.split("/d/")[1].split("/")[0]
     except IndexError:
         raise HTTPException(status_code=400, detail="Invalid spreadsheet URL")
 
+    print(f"🚀 Starting fast cart update for order {order_id}")
+    start_time = time.time()
+    
     try:
-        service = get_sheets_service()
-
-        # Get all sheets in the spreadsheet
-        spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        sheet_titles = [sheet["properties"]["title"] for sheet in spreadsheet["sheets"]]
-
-        updated_products = []
-
-        for sheet_title in sheet_titles:
-            sheet_data = (
-                service.spreadsheets()
-                .values()
-                .get(spreadsheetId=spreadsheet_id, range=f"{sheet_title}!A1:J")
-                .execute()
+        service = create_fresh_sheets_service()
+        
+        # Step 1: Get spreadsheet info and product cache in parallel
+        spreadsheet_task = robust_api_call(
+            "Reading spreadsheet info",
+            lambda: service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        )
+        
+        # Pre-load all active products into memory
+        products_task = asyncio.create_task(
+            asyncio.to_thread(
+                lambda: {
+                    product["cf_sku_code"]: product 
+                    for product in db.products.find({"status": "active"})
+                    if product.get("cf_sku_code")
+                }
             )
-
+        )
+        
+        spreadsheet_result, products_cache = await asyncio.gather(
+            spreadsheet_task, products_task
+        )
+        
+        spreadsheet_info, error = spreadsheet_result
+        if not spreadsheet_info:
+            raise HTTPException(status_code=500, detail=f"Cannot access spreadsheet: {error}")
+        
+        sheet_titles = [sheet["properties"]["title"] for sheet in spreadsheet_info["sheets"]]
+        print(f"📊 Found {len(sheet_titles)} sheets, {len(products_cache)} products cached")
+        
+        # Step 2: Create proper ranges for batch reading
+        ranges = []
+        for title in sheet_titles:
+            # Properly escape sheet names with spaces or special characters
+            escaped_title = f"'{title}'" if " " in title or "'" in title else title
+            ranges.append(f"{escaped_title}!A1:L1000")
+        
+        print(f"📋 Reading ranges: {ranges}")
+        
+        # Step 3: Batch read all sheets
+        batch_data, error = await robust_api_call(
+            "Batch reading all sheets",
+            lambda: service.spreadsheets().values().batchGet(
+                spreadsheetId=spreadsheet_id,
+                ranges=ranges,
+                majorDimension="ROWS"
+            ).execute()
+        )
+        
+        if not batch_data:
+            raise HTTPException(status_code=500, detail=f"Failed to read sheets: {error}")
+        
+        print(f"📊 Batch data keys: {list(batch_data.keys())}")
+        
+        # Debug: Check what we actually got
+        value_ranges = batch_data.get("valueRanges", [])
+        print(f"📋 Got {len(value_ranges)} value ranges")
+        
+        if not value_ranges:
+            # Fallback: Try reading sheets individually if batch failed
+            print("⚠️ Batch read returned no data, falling back to individual reads")
+            return await fallback_individual_read(order_id, spreadsheet_id, sheet_titles, products_cache, service)
+        
+        # Step 4: Process all sheets data efficiently
+        all_updated_products = []
+        all_processing_errors = []
+        successful_sheets = 0
+        
+        for i, sheet_data in enumerate(value_ranges):
+            sheet_title = sheet_titles[i] if i < len(sheet_titles) else f"Sheet_{i+1}"
             values = sheet_data.get("values", [])
-            if not values or len(values) < 2:
-                continue  # Skip empty sheets
-
-            headers = values[0]
-            col_indices = {
-                "image_url": headers.index("Image") if "Image" in headers else -1,
-                "name": headers.index("Name") if "Name" in headers else -1,
-                "sub_category": (
-                    headers.index("Sub Category") if "Sub Category" in headers else -1
-                ),
-                "series": headers.index("Series") if "Series" in headers else -1,
-                "sku": headers.index("SKU") if "SKU" in headers else -1,
-                "price": headers.index("Price") if "Price" in headers else -1,
-                "stock": headers.index("Stock") if "Stock" in headers else -1,
-                "upc_code": headers.index("UPC Code") if "UPC Code" in headers else -1,
-                "margin": headers.index("Margin") if "Margin" in headers else -1,
-                "selling_price": (
-                    headers.index("Selling Price") if "Selling Price" in headers else -1
-                ),
-                "quantity": headers.index("Quantity") if "Quantity" in headers else -1,
-                "total": headers.index("Total") if "Total" in headers else -1,
-            }
-
-            # Ensure required fields exist
-            if col_indices["sku"] == -1 or col_indices["quantity"] == -1:
+            
+            print(f"📖 Processing {sheet_title}: {len(values)} rows")
+            
+            if not values:
+                all_processing_errors.append(f"Sheet {sheet_title}: No data found")
                 continue
-
-            for row in values[1:]:
-                if (
-                    len(row) > col_indices["quantity"]
-                    and row[col_indices["quantity"]].strip()
-                ):
-                    try:
-                        quantity = int(row[col_indices["quantity"]].strip())
-                        if quantity > 0:
-                            product_sku = row[col_indices["sku"]]
-                            product = db.products.find_one(
-                                {"cf_sku_code": product_sku, "status": "active"}
-                            )
-
-                            if product:
-                                updated_products.append(
-                                    {
-                                        "product_id": ObjectId(product["_id"]),
-                                        "tax_percentage": product.get(
-                                            "item_tax_preferences", [{}]
-                                        )[0].get("tax_percentage", 0),
-                                        "brand": product.get("brand", "Unknown"),
-                                        "product_code": product_sku,
-                                        "quantity": quantity,
-                                        "name": row[col_indices["name"]],
-                                        "image_url": product.get("image_url"),
-                                        "margin": row[col_indices["margin"]],
-                                        "price": float(product.get("rate", 0)),
-                                        "added_by": "sales_person",
-                                    }
-                                )
-                    except ValueError:
-                        continue  # Ignore invalid quantity values
-        if not updated_products:
-            raise HTTPException(
-                status_code=400, detail="No products with quantities found"
+            
+            # Process this sheet's data with pre-cached products
+            sheet_products, sheet_errors = process_sheet_data_fast(
+                values, sheet_title, products_cache
             )
-        print(json.dumps(serialize_mongo_document(updated_products), indent=4))
-
-        # Update the order in the database
+            
+            all_updated_products.extend(sheet_products)
+            all_processing_errors.extend(sheet_errors)
+            
+            if sheet_products:
+                successful_sheets += 1
+                print(f"✅ {sheet_title}: Found {len(sheet_products)} products")
+            else:
+                print(f"⚠️ {sheet_title}: No valid products found")
+        
+        # Step 5: Validate results
+        if not all_updated_products:
+            error_summary = "; ".join(all_processing_errors[:3])
+            print(f"❌ No products found. Errors: {error_summary}")
+            print(f"📊 Debug info - Sheets processed: {len(value_ranges)}, Products cache size: {len(products_cache)}")
+            
+            # Additional debugging
+            debug_info = {
+                "sheets_found": len(sheet_titles),
+                "value_ranges_returned": len(value_ranges),
+                "products_cache_size": len(products_cache),
+                "sample_sheet_data": {}
+            }
+            
+            # Show sample data from first sheet for debugging
+            if value_ranges and len(value_ranges) > 0:
+                sample_values = value_ranges[0].get("values", [])
+                debug_info["sample_sheet_data"] = {
+                    "first_sheet_rows": len(sample_values),
+                    "first_few_rows": sample_values[:3] if sample_values else []
+                }
+            
+            raise HTTPException(
+                status_code=400, 
+                detail=f"No valid products found. Errors: {error_summary}. Debug: {debug_info}"
+            )
+        
+        processing_time = round(time.time() - start_time, 2)
+        print(f"⚡ Processed {len(all_updated_products)} products in {processing_time}s")
+        
+        # Step 6: Update database
         db.orders.update_one(
             {"_id": ObjectId(order_id)},
-            {"$set": {"products": updated_products, "updated_from_sheet": True}},
+            {
+                "$set": {
+                    "products": all_updated_products, 
+                    "updated_from_sheet": True,
+                    "last_sheet_update": datetime.now()
+                }
+            },
         )
-
-        return {
+        
+        # Step 7: Prepare response
+        response = {
             "message": "Order updated successfully",
-            "updated_products": serialize_mongo_document(updated_products),
+            "products_count": len(all_updated_products),
+            "sheets_processed": len(sheet_titles),
+            "successful_sheets": successful_sheets,
+            "processing_time_seconds": processing_time,
+            "updated_products": serialize_mongo_document(all_updated_products),
         }
-
+        
+        if all_processing_errors:
+            response["warnings"] = all_processing_errors[:5]  # Limit warnings
+            response["total_warnings"] = len(all_processing_errors)
+        
+        print(f"🎉 Cart update completed in {processing_time}s")
+        return response
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        print(str(e))
-        raise HTTPException(
-            status_code=500, detail=f"Error reading spreadsheet: {str(e)}"
-        )
-
+        print(f"💥 Error in update_order_from_sheet: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reading spreadsheet: {str(e)}")
 
 # Get an order by ID
 @router.get("/{order_id}")
