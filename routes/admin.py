@@ -1925,7 +1925,176 @@ async def update_brand_image(file: UploadFile = File(...), brand_name: str = For
         print(f"Database update error for brand '{brand_name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
 
+@router.put("/products/{product_id}")
+async def update_product(
+    product_id: str,
+    name: Optional[str] = Form(None),
+    brand: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    sub_category: Optional[str] = Form(None),
+    series: Optional[str] = Form(None),
+    cf_sku_code: Optional[str] = Form(None),
+    rate: Optional[float] = Form(None),
+    stock: Optional[int] = Form(None),
+    status: Optional[str] = Form(None),
+    catalogue_order: Optional[int] = Form(None),
+    files: Optional[List[UploadFile]] = File(None),
+    replace_images: Optional[bool] = Form(False)  # Whether to replace all images or append
+):
+    """
+    Update a product by ID with the provided fields and optionally upload multiple images.
+    
+    Parameters:
+    - replace_images: If True, replaces all existing images. If False, appends new images.
+    """
+    try:
+        # Validate ObjectId format
+        if not ObjectId.is_valid(product_id):
+            raise HTTPException(status_code=400, detail="Invalid product ID format")
 
+        # Convert string ID to ObjectId
+        object_id = ObjectId(product_id)
+
+        # Check if product exists
+        existing_product = products_collection.find_one({"_id": object_id})
+        if not existing_product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Prepare update data for product fields
+        update_dict = {}
+        
+        # Build update dict from form fields
+        form_data = {
+            "name": name,
+            "brand": brand, 
+            "category": category,
+            "sub_category": sub_category,
+            "series": series,
+            "cf_sku_code": cf_sku_code,
+            "rate": rate,
+            "stock": stock,
+            "status": status,
+            "catalogue_order": catalogue_order
+        }
+        
+        for field, value in form_data.items():
+            if value is not None:
+                update_dict[field] = value
+
+        # Handle image uploads if files are provided
+        uploaded_image_urls = []
+        if files:
+            # Limit number of files
+            if len(files) > 10:
+                raise HTTPException(
+                    status_code=400, detail="Maximum 10 files allowed per upload."
+                )
+
+            for file in files:
+                # Validate file type
+                if not file.content_type.startswith("image/"):
+                    continue  # Skip non-image files
+
+                # Validate file size
+                file.file.seek(0, 2)
+                file_size = file.file.tell()
+                file.file.seek(0)
+
+                if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                    continue  # Skip oversized files
+
+                # Generate unique filename
+                file_extension = os.path.splitext(file.filename)[1]
+                timestamp = int(time.time() * 1000)
+                unique_filename = (
+                    f"product_images/{existing_product.get('item_id')}_{timestamp}_{file.filename}"
+                )
+
+                try:
+                    # Upload to S3
+                    s3_client.upload_fileobj(
+                        file.file,
+                        AWS_S3_BUCKET_NAME,
+                        unique_filename,
+                        ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+                    )
+
+                    # Construct S3 URL
+                    s3_url = f"{AWS_S3_URL}/{unique_filename}"
+                    uploaded_image_urls.append(s3_url)
+
+                except Exception as upload_error:
+                    print(f"Error uploading file {file.filename}: {upload_error}")
+                    continue  # Skip this file and continue with others
+
+                finally:
+                    file.file.close()
+
+            # Update images array
+            if uploaded_image_urls:
+                current_images = existing_product.get("images", [])
+                
+                if replace_images:
+                    # Replace all existing images
+                    update_dict["images"] = uploaded_image_urls
+                else:
+                    # Append new images to existing ones
+                    update_dict["images"] = current_images + uploaded_image_urls
+
+        # Add updated_at timestamp
+        update_dict["updated_at"] = datetime.now()
+
+        # Perform the update
+        if update_dict:  # Only update if there are fields to update
+            result = products_collection.update_one(
+                {"_id": object_id},
+                {"$set": update_dict}
+            )
+
+            if result.modified_count == 0:
+                return JSONResponse({
+                    "message": "No changes were made to the product",
+                    "product_id": product_id
+                })
+
+        # Fetch and return the updated product
+        updated_product = products_collection.find_one({"_id": object_id})
+        serialized_product = serialize_mongo_document(updated_product)
+
+        response_data = {
+            "message": "Product updated successfully",
+            "product": serialized_product
+        }
+
+        # Add upload summary if images were processed
+        if files:
+            response_data["upload_summary"] = {
+                "uploaded_images_count": len(uploaded_image_urls),
+                "uploaded_images": uploaded_image_urls,
+                "replace_mode": replace_images
+            }
+
+        return JSONResponse(response_data)
+
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 400, 404)
+        raise
+    except NoCredentialsError:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured.")
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail="Error uploading files to S3.")
+    except Exception as e:
+        print(f"Error updating product {product_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    finally:
+        # Ensure all file handles are closed
+        if files:
+            for file in files:
+                if hasattr(file, "file") and not file.file.closed:
+                    file.file.close()
+
+
+    
 router.include_router(
     admin_special_margins_router,
     prefix="/customer/special_margins",
