@@ -514,7 +514,7 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> D
     for brand_name, products in brands.items():
         rows = [[
             "Image", "Name", "Sub Category", "Series", "SKU", 
-            "Stock", "UPC Code", "Price", "Margin", "Selling Price", 
+            "Stock", "UPC/EAN Code", "Price", "Margin", "Selling Price", 
             "Quantity", "Total"
         ]]
         
