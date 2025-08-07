@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import re
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from bson import ObjectId
 from Crypto.Signature import PKCS1_v1_5
 from Crypto.Hash import SHA  # Note: This is SHA1, not SHA256

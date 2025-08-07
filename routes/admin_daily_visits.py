@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
 from dotenv import load_dotenv

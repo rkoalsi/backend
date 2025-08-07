@@ -5,7 +5,7 @@ from fastapi import (
     Body,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, openpyxl, io

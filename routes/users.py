@@ -1,15 +1,11 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.responses import HTMLResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
-from bson import ObjectId
-import smtplib, os
-from email.mime.text import MIMEText
+import os
 
 router = APIRouter()
 
@@ -67,35 +63,57 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# Helper function to send reset email
 def send_reset_email(to_email: str, reset_link: str):
-    subject = "Password Reset Request"
-    body = f"""
-    Hi,
-
-    You requested a password reset. Click the link below to reset your password:
-
-    {reset_link}
-
-    If you did not request this, please ignore this email.
-
-    Thanks,
-    Pupscribe Team
-    """
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = RESET_EMAIL_SENDER
-    msg["To"] = to_email
+    """Simple HTTP-based email sending."""
+    import requests
+    
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "from": "no-reply@no-reply.pupscribe.in",
+        "to": [to_email],
+        "subject": "Password Reset Request",
+        "html": f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">Password Reset Request</h2>
+                <p>You requested a password reset for your Order Form account.</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="{reset_link}" 
+                       style="background-color: #007bff; color: white; padding: 12px 30px; 
+                              text-decoration: none; border-radius: 5px; display: inline-block;">
+                        Reset Your Password
+                    </a>
+                </div>
+                <p style="color: #666; font-size: 14px;">
+                    If you did not request this reset, please ignore this email.
+                    This link will expire in 24 hours.
+                </p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px;">
+                    Thanks,<br>The Pupscribe Team
+                </p>
+            </div>
+            """
+    }
+    
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(RESET_EMAIL_SENDER, [to_email], msg.as_string())
-    except Exception as e:
-        print(f"Error sending email: {e}")
-        raise HTTPException(status_code=500, detail="Failed to send reset email")
-
-
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
+        print(f"✅ Email sent! ID: {result.get('id')}")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ HTTP request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        return False
+    
 # Pydantic models
 class UserCreate(BaseModel):
     email: EmailStr

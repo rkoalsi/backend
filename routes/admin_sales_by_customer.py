@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from dotenv import load_dotenv
 import os
 from typing import List, Dict, Optional

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from backend.config.root import connect_to_mongo  # type: ignore
+from config.root import connect_to_mongo  
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import os, requests

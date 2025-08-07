@@ -2,7 +2,7 @@ from fastapi import (
     APIRouter,
     HTTPException,
 )
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from bson.objectid import ObjectId
 import re, os
 from dotenv import load_dotenv

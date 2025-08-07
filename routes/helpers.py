@@ -8,7 +8,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
-from backend.config.whatsapp import send_whatsapp  # type:ignore
+from config.whatsapp import send_whatsapp 
 
 load_dotenv()
 org_id = os.getenv("ORG_ID")

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import JSONResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
-from backend.config.constants import GST_STATE_CODES, STATE_CODES  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document 
+from config.constants import GST_STATE_CODES, STATE_CODES 
 import re, requests, os, json, time
 from bson.objectid import ObjectId
 from dotenv import load_dotenv

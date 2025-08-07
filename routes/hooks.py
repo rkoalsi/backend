@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Body, status, Query
 from bson import ObjectId
 import pytz, logging
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from datetime import datetime
 
 router = APIRouter()
