@@ -1345,7 +1345,6 @@ def update_existing_order(order_id: str, order_update: dict):
     """
     Update an existing order with raw dictionary data.
     """
-    print(order_update)
     update_order(order_id, order_update, orders_collection, customers_collection)
     updated_order = get_order(order_id, orders_collection)
     if not updated_order:
@@ -1527,8 +1526,6 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            # estimate_response.raise_for_status()
-            print(estimate_response.json())
             estimate_data = estimate_response.json()["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
