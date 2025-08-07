@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Query, HTTPException
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo import DESCENDING
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
-from backend.config.whatsapp import send_whatsapp  # type: ignore
+from config.whatsapp import send_whatsapp
 
 router = APIRouter()
 

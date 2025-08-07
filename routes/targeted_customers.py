@@ -1,7 +1,7 @@
 from fastapi import (
     APIRouter,
 )
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, pytz, datetime

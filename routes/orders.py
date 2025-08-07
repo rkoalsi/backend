@@ -2,15 +2,15 @@ from types import NoneType
 from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
-from .helpers import get_access_token, send_email
+from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket
 from dotenv import load_dotenv
 from fastapi.responses import Response
-from backend.config.constants import terms, STATE_CODES  # type: ignore
-from backend.config.whatsapp import send_whatsapp  # type:ignore
+from config.constants import terms, STATE_CODES 
+from config.whatsapp import send_whatsapp 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials

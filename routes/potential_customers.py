@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Body, status
 from bson import ObjectId
 from .helpers import validate_file, process_upload
 import pytz, logging
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from datetime import datetime
 from .helpers import notify_sales_admin
 

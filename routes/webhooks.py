@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
-from backend.config.scheduler import schedule_job, remove_scheduled_jobs  # type: ignore
-from backend.config.whatsapp import send_whatsapp  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document 
+from config.scheduler import schedule_job, remove_scheduled_jobs 
+from config.whatsapp import send_whatsapp 
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
