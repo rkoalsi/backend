@@ -536,7 +536,6 @@ def update_stock():
                     {"$set": {"stock": stock}},
                 )
             )
-            print(f"Prepared update for '{product_name}' with stock: {stock}")
         else:
             print(f"No stock data for product '{product_name}'")
 
