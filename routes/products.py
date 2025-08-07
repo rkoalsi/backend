@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import HTMLResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
 from pymongo import ASCENDING, DESCENDING

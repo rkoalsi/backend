@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Response
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from typing import Optional, List
 from bson import ObjectId
 import re, uuid, boto3, os, requests

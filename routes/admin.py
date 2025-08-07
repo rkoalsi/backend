@@ -8,7 +8,7 @@ from fastapi import (
     Depends,
 )
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document  
 from bson.objectid import ObjectId
 from .helpers import get_access_token
 from typing import Optional, List
@@ -32,7 +32,7 @@ from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
-from backend.config.auth import JWTBearer  # type: ignore
+from config.auth import JWTBearer 
 import pandas as pd
 from io import BytesIO
 from pymongo.errors import OperationFailure

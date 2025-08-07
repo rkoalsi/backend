@@ -20,7 +20,7 @@ from .return_orders import router as return_orders
 from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from .external_links import router as external_links
-from backend.config.auth import JWTBearer  # type: ignore
+from config.auth import JWTBearer 
 
 router = APIRouter()
 

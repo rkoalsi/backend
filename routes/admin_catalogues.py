@@ -6,7 +6,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
-from backend.config.root import connect_to_mongo, serialize_mongo_document  # type: ignore
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import boto3, uuid, os
