@@ -12,6 +12,7 @@ logger.propagate = False
 
 client, db = connect_to_mongo()
 
+
 @router.get("")
 def get_customer_analytics(
     status: Optional[str] = Query(None, description="Filter by invoice status"),
@@ -22,7 +23,7 @@ def get_customer_analytics(
         # Build the match stage dynamically
         match_stage = {
             "date": {"$gte": "2023-04-01"},
-            "status":{"$nin": ["void", "draft"]},
+            "status": {"$nin": ["void", "draft"]},
             "customer_name": {
                 "$not": {
                     "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit",
@@ -32,9 +33,9 @@ def get_customer_analytics(
         }
         customer_status_match_stage = {}
         sort_stage = {"$sort": {"totalSalesCurrentMonth": 1}}
-        
+
         # Add status filter if provided, otherwise use default exclusions
-        if status == 'all':
+        if status == "all":
             pass
         elif status:
             customer_status_match_stage["customerDetails.status"] = status
@@ -69,9 +70,9 @@ def get_customer_analytics(
                                     "$salesperson_name",
                                     "$cf_sales_person",
                                 ]
-                            }
+                            },
                         ]
-                    }
+                    },
                 ]
             }
         else:
@@ -727,6 +728,7 @@ def get_customer_analytics(
                 }
             },
             # Stage 8: Sort by customer name and then by billing address
+            {"$sort": {"customerName": 1}},
         ]
 
         customers = list(db.invoices.aggregate(pipeline))
