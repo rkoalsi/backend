@@ -19,6 +19,7 @@ from .return_orders import router as return_orders
 from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from .external_links import router as external_links
+from .customer_analytics import router as customer_analytics
 from config.auth import JWTBearer 
 
 router = APIRouter()
@@ -53,6 +54,8 @@ router.include_router(return_orders, prefix="/return_orders", tags=["Return Reor
 router.include_router(external_links, prefix="/external_links", tags=["External Links"])
 
 router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
+
+router.include_router(customer_analytics, prefix="/customer_analytics", tags=["Customer Analytics"])
 
 
 @router.get("/")
