@@ -16,10 +16,13 @@ client, db = connect_to_mongo()
 @router.get("")
 def get_customer_analytics(
     status: Optional[str] = Query(None, description="Filter by invoice status"),
+    tier: Optional[str] = Query(None, description="Filter by tiers (A,B,C)"),
+    due_status: Optional[str] = Query("all", description="Filter by Payments Due (all, due, not_due)"),
     sp_code: Optional[str] = Query(None, description="Filter by salesperson code"),
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
 ):
     try:
+
         # Build the match stage dynamically
         match_stage = {
             "date": {"$gte": "2023-04-01"},
@@ -85,6 +88,44 @@ def get_customer_analytics(
                 ]
             }
 
+        if tier and len(tier) == 1:
+            customer_status_match_stage["customerDetails.cf_tier"] = {
+                "$regex": f"^{tier}$",
+                "$options": "i",
+            }
+
+        # Get current date for dynamic calculations
+        from datetime import datetime
+
+        current_date = datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+
+        # Calculate current financial year
+        if current_month >= 4:  # April onwards
+            current_fy_start_year = current_year
+        else:  # January-March
+            current_fy_start_year = current_year - 1
+
+        # Calculate last and previous financial years
+        last_fy_start_year = current_fy_start_year - 1
+        previous_fy_start_year = current_fy_start_year - 2
+
+        # Calculate total COMPLETED months passed in current FY (excluding current month)
+        if current_month >= 4:
+            # Same calendar year as FY start
+            completed_months_in_current_fy = (
+                current_month - 4
+            )  # Don't add +1 since we exclude current month
+        else:
+            # Next calendar year (Jan-Mar)
+            completed_months_in_current_fy = (
+                12 - 4
+            ) + current_month  # (Apr-Dec) + (Jan-current month, excluding current)
+
+        # Ensure we have at least 1 month to avoid division by zero
+        completed_months_in_current_fy = max(1, completed_months_in_current_fy)
+
         # Complete aggregation pipeline
         pipeline = [
             # Stage 1: Filter invoices from April 1, 2023 onwards and only paid invoices
@@ -146,7 +187,18 @@ def get_customer_analytics(
                             },
                         ]
                     },
-                    # Check if invoice is in current month (August 2025)
+                    # Add payment categorization logic
+                    "isDuePayment": {
+                        "$not": {
+                            "$in": ["$status", ["void", "draft", "sent", "paid"]]
+                        }
+                    },
+                    "isNotDuePayment": {
+                        "$not": {
+                            "$in": ["$status", ["void", "overdue", "partially_paid"]]
+                        }
+                    },
+                    # Check if invoice is in current month (dynamic)
                     "isCurrentMonth": {
                         "$and": [
                             {
@@ -156,7 +208,7 @@ def get_customer_analytics(
                                             "$dateFromString": {"dateString": "$date"}
                                         }
                                     },
-                                    2025,
+                                    current_year,
                                 ]
                             },
                             {
@@ -166,74 +218,160 @@ def get_customer_analytics(
                                             "$dateFromString": {"dateString": "$date"}
                                         }
                                     },
-                                    8,
+                                    current_month,
                                 ]
                             },
                         ]
                     },
-                    # Check if invoice is in completed months (April-July 2025)
+                    # Check if invoice is in completed months (dynamic: current FY start to last month)
                     "isCompletedMonth": {
-                        "$and": [
-                            {
-                                "$eq": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    2025,
-                                ]
-                            },
-                            {
-                                "$gte": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    4,
-                                ]
-                            },
-                            {
-                                "$lte": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    7,
-                                ]
-                            },
-                        ]
+                        "$or": (
+                            [
+                                # Same FY year, from April to previous month
+                                {
+                                    "$and": [
+                                        {
+                                            "$eq": [
+                                                {
+                                                    "$year": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_fy_start_year,
+                                            ]
+                                        },
+                                        {
+                                            "$gte": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                4,
+                                            ]
+                                        },
+                                        {
+                                            "$lt": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_month,
+                                            ]
+                                        },
+                                    ]
+                                },
+                                # Next calendar year (if current month is Jan-Mar), from Jan to previous month
+                                {
+                                    "$and": [
+                                        {
+                                            "$eq": [
+                                                {
+                                                    "$year": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_fy_start_year + 1,
+                                            ]
+                                        },
+                                        {
+                                            "$gte": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                1,
+                                            ]
+                                        },
+                                        {
+                                            "$lt": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_month,
+                                            ]
+                                        },
+                                        {
+                                            "$lte": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                3,
+                                            ]
+                                        },
+                                    ]
+                                },
+                            ]
+                            if current_month > 4
+                            else [
+                                # If current month is April or earlier, only check same calendar year
+                                {
+                                    "$and": [
+                                        {
+                                            "$eq": [
+                                                {
+                                                    "$year": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_fy_start_year,
+                                            ]
+                                        },
+                                        {
+                                            "$gte": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                4,
+                                            ]
+                                        },
+                                        {
+                                            "$lt": [
+                                                {
+                                                    "$month": {
+                                                        "$dateFromString": {
+                                                            "dateString": "$date"
+                                                        }
+                                                    }
+                                                },
+                                                current_month,
+                                            ]
+                                        },
+                                    ]
+                                }
+                            ]
+                        )
                     },
-                    # Check if invoice is in current financial year (April 2025 onwards)
+                    # Check if invoice is in current financial year (dynamic)
                     "isCurrentFY": {
-                        "$and": [
-                            {
-                                "$gte": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    2025,
-                                ]
-                            },
-                            {
-                                "$gte": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    4,
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in last financial year (April 2024 - March 2025)
-                    "isLastFY": {
                         "$or": [
+                            # From April onwards in FY start year
                             {
                                 "$and": [
                                     {
@@ -245,7 +383,7 @@ def get_customer_analytics(
                                                     }
                                                 }
                                             },
-                                            2024,
+                                            current_fy_start_year,
                                         ]
                                     },
                                     {
@@ -262,6 +400,7 @@ def get_customer_analytics(
                                     },
                                 ]
                             },
+                            # Jan-Mar in next calendar year (if FY spans two calendar years)
                             {
                                 "$and": [
                                     {
@@ -273,7 +412,7 @@ def get_customer_analytics(
                                                     }
                                                 }
                                             },
-                                            2025,
+                                            current_fy_start_year + 1,
                                         ]
                                     },
                                     {
@@ -292,8 +431,8 @@ def get_customer_analytics(
                             },
                         ]
                     },
-                    # Check if invoice is in previous financial year (April 2023 - March 2024)
-                    "isPreviousFY": {
+                    # Check if invoice is in last financial year (dynamic)
+                    "isLastFY": {
                         "$or": [
                             {
                                 "$and": [
@@ -306,7 +445,7 @@ def get_customer_analytics(
                                                     }
                                                 }
                                             },
-                                            2023,
+                                            last_fy_start_year,
                                         ]
                                     },
                                     {
@@ -334,7 +473,68 @@ def get_customer_analytics(
                                                     }
                                                 }
                                             },
-                                            2024,
+                                            last_fy_start_year + 1,
+                                        ]
+                                    },
+                                    {
+                                        "$lte": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            3,
+                                        ]
+                                    },
+                                ]
+                            },
+                        ]
+                    },
+                    # Check if invoice is in previous financial year (dynamic)
+                    "isPreviousFY": {
+                        "$or": [
+                            {
+                                "$and": [
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            previous_fy_start_year,
+                                        ]
+                                    },
+                                    {
+                                        "$gte": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            4,
+                                        ]
+                                    },
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            previous_fy_start_year + 1,
                                         ]
                                     },
                                     {
@@ -431,8 +631,8 @@ def get_customer_analytics(
                             "default": {"$toLower": "$billing_address.city"},
                         }
                     },
-                    # Billing period validations
-                    # Last month (July 2025)
+                    # Billing period validations (dynamic)
+                    # Last month (previous month from current)
                     "billedLastMonth": {
                         "$and": [
                             {
@@ -442,7 +642,11 @@ def get_customer_analytics(
                                             "$dateFromString": {"dateString": "$date"}
                                         }
                                     },
-                                    2025,
+                                    (
+                                        current_year
+                                        if current_month > 1
+                                        else current_year - 1
+                                    ),
                                 ]
                             },
                             {
@@ -452,84 +656,197 @@ def get_customer_analytics(
                                             "$dateFromString": {"dateString": "$date"}
                                         }
                                     },
-                                    7,
+                                    current_month - 1 if current_month > 1 else 12,
                                 ]
                             },
                         ]
                     },
-                    # Last 45 days (June 24, 2025 to August 8, 2025)
+                    # Last 45 days (dynamic calculation)
                     "billedLast45Days": {
                         "$gte": [
                             {"$dateFromString": {"dateString": "$date"}},
-                            {"$dateFromString": {"dateString": "2025-06-24"}},
+                            {
+                                "$dateFromString": {
+                                    "dateString": f"{current_date.year}-{current_date.month:02d}-{max(1, current_date.day - 45):02d}"
+                                }
+                            },
                         ]
                     },
-                    # Last 2 months (June-July 2025)
+                    # Last 2 months (dynamic)
                     "billedLast2Months": {
-                        "$and": [
+                        "$or": [
+                            # Current month
                             {
-                                "$eq": [
+                                "$and": [
                                     {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            current_year,
+                                        ]
                                     },
-                                    2025,
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            current_month,
+                                        ]
+                                    },
                                 ]
                             },
+                            # Previous month
                             {
-                                "$gte": [
+                                "$and": [
                                     {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_year
+                                                if current_month > 1
+                                                else current_year - 1
+                                            ),
+                                        ]
                                     },
-                                    6,
-                                ]
-                            },
-                            {
-                                "$lte": [
                                     {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_month - 1
+                                                if current_month > 1
+                                                else 12
+                                            ),
+                                        ]
                                     },
-                                    7,
                                 ]
                             },
                         ]
                     },
-                    # Last 3 months (May-July 2025)
+                    # Last 3 months (dynamic)
                     "billedLast3Months": {
-                        "$and": [
+                        "$or": [
+                            # Current month
                             {
-                                "$eq": [
+                                "$and": [
                                     {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            current_year,
+                                        ]
                                     },
-                                    2025,
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            current_month,
+                                        ]
+                                    },
                                 ]
                             },
+                            # Previous month
                             {
-                                "$gte": [
+                                "$and": [
                                     {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_year
+                                                if current_month > 1
+                                                else current_year - 1
+                                            ),
+                                        ]
                                     },
-                                    5,
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_month - 1
+                                                if current_month > 1
+                                                else 12
+                                            ),
+                                        ]
+                                    },
                                 ]
                             },
+                            # Month before that
                             {
-                                "$lte": [
+                                "$and": [
                                     {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
+                                        "$eq": [
+                                            {
+                                                "$year": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_year
+                                                if current_month > 2
+                                                else current_year - 1
+                                            ),
+                                        ]
                                     },
-                                    7,
+                                    {
+                                        "$eq": [
+                                            {
+                                                "$month": {
+                                                    "$dateFromString": {
+                                                        "dateString": "$date"
+                                                    }
+                                                }
+                                            },
+                                            (
+                                                current_month - 2
+                                                if current_month > 2
+                                                else (12 + current_month - 2)
+                                            ),
+                                        ]
+                                    },
                                 ]
                             },
                         ]
@@ -550,6 +867,43 @@ def get_customer_analytics(
                     "billingAddress": {"$first": "$billing_address"},
                     # Updated logic: Get the salesperson field that matches the sp_code
                     "salesPerson": {"$first": sales_person_logic},
+                    # Collect payment information
+                    "duePayments": {
+                        "$push": {
+                            "$cond": [
+                                "$isDuePayment",
+                                {
+                                    "_id": "$_id",
+                                    "date": "$date",
+                                    "due_date": "$due_date",
+                                    "invoice_number": "$invoice_number",
+                                    "status": "$status",
+                                    "invoice_id": "$invoice_id",
+                                    "total": "$total",
+                                    "balance": "$balance",
+                                },
+                                "$$REMOVE"
+                            ]
+                        }
+                    },
+                    "notDuePayments": {
+                        "$push": {
+                            "$cond": [
+                                "$isNotDuePayment",
+                                {
+                                    "_id": "$_id",
+                                    "date": "$date",
+                                    "due_date": "$due_date",
+                                    "invoice_number": "$invoice_number",
+                                    "status": "$status",
+                                    "invoice_id": "$invoice_id",
+                                    "balance": "$balance",
+                                    "total": "$total",
+                                },
+                                "$$REMOVE"
+                            ]
+                        }
+                    },
                     # Total sales current month (August 2025)
                     "totalSalesCurrentMonth": {
                         "$sum": {
@@ -558,11 +912,25 @@ def get_customer_analytics(
                     },
                     # Last bill date
                     "lastBillDate": {"$max": "$invoiceDate"},
-                    # Count of orders in completed months for frequency calculation
+                    # FIXED: Count of ALL orders in current financial year for frequency calculation
+                    "currentFYOrders": {
+                        "$sum": {"$cond": [{"$eq": ["$isCurrentFY", True]}, 1, 0]}
+                    },
+                    # FIXED: Unique months in current financial year for frequency calculation
+                    "currentFYMonths": {
+                        "$addToSet": {
+                            "$cond": [
+                                {"$eq": ["$isCurrentFY", True]},
+                                "$yearMonth",
+                                None,
+                            ]
+                        }
+                    },
+                    # Keep completed month orders for backward compatibility (if needed elsewhere)
                     "completedMonthOrders": {
                         "$sum": {"$cond": [{"$eq": ["$isCompletedMonth", True]}, 1, 0]}
                     },
-                    # Unique months in completed period for frequency calculation
+                    # Keep completed months for backward compatibility (if needed elsewhere)
                     "completedMonths": {
                         "$addToSet": {
                             "$cond": [
@@ -618,7 +986,14 @@ def get_customer_analytics(
             # Stage 5: Calculate average order frequency and billing validations
             {
                 "$addFields": {
-                    # Remove null values from completedMonths array
+                    # FIXED: Remove null values from currentFYMonths array (for frequency calculation)
+                    "currentFYMonthsFiltered": {
+                        "$filter": {
+                            "input": "$currentFYMonths",
+                            "cond": {"$ne": ["$$this", None]},
+                        }
+                    },
+                    # Keep the old logic for backward compatibility
                     "completedMonthsFiltered": {
                         "$filter": {
                             "input": "$completedMonths",
@@ -648,14 +1023,14 @@ def get_customer_analytics(
             # Stage 6: Calculate final metrics
             {
                 "$addFields": {
-                    # Average order frequency per month (orders per month in completed months)
+                    # FIXED: Calculate frequency using total orders divided by completed months in FY
                     "averageOrderFrequencyMonthly": {
                         "$cond": [
-                            {"$gt": [{"$size": "$completedMonthsFiltered"}, 0]},
+                            {"$gt": ["$currentFYOrders", 0]},
                             {
                                 "$divide": [
-                                    "$completedMonthOrders",
-                                    {"$size": "$completedMonthsFiltered"},
+                                    "$currentFYOrders",
+                                    completed_months_in_current_fy,
                                 ]
                             },
                             0,
@@ -697,7 +1072,33 @@ def get_customer_analytics(
                     },
                 }
             },
-            # Stage 7: Project final output format
+            # Stage 7: Filter based on due_status if not "all"
+            {
+                "$addFields": {
+                    # Apply filtering based on due_status parameter
+                    "filteredDuePayments": {
+                        "$cond": [
+                            {"$or": [
+                                {"$eq": [due_status, "all"]},
+                                {"$eq": [due_status, "due"]}
+                            ]},
+                            "$duePayments",
+                            []
+                        ]
+                    },
+                    "filteredNotDuePayments": {
+                        "$cond": [
+                            {"$or": [
+                                {"$eq": [due_status, "all"]},
+                                {"$eq": [due_status, "not_due"]}
+                            ]},
+                            "$notDuePayments",
+                            []
+                        ]
+                    }
+                }
+            },
+            # Stage 8: Project final output format
             {
                 "$project": {
                     "_id": 0,
@@ -720,14 +1121,16 @@ def get_customer_analytics(
                     "totalSalesLastFY": {"$round": ["$totalSalesLastFY", 2]},
                     "totalSalesPreviousFY": {"$round": ["$totalSalesPreviousFY", 2]},
                     "salesPerson": 1,
-                    # Billing validation flags (true = HAS billed in period)
                     "hasBilledLastMonth": 1,
                     "hasBilledLast45Days": 1,
                     "hasBilledLast2Months": 1,
                     "hasBilledLast3Months": 1,
+                    # Include payment lists
+                    "duePayments": "$filteredDuePayments",
+                    "notDuePayments": "$filteredNotDuePayments",
                 }
             },
-            # Stage 8: Sort by customer name and then by billing address
+            # Stage 9: Sort by customer name and then by billing address
             {"$sort": {"customerName": 1}},
         ]
 

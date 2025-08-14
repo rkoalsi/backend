@@ -37,15 +37,15 @@ def _job_event_listener(event):
         logging.info(f"Job {event.job_id} completed successfully!")
 
 
-def scheduler_startup():
-    logging.info("Starting APScheduler...")
+def notification_scheduler_startup():
+    logging.info("Starting Payment Reminders Notifications Scheduler...")
     scheduler.start()
     scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
     logging.info("Scheduler started.")
 
 
-def scheduler_shutdown():
-    logging.info("Shutting down APScheduler...")
+def notification_scheduler_shutdown():
+    logging.info("Shutting down Payment Reminders Notifications Scheduler...")
     scheduler.shutdown()
 
 
