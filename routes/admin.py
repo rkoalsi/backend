@@ -32,6 +32,7 @@ from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
+from .admin_customer_analytics import router as admin_customer_analytics_router
 from config.auth import JWTBearer 
 import pandas as pd
 from io import BytesIO
@@ -244,6 +245,133 @@ async def get_stats():
         return_orders = db["return_orders"].count_documents({})
         brands = db["brands"].count_documents({})
         external_links = db["external_links"].count_documents({})
+        customer_analytics_count_pipeline = [
+    # Stage 1: Filter invoices (same as your main pipeline)
+    {
+        "$match": {
+            "date": {"$gte": "2023-04-01"},
+            "status": {"$nin": ["void", "draft"]},
+            "customer_name": {
+                "$not": {
+                    "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit",
+                    "$options": "i",
+                }
+            },
+        }
+    },
+    # Stage 2: Add normalized city field (same logic as your main pipeline)
+    {
+        "$addFields": {
+            "normalizedCity": {
+                "$switch": {
+                    "branches": [
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(bangalore|bengaluru)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "bengaluru",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(mumbai|bombay)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "mumbai",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(delhi|new delhi)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "delhi",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(kolkata|calcutta)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "kolkata",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(chennai|madras)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "chennai",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(hyderabad|secunderabad)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "hyderabad",
+                        },
+                        {
+                            "case": {
+                                "$regexMatch": {
+                                    "input": "$billing_address.city",
+                                    "regex": "^(pune|poona)$",
+                                    "options": "i",
+                                }
+                            },
+                            "then": "pune",
+                        },
+                    ],
+                    "default": {"$toLower": "$billing_address.city"},
+                }
+            }
+        }
+    },
+    # Stage 3: Group by customer and address (same grouping as your main pipeline)
+    {
+        "$group": {
+            "_id": {
+                "customerId": "$customer_id",
+                "city": "$normalizedCity",
+                "state": "$billing_address.state", 
+                "zip": "$billing_address.zip",
+                "country": "$billing_address.country",
+            }
+        }
+    },
+    # Stage 4: Lookup customer details (to apply same customer filters)
+    {
+        "$lookup": {
+            "from": "customers",
+            "localField": "_id.customerId", 
+            "foreignField": "contact_id",
+            "as": "customerDetails",
+        }
+    },
+    # Stage 5: Count the total unique customer analytics records
+    {
+        "$count": "total_customer_analytics"
+    }
+]
+
+        # Execute the pipeline
+        customer_analytics_result = list(db["invoices"].aggregate(customer_analytics_count_pipeline))
+        total_customer_analytics = customer_analytics_result[0]["total_customer_analytics"] if customer_analytics_result else 0
+
 
         return {
             "active_stock_products": active_stock_products,
@@ -286,6 +414,7 @@ async def get_stats():
             "return_orders": return_orders,
             "brands": brands,
             "external_links": external_links,
+            "total_customer_analytics": total_customer_analytics,
         }
 
     except Exception as e:
@@ -2183,5 +2312,11 @@ router.include_router(
     admin_external_links_router,
     prefix="/external_links",
     tags=["Admin External Links"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_customer_analytics_router,
+    prefix="/customer_analytics",
+    tags=["Admin Customer Analytics"],
     dependencies=[Depends(JWTBearer())],
 )
