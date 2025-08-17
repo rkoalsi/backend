@@ -253,7 +253,7 @@ async def get_stats():
             "status": {"$nin": ["void", "draft"]},
             "customer_name": {
                 "$not": {
-                    "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit",
+                    "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit|Flipkart",
                     "$options": "i",
                 }
             },
