@@ -39,7 +39,6 @@ s3_client = boto3.client(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
 )
-
 @router.get("")
 def get_admin_customer_analytics(
     status: Optional[str] = Query(None, description="Filter by invoice status"),
@@ -551,83 +550,137 @@ def get_admin_customer_analytics(
                             },
                         ]
                     },
-                    # Normalize city name to handle variations
+                    # Normalize city name to handle variations (with null handling) - Updated to use shipping_address
                     "normalizedCity": {
                         "$switch": {
                             "branches": [
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(bangalore|bengaluru)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex":
+                                                        "^(bangalore|bengaluru)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "bengaluru",
+                                    "then": "bengaluru"
                                 },
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(mumbai|bombay)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex": "^(mumbai|bombay)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "mumbai",
+                                    "then": "mumbai"
                                 },
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(delhi|new delhi)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex":
+                                                        "^(delhi|new delhi)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "delhi",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(kolkata|calcutta)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "kolkata",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(chennai|madras)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "chennai",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(hyderabad|secunderabad)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "hyderabad",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(pune|poona)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "pune",
-                                },
+                                    "then": "delhi"
+                                }
                             ],
-                            "default": {"$toLower": "$billing_address.city"},
+                            "default": {
+                                "$toLower": {
+                                    "$ifNull": [
+                                        "$shipping_address.city",
+                                        "unknown_city"
+                                    ]
+                                }
+                            }
                         }
+                    },
+                    # Add fields to check for missing shipping address data
+                    "hasShippingAddress": {
+                        "$ne": ["$shipping_address", None]
+                    },
+                    "shippingAddressComplete": {
+                        "$and": [
+                            { "$ne": ["$shipping_address", None] },
+                            {
+                                "$ne": ["$shipping_address.city", None]
+                            },
+                            { "$ne": ["$shipping_address.city", ""] },
+                            {
+                                "$ne": ["$shipping_address.state", None]
+                            },
+                            {
+                                "$ne": [
+                                    "$shipping_address.country",
+                                    None
+                                ]
+                            }
+                        ]
                     },
                     # Billing period validations (dynamic)
                     # Last month (previous month from current)
@@ -851,20 +904,41 @@ def get_admin_customer_analytics(
                     },
                 }
             },
-            # Stage 3: Group by customer and normalized address components
+            # Stage 3: Group by customer and normalized address components (updated to use shipping address)
             {
                 "$group": {
                     "_id": {
                         "customerId": "$customer_id",
                         "city": "$normalizedCity",
-                        "state": "$billing_address.state",
-                        "zip": "$billing_address.zip",
-                        "country": "$billing_address.country",
+                        "state": "$shipping_address.state",
+                        "zip": "$shipping_address.zip",
+                        "country": "$shipping_address.country",
                     },
                     "customerName": {"$first": "$customer_name"},
-                    "billingAddress": {"$first": "$billing_address"},
+                    "shippingAddress": {"$first": "$shipping_address"},
                     # Updated logic: Get the salesperson field that matches the sp_code
                     "salesPerson": {"$first": sales_person_logic},
+                    
+                    # NEW: Collect ALL invoices for validation
+                    "allInvoices": {
+                        "$push": {
+                            "_id": "$_id",
+                            "invoice_number": "$invoice_number",
+                            "date": "$date",
+                            "due_date": "$due_date",
+                            "status": "$status",
+                            "total": "$total",
+                            "balance": "$balance",
+                            "customer_id": "$customer_id",
+                            "invoice_id": "$invoice_id",
+                            "yearMonth": "$yearMonth",
+                            "isCurrentMonth": "$isCurrentMonth",
+                            "isCurrentFY": "$isCurrentFY",
+                            "isLastFY": "$isLastFY",
+                            "isPreviousFY": "$isPreviousFY"
+                        }
+                    },
+                    
                     # Collect payment information
                     "duePayments": {
                         "$push": {
@@ -1034,35 +1108,35 @@ def get_admin_customer_analytics(
                             0,
                         ]
                     },
-                    # Format billing address as string
-                    "billingAddressFormatted": {
+                    # Format shipping address as string (updated from billing to shipping)
+                    "shippingAddressFormatted": {
                         "$concat": [
-                            {"$ifNull": ["$billingAddress.street", ""]},
+                            {"$ifNull": ["$shippingAddress.street", ""]},
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.street2", ""]},
-                                    {"$concat": [", ", "$billingAddress.street2"]},
+                                    {"$ne": ["$shippingAddress.street2", ""]},
+                                    {"$concat": [", ", "$shippingAddress.street2"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.city", ""]},
-                                    {"$concat": [", ", "$billingAddress.city"]},
+                                    {"$ne": ["$shippingAddress.city", ""]},
+                                    {"$concat": [", ", "$shippingAddress.city"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.state", ""]},
-                                    {"$concat": [", ", "$billingAddress.state"]},
+                                    {"$ne": ["$shippingAddress.state", ""]},
+                                    {"$concat": [", ", "$shippingAddress.state"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.zip", ""]},
-                                    {"$concat": [" - ", "$billingAddress.zip"]},
+                                    {"$ne": ["$shippingAddress.zip", ""]},
+                                    {"$concat": [" - ", "$shippingAddress.zip"]},
                                     "",
                                 ]
                             },
@@ -1192,7 +1266,7 @@ def get_admin_customer_analytics(
                 "$project": {
                     "_id": 0,
                     "customerName": 1,
-                    "billingAddress": "$billingAddressFormatted",
+                    "shippingAddress": "$shippingAddressFormatted",  # Updated to use shipping address
                     "status": "$customerStatus",
                     "tier": "$customerTier",
                     "totalSalesCurrentMonth": {
@@ -1217,9 +1291,18 @@ def get_admin_customer_analytics(
                     # Include payment lists
                     "duePayments": "$filteredDuePayments",
                     "notDuePayments": "$filteredNotDuePayments",
+                    
+                    # NEW: Include all invoices for validation
+                    "allInvoices": 1,
+                    
+                    # Additional fields for validation
+                    "totalInvoiceCount": {
+                        "$size": "$allInvoices"
+                    },
+                    "currentFYInvoiceCount": "$currentFYOrders"
                 }
             },
-            # Stage 10: Sort by customer name and then by billing address
+            # Stage 11: Sort by customer name
             {"$sort": {"customerName": 1}},
         ]
 
@@ -1228,6 +1311,7 @@ def get_admin_customer_analytics(
     except Exception as e:
         logger.error(f"Error in get_customer_analytics: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @router.get("/report")
 def download_customer_analytics_report(
@@ -1735,83 +1819,137 @@ def download_customer_analytics_report(
                             },
                         ]
                     },
-                    # Normalize city name to handle variations
+                    # Normalize city name to handle variations (with null handling) - Updated to use shipping_address
                     "normalizedCity": {
                         "$switch": {
                             "branches": [
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(bangalore|bengaluru)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex":
+                                                        "^(bangalore|bengaluru)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "bengaluru",
+                                    "then": "bengaluru"
                                 },
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(mumbai|bombay)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex": "^(mumbai|bombay)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "mumbai",
+                                    "then": "mumbai"
                                 },
                                 {
                                     "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(delhi|new delhi)$",
-                                            "options": "i",
-                                        }
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    None
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$shipping_address.city",
+                                                    ""
+                                                ]
+                                            },
+                                            {
+                                                "$regexMatch": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$shipping_address.city",
+                                                            ""
+                                                        ]
+                                                    },
+                                                    "regex":
+                                                        "^(delhi|new delhi)$",
+                                                    "options": "i"
+                                                }
+                                            }
+                                        ]
                                     },
-                                    "then": "delhi",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(kolkata|calcutta)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "kolkata",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(chennai|madras)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "chennai",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(hyderabad|secunderabad)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "hyderabad",
-                                },
-                                {
-                                    "case": {
-                                        "$regexMatch": {
-                                            "input": "$billing_address.city",
-                                            "regex": "^(pune|poona)$",
-                                            "options": "i",
-                                        }
-                                    },
-                                    "then": "pune",
-                                },
+                                    "then": "delhi"
+                                }
                             ],
-                            "default": {"$toLower": "$billing_address.city"},
+                            "default": {
+                                "$toLower": {
+                                    "$ifNull": [
+                                        "$shipping_address.city",
+                                        "unknown_city"
+                                    ]
+                                }
+                            }
                         }
+                    },
+                    # Add fields to check for missing shipping address data
+                    "hasShippingAddress": {
+                        "$ne": ["$shipping_address", None]
+                    },
+                    "shippingAddressComplete": {
+                        "$and": [
+                            { "$ne": ["$shipping_address", None] },
+                            {
+                                "$ne": ["$shipping_address.city", None]
+                            },
+                            { "$ne": ["$shipping_address.city", ""] },
+                            {
+                                "$ne": ["$shipping_address.state", None]
+                            },
+                            {
+                                "$ne": [
+                                    "$shipping_address.country",
+                                    None
+                                ]
+                            }
+                        ]
                     },
                     # Billing period validations (dynamic)
                     # Last month (previous month from current)
@@ -2035,20 +2173,41 @@ def download_customer_analytics_report(
                     },
                 }
             },
-            # Stage 3: Group by customer and normalized address components
+            # Stage 3: Group by customer and normalized address components (updated to use shipping address)
             {
                 "$group": {
                     "_id": {
                         "customerId": "$customer_id",
                         "city": "$normalizedCity",
-                        "state": "$billing_address.state",
-                        "zip": "$billing_address.zip",
-                        "country": "$billing_address.country",
+                        "state": "$shipping_address.state",
+                        "zip": "$shipping_address.zip",
+                        "country": "$shipping_address.country",
                     },
                     "customerName": {"$first": "$customer_name"},
-                    "billingAddress": {"$first": "$billing_address"},
+                    "shippingAddress": {"$first": "$shipping_address"},
                     # Updated logic: Get the salesperson field that matches the sp_code
                     "salesPerson": {"$first": sales_person_logic},
+                    
+                    # NEW: Collect ALL invoices for validation
+                    "allInvoices": {
+                        "$push": {
+                            "_id": "$_id",
+                            "invoice_number": "$invoice_number",
+                            "date": "$date",
+                            "due_date": "$due_date",
+                            "status": "$status",
+                            "total": "$total",
+                            "balance": "$balance",
+                            "customer_id": "$customer_id",
+                            "invoice_id": "$invoice_id",
+                            "yearMonth": "$yearMonth",
+                            "isCurrentMonth": "$isCurrentMonth",
+                            "isCurrentFY": "$isCurrentFY",
+                            "isLastFY": "$isLastFY",
+                            "isPreviousFY": "$isPreviousFY"
+                        }
+                    },
+                    
                     # Collect payment information
                     "duePayments": {
                         "$push": {
@@ -2218,35 +2377,35 @@ def download_customer_analytics_report(
                             0,
                         ]
                     },
-                    # Format billing address as string
-                    "billingAddressFormatted": {
+                    # Format shipping address as string (updated from billing to shipping)
+                    "shippingAddressFormatted": {
                         "$concat": [
-                            {"$ifNull": ["$billingAddress.street", ""]},
+                            {"$ifNull": ["$shippingAddress.street", ""]},
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.street2", ""]},
-                                    {"$concat": [", ", "$billingAddress.street2"]},
+                                    {"$ne": ["$shippingAddress.street2", ""]},
+                                    {"$concat": [", ", "$shippingAddress.street2"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.city", ""]},
-                                    {"$concat": [", ", "$billingAddress.city"]},
+                                    {"$ne": ["$shippingAddress.city", ""]},
+                                    {"$concat": [", ", "$shippingAddress.city"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.state", ""]},
-                                    {"$concat": [", ", "$billingAddress.state"]},
+                                    {"$ne": ["$shippingAddress.state", ""]},
+                                    {"$concat": [", ", "$shippingAddress.state"]},
                                     "",
                                 ]
                             },
                             {
                                 "$cond": [
-                                    {"$ne": ["$billingAddress.zip", ""]},
-                                    {"$concat": [" - ", "$billingAddress.zip"]},
+                                    {"$ne": ["$shippingAddress.zip", ""]},
+                                    {"$concat": [" - ", "$shippingAddress.zip"]},
                                     "",
                                 ]
                             },
@@ -2376,7 +2535,7 @@ def download_customer_analytics_report(
                 "$project": {
                     "_id": 0,
                     "customerName": 1,
-                    "billingAddress": "$billingAddressFormatted",
+                    "shippingAddress": "$shippingAddressFormatted",  # Updated to use shipping address
                     "status": "$customerStatus",
                     "tier": "$customerTier",
                     "totalSalesCurrentMonth": {
@@ -2401,9 +2560,18 @@ def download_customer_analytics_report(
                     # Include payment lists
                     "duePayments": "$filteredDuePayments",
                     "notDuePayments": "$filteredNotDuePayments",
+                    
+                    # NEW: Include all invoices for validation
+                    "allInvoices": 1,
+                    
+                    # Additional fields for validation
+                    "totalInvoiceCount": {
+                        "$size": "$allInvoices"
+                    },
+                    "currentFYInvoiceCount": "$currentFYOrders"
                 }
             },
-            # Stage 10: Sort by customer name and then by billing address
+            # Stage 10: Sort by customer name
             {"$sort": {"customerName": 1}},
         ]
 
@@ -2418,7 +2586,7 @@ def download_customer_analytics_report(
         # Define headers
         headers = [
             "Customer Name",
-            "Billing Address",
+            "Shipping Address",  # Updated from Billing Address
             "Status",
             "Tier",
             "Sales Person",
@@ -2452,7 +2620,7 @@ def download_customer_analytics_report(
         # Add data rows
         for row, customer in enumerate(customers, 2):
             worksheet.cell(row=row, column=1, value=customer.get("customerName", ""))
-            worksheet.cell(row=row, column=2, value=customer.get("billingAddress", ""))
+            worksheet.cell(row=row, column=2, value=customer.get("shippingAddress", ""))  # Updated from billingAddress
             worksheet.cell(row=row, column=3, value=customer.get("status", ""))
             worksheet.cell(row=row, column=4, value=customer.get("tier", ""))
             worksheet.cell(row=row, column=5, value=customer.get("salesPerson", ""))
