@@ -29,13 +29,16 @@ BASE_DIR = (
 CERTIFICATE = BASE_DIR / "certificate.pem"  # Adjust based on where the file is stored
 
 
-def send_attendance_to_greythr(door, employee_number, is_in=True):
+def send_attendance_to_greythr(door, employee_number, is_in=True, swipe_datetime_str=None):
     """
     Sends attendance data to GreyTHR API.
 
     Args:
+        door (str): The door/device name
         employee_number (str): The employee number
         is_in (bool): True for check-in, False for check-out
+        swipe_datetime_str (str, optional): DateTime string in format "DD-MM-YYYY HH:MM:SS"
+                                          If None, uses current time
 
     Returns:
         tuple: (success, message)
@@ -46,9 +49,20 @@ def send_attendance_to_greythr(door, employee_number, is_in=True):
         gtapiid = "fd121436-d9c9-401b-bb8b-8dbbdac445b3"
         Attendpoint = "/v2/attendance/asca/swipes"
 
-        # Current time in IST format (UTC+5:30)
-        now_utc = datetime.now()
-        now_ist = now_utc + timedelta(hours=5, minutes=30)
+        # Determine which datetime to use
+        if swipe_datetime_str:
+            try:
+                # Parse the provided datetime string
+                swipe_datetime = datetime.strptime(swipe_datetime_str, "%d-%m-%Y %H:%M:%S")
+                # Convert to IST (assuming the input is already in IST)
+                now_ist = swipe_datetime
+            except ValueError as e:
+                return False, f"Invalid datetime format. Expected DD-MM-YYYY HH:MM:SS, got: {swipe_datetime_str}"
+        else:
+            # Use current time in IST format (UTC+5:30)
+            now_utc = datetime.now()
+            now_ist = now_utc + timedelta(hours=5, minutes=30)
+
         timestamp = now_ist.strftime("%Y-%m-%dT%H:%M:%S.654+05:30")
 
         # Create single swipe data (1 for in, 0 for out)
@@ -96,7 +110,6 @@ def send_attendance_to_greythr(door, employee_number, is_in=True):
 
     except Exception as e:
         return False, f"Failed to send attendance: {str(e)}"
-
 
 @router.get("/in_and_out")
 def in_and_out(request: Request):
@@ -173,6 +186,7 @@ def in_and_out(request: Request):
                     door=device.get("name"),
                     employee_number=employee_number,
                     is_in=is_check_in,
+                    swipe_datetime_str=swipe_datetime_str,
                 )
 
                 return JSONResponse(
@@ -225,7 +239,7 @@ async def check_in(data: dict):
         is_check_in = data.get("action") == "checkin"
 
         # Record attendance
-        swipe_datetime = datetime.utcnow()
+        swipe_datetime = datetime.now()
         attendance_record = {
             "employee_id": ObjectId(employee_id),
             "employee_name": employee_name,
