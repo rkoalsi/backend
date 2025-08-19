@@ -417,77 +417,106 @@ def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[
 
     return None
 
-
 async def invoices_cron():
-    """Cron job for syncing recent invoices from last 3 pages."""
-    logger.info("🚀 Starting incremental invoice sync (last 3 pages)...")
+    """Cron job for resyncing invoices from previous month till today - delete and reinsert."""
+    logger.info("🚀 Starting invoice resync from previous month till today (delete and reinsert)...")
     start_time = time.time()
-    all_new_invoices = []
-    new_invoice_ids = []
+    
+    # Calculate previous month date range dynamically (from previous month till today)
+    today = datetime.now()
+    
+    # Calculate previous month by subtracting one month
+    if today.month == 1:
+        # If current month is January, previous month is December of last year
+        prev_month = 12
+        prev_year = today.year - 1
+    else:
+        # Otherwise, just subtract 1 from current month
+        prev_month = today.month - 1
+        prev_year = today.year
+    
+    # Get first day of previous month
+    month_start = datetime(prev_year, prev_month, 1, 0, 0, 0, 0)
+    
+    # Get end date as today (till current date)
+    month_end = today.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
+    period_description = f"{month_start.strftime('%B %Y')} till {today.strftime('%B %d, %Y')}"
+    logger.info(f"📅 Target period: {period_description} ({month_start.date()} to {month_end.date()})")
+    
+    all_invoices = []
+    deleted_count = 0
+    
     try:
         _, db = connect_to_mongo()
         collection = db["invoices"]
+
+        # Step 1: Delete existing invoices for the target period
+        logger.info(f"🗑️ Deleting existing invoices from {period_description}...")
+        delete_result = collection.delete_many({
+            "date": {
+                "$gte": month_start.strftime("%Y-%m-%d"),
+                "$lte": month_end.strftime("%Y-%m-%d")
+            }
+        })
+        deleted_count = delete_result.deleted_count
+        logger.info(f"✅ Deleted {deleted_count} existing invoices from {period_description}")
 
         async with ZohoAPIClient("books") as api_client:
             if not api_client.access_token:
                 logger.error("Failed to get access token")
                 return
-            # Fetch invoices from last 3 pages (most recent first)
-            for page in range(1, 4):  # Pages 1, 2, 3
-                logger.info(f"Fetching invoices page {page}/3...")
 
+            # Step 2: Fetch all invoices from the target period
+            page = 1
+            total_fetched = 0
+            
+            while True:
+                logger.info(f"Fetching invoices page {page}...")
+                
+                # Format dates for API (YYYY-MM-DD)
+                date_from = month_start.strftime("%Y-%m-%d")
+                date_to = month_end.strftime("%Y-%m-%d")
+                
                 invoices_url = (
                     f"https://www.zohoapis.com/books/v3/invoices?"
                     f"page={page}&"
                     f"per_page=200&"
                     f"sort_column=created_time&"
                     f"sort_order=D&"
+                    f"date_start={date_from}&"
+                    f"date_end={date_to}&"
                     f"organization_id={org_id}"
                 )
 
                 data = await api_client.make_request(invoices_url)
                 if not data or "invoices" not in data:
                     logger.info(f"No invoices found on page {page}")
-                    continue
+                    break
 
                 page_invoices = data["invoices"]
-                logger.info(f"Found {len(page_invoices)} invoices on page {page}")
+                page_count = len(page_invoices)
+                total_fetched += page_count
+                
+                logger.info(f"Found {page_count} invoices on page {page} (Total: {total_fetched})")
 
-                # Check which invoices are new (batch check for efficiency)
-                page_invoice_ids = [str(inv["invoice_id"]) for inv in page_invoices]
-                existing_ids = set()
+                if page_count == 0:
+                    break
 
-                # Batch check existing invoices
-                existing_docs = collection.find(
-                    {"invoice_id": {"$in": page_invoice_ids}}, {"invoice_id": 1}
-                )
-                for doc in existing_docs:
-                    existing_ids.add(doc["invoice_id"])
+                # Collect invoice IDs for detailed fetching
+                invoice_ids = [str(inv["invoice_id"]) for inv in page_invoices]
 
-                # Collect new invoice IDs
-                for invoice in page_invoices:
-                    inv_id = str(invoice["invoice_id"])
-                    if inv_id not in existing_ids:
-                        new_invoice_ids.append(inv_id)
-
-                logger.info(
-                    f"Page {page}: {len(page_invoice_ids) - len(existing_ids)} new invoices found"
-                )
-
-            # Fetch detailed data for all new invoices concurrently
-            if new_invoice_ids:
-                logger.info(
-                    f"Fetching details for {len(new_invoice_ids)} new invoices..."
-                )
+                # Fetch detailed data for all invoices on this page
+                logger.info(f"Fetching details for {len(invoice_ids)} invoices from page {page}...")
 
                 # Create tasks for fetching invoice details
                 detail_tasks = []
-                for inv_id in new_invoice_ids:
+                for inv_id in invoice_ids:
                     detail_url = f"https://www.zohoapis.com/books/v3/invoices/{inv_id}?organization_id={org_id}"
                     detail_tasks.append(api_client.make_request(detail_url))
 
                 # Execute all detail requests with limited concurrency
-                semaphore = asyncio.Semaphore(3)  # Limit to 3 concurrent requests
+                semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
 
                 async def fetch_detail_with_semaphore(task):
                     async with semaphore:
@@ -498,46 +527,68 @@ async def invoices_cron():
                     return_exceptions=True,
                 )
 
-                # Process results
+                # Process results from this page
+                page_processed = 0
                 for i, result in enumerate(detail_results):
                     try:
                         if isinstance(result, Exception):
-                            logger.error(
-                                f"Error fetching invoice {new_invoice_ids[i]}: {result}"
-                            )
+                            logger.error(f"Error fetching invoice {invoice_ids[i]}: {result}")
                             continue
 
                         if result and "invoice" in result:
                             processed_invoice = process_invoice_data(result["invoice"])
-                            all_new_invoices.append(processed_invoice)
+                            all_invoices.append(processed_invoice)
+                            page_processed += 1
                     except Exception as e:
-                        logger.error(
-                            f"Error processing invoice {new_invoice_ids[i]}: {e}"
-                        )
+                        logger.error(f"Error processing invoice {invoice_ids[i]}: {e}")
 
-                # Bulk insert all new invoices
-                if all_new_invoices:
-                    collection.insert_many(all_new_invoices, ordered=False)
-                    logger.info(f"✅ Inserted {len(all_new_invoices)} new invoices")
-                else:
-                    logger.info("No new invoices to insert after processing")
+                logger.info(f"✅ Processed {page_processed}/{page_count} invoices from page {page}")
+
+                # Check if we have more pages
+                page_info = data.get("page_context", {})
+                has_more_page = page_info.get("has_more_page", False)
+                
+                if not has_more_page or page_count < 200:  # If less than full page, we're done
+                    logger.info("Reached last page or no more data")
+                    break
+                
+                page += 1
+
+            # Step 3: Bulk insert all processed invoices
+            if all_invoices:
+                logger.info(f"💾 Inserting {len(all_invoices)} processed invoices...")
+                collection.insert_many(all_invoices, ordered=False)
+                logger.info(f"✅ Successfully inserted {len(all_invoices)} invoices for period: {period_description}")
             else:
-                logger.info("No new invoices found in last 3 pages")
+                logger.info(f"No invoices to insert for period: {period_description}")
 
             duration = time.time() - start_time
+            
+            # Send success notification
             send_slack_notification(
-                "Credit Notes Cron",
+                f"Invoice Resync - {period_description}",
                 success=True,
                 details={
-                    "processed": len(all_new_invoices),
+                    "period": period_description,
+                    "deleted": deleted_count,
+                    "inserted": len(all_invoices),
+                    "total_fetched": total_fetched,
+                    "pages": page,
                     "duration": duration,
                 },
             )
+            
+            logger.info(f"🎉 Invoice resync from {period_description} completed successfully!")
+            logger.info(f"📊 Summary: Deleted {deleted_count}, Inserted {len(all_invoices)} invoices in {duration:.1f}s")
+
     except Exception as e:
-        logger.error(f"Error in invoice sync: {e}")
-        send_slack_notification("Invoice Cron Error", success=False, error_msg=str(e))
-
-
+        error_msg = f"Error in invoice resync from {period_description}: {e}"
+        logger.error(error_msg)
+        send_slack_notification(
+            f"Invoice Resync Error - {period_description}", 
+            success=False, 
+            error_msg=str(e)
+        )
 async def credit_notes_cron():
     """Cron job for syncing recent credit notes from first 2 pages."""
     logger.info("🚀 Starting incremental credit notes sync (first 2 pages)...")
@@ -783,7 +834,7 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             invoices_cron,
             "cron",
             hour=14,
-            minute=30,
+            minute=15,
             id="invoices_cron",
             replace_existing=True,
             misfire_grace_time=300  # 5 minutes grace period
