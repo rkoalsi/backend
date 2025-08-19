@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .routes.api import router
 from .config.root import connect_to_mongo, disconnect_on_exit
-from .config.crons import setup_cron_jobs
+from .config.crons import cron_shutdown, cron_startup
 from .config.scheduler import notification_scheduler_startup, notification_scheduler_shutdown, scheduler
 import uvicorn
 
@@ -38,8 +38,9 @@ app.include_router(router, prefix="/api")
 
 # Add shutdown handler for MongoDB
 # app.add_event_handler("startup", notification_scheduler_startup)
-app.add_event_handler("startup", lambda: setup_cron_jobs(scheduler))
+app.add_event_handler("startup", cron_startup)
 app.add_event_handler("shutdown", disconnect_on_exit(client))
+app.add_event_handler("shutdown", cron_shutdown)
 # app.add_event_handler("shutdown", notification_scheduler_shutdown)
 
 

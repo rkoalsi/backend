@@ -5,6 +5,7 @@ import logging, asyncio, aiohttp, time, re, os, requests
 from typing import Optional, Dict
 from collections import OrderedDict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 # Configure logging
 logging.basicConfig(
@@ -771,35 +772,84 @@ async def stock_cron():
         send_slack_notification("Stock Cron Error", success=False, error_msg=str(e))
 
 
-def setup_cron_jobs(scheduler: AsyncIOScheduler):
+def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
-    scheduler.add_job(
-        invoices_cron,
-        "cron",
-        hour=14,
-        minute=30,
-        id="invoices_cron",
-        replace_existing=True,
-    )
+    try:
+        # Clear existing jobs to avoid duplicates
+        scheduler_instance.remove_all_jobs()
+        
+        # Add jobs with timezone awareness
+        scheduler_instance.add_job(
+            invoices_cron,
+            "cron",
+            hour=14,
+            minute=30,
+            id="invoices_cron",
+            replace_existing=True,
+            misfire_grace_time=300  # 5 minutes grace period
+        )
 
-    scheduler.add_job(
-        credit_notes_cron,
-        "cron",
-        hour=15,
-        minute=0,
-        id="credit_notes_cron",
-        replace_existing=True,
-    )
+        scheduler_instance.add_job(
+            credit_notes_cron,
+            "cron",
+            hour=15,
+            minute=0,
+            id="credit_notes_cron",
+            replace_existing=True,
+            misfire_grace_time=300
+        )
 
-    scheduler.add_job(
-        stock_cron,
-        "cron",
-        hour=15,
-        minute=30,
-        id="stock_cron",
-        replace_existing=True,
-    )
-    logger.info("Cron Job Set up")
+        scheduler_instance.add_job(
+            stock_cron,
+            "cron",
+            hour=15,
+            minute=30,
+            id="stock_cron",
+            replace_existing=True,
+            misfire_grace_time=300
+        )
+        
+        logger.info(f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully")
+        
+        # Log next run times for debugging
+        for job in scheduler_instance.get_jobs():
+            logger.info(f"📅 Job '{job.id}' next run: {job.next_run_time}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error setting up cron jobs: {e}")
+        raise
+
+jobstores = {
+    "default": {
+        "type": "mongodb",
+        "host": os.getenv("MONGO_URI"),
+        "port": 27017,
+        "database": os.getenv("DB_NAME"),
+        "collection": "cron_jobs",
+    }
+}
+
+scheduler = AsyncIOScheduler(jobstores=jobstores)
+
+
+def _job_event_listener(event):
+    if event.exception:
+        logging.error(f"Job {event.job_id} raised an exception!")
+    else:
+        logging.info(f"Job {event.job_id} completed successfully!")
+
+
+def cron_startup():
+    logging.info("Starting Cron Scheduler...")
+    scheduler.start()
+    setup_cron_jobs(scheduler)
+    scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+    logging.info("Scheduler started.")
+
+
+def cron_shutdown():
+    logging.info("Shutting down Cron Scheduler...")
+    scheduler.shutdown()
 
 
 
