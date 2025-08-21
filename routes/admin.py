@@ -33,6 +33,7 @@ from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
+from .admin_attendance import router as admin_attendance_router
 from config.auth import JWTBearer 
 import pandas as pd
 from io import BytesIO
@@ -65,362 +66,497 @@ s3_client = boto3.client(
 MAX_FILE_SIZE_MB = 10
 
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, date
+from pytz import timezone as tz
+
 @router.get("/stats")
 async def get_stats():
     try:
-        # Products Statistics
-        active_stock_products = db["products"].count_documents({"stock": {"$gt": 0}})
-        inactive_products = db["products"].count_documents({"status": "inactive"})
-        total_products = db["products"].count_documents({})
-        active_products = db["products"].count_documents({"status": "active"})
-        out_of_stock_products = db["products"].count_documents({"stock": {"$lte": 0}})
-
-        # Customers Statistics
-        assigned_customers = db["customers"].count_documents(
-            {"cf_sales_person": {"$exists": True, "$ne": "", "$ne": None}}
-        )
-        unassigned_customers = db["customers"].count_documents(
-            {
-                "$or": [
-                    {"cf_sales_person": {"$exists": False}},
-                    {"cf_sales_person": ""},
-                    {"cf_sales_person": None},
-                ]
-            }
-        )
-        active_customers = db["customers"].count_documents({"status": "active"})
-        inactive_customers = db["customers"].count_documents({"status": "inactive"})
-
-        # Calculate date 6 months ago
+        # Pre-calculate common date values
         ist = tz("Asia/Kolkata")
         now_ist = datetime.now(ist)
-        six_months_ago = now_ist - timedelta(days=180)  # Approximately 6 months
-
-        # Billed Customers (last 6 months)
-        # Get distinct customer_ids from invoices in the last 6 months (excluding void and draft)
-        billed_customers_pipeline = [
-            {
-                "$match": {
-                    "status": {"$nin": ["void", "draft"]},
-                    "created_time": {"$exists": True},
-                }
-            },
-            {
-                "$addFields": {
-                    "parsed_date": {
-                        "$dateFromString": {
-                            "dateString": {"$substr": ["$created_time", 0, 19]}
-                        }
-                    }
-                }
-            },
-            {"$match": {"parsed_date": {"$gte": six_months_ago}}},
-            {"$group": {"_id": "$customer_id"}},
-            {"$count": "total_billed_customers"},
-        ]
-
-        billed_result = list(db["invoices"].aggregate(billed_customers_pipeline))
-        total_billed_customers_6_months = (
-            billed_result[0]["total_billed_customers"] if billed_result else 0
-        )
-
-        # Get the list of billed customer IDs for unbilled calculation
-        billed_customer_ids_pipeline = [
-            {
-                "$match": {
-                    "status": {"$nin": ["void", "draft"]},
-                    "created_time": {"$exists": True},
-                }
-            },
-            {
-                "$addFields": {
-                    "parsed_date": {
-                        "$dateFromString": {
-                            "dateString": {"$substr": ["$created_time", 0, 19]}
-                        }
-                    }
-                }
-            },
-            {"$match": {"parsed_date": {"$gte": six_months_ago}}},
-            {"$group": {"_id": "$customer_id"}},
-        ]
-
-        billed_customer_ids = [
-            doc["_id"] for doc in db["invoices"].aggregate(billed_customer_ids_pipeline)
-        ]
-
-        # Unbilled Customers (last 6 months)
-        # Count active customers who are NOT in the billed customers list
-        unbilled_customers_query = {
-            "status": "active",
-            "contact_id": {"$nin": billed_customer_ids},
-        }
-        total_unbilled_customers_6_months = db["customers"].count_documents(
-            unbilled_customers_query
-        )
-
-        # Sales People Statistics
-        active_sales_people = db["users"].count_documents(
-            {"status": "active", "role": "sales_person"}
-        )
-        inactive_sales_people = db["users"].count_documents(
-            {"status": "inactive", "role": "sales_person"}
-        )
-        total_sales_people = active_sales_people + inactive_sales_people
-
-        # Orders Statistics
+        six_months_ago = now_ist - timedelta(days=180)
         start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-        recent_orders = db["orders"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        orders_draft = db["orders"].count_documents(
-            {"status": "draft", "created_at": {"$gte": start_of_today_ist}}
-        )
-        orders_accepted = db["orders"].count_documents(
-            {"status": "accepted", "created_at": {"$gte": start_of_today_ist}}
-        )
-        orders_declined = db["orders"].count_documents(
-            {"status": "declined", "created_at": {"$gte": start_of_today_ist}}
-        )
-        orders_invoiced = db["orders"].count_documents(
-            {"status": "invoiced", "created_at": {"$gte": start_of_today_ist}}
-        )
-        active_catalogues = db["catalogues"].count_documents({"is_active": True})
-        inactive_catalogues = db["catalogues"].count_documents({"is_active": False})
-
-        active_trainings = db["trainings"].count_documents({"is_active": True})
-        inactive_trainings = db["trainings"].count_documents({"is_active": False})
-
-        active_announcements = db["announcements"].count_documents({"is_active": True})
-        inactive_announcements = db["announcements"].count_documents(
-            {"is_active": False}
-        )
-
-        # Get today's date
         today = date.today()
         day_before_yesterday = today - timedelta(days=2)
-
-        # Convert both dates to ISO format (YYYY-MM-DD)
         day_before_yesterday_str = day_before_yesterday.isoformat()
         today_str = today.isoformat()
 
-        # Get the overdue invoices for yesterday
-        total_due_payments = db["invoices"].count_documents(
-            {
-                "due_date": {"$lt": today_str},
-                "status": {"$nin": ["paid", "void"]},
-            }
-        )
-        total_due_payments_today = db["invoices"].count_documents(
-            {
-                "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
-                "status": {"$nin": ["paid", "void"]},
-            }
-        )
-        submitted_daily_visits = db["daily_visits"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        updated_daily_visits = db["daily_visits"].count_documents(
-            {"updates": {"$exists": True}, "created_at": {"$gte": start_of_today_ist}}
-        )
-        active_hook_categories = db["hooks_category"].count_documents(
-            {"is_active": True}
-        )
-        inactive_hook_categories = db["hooks_category"].count_documents(
-            {"is_active": False}
-        )
-        submitted_shop_hooks = db["shop_hooks"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        submitted_potential_customers = db["potential_customers"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        submitted_targeted_customers = db["targeted_customers"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        submitted_expected_reorders = db["expected_reorders"].count_documents(
-            {"created_at": {"$gte": start_of_today_ist}}
-        )
-        delivery_partners = db["delivery_partners"].count_documents({})
-        return_orders = db["return_orders"].count_documents({})
-        brands = db["brands"].count_documents({})
-        external_links = db["external_links"].count_documents({})
-        customer_analytics_count_pipeline = [
-    # Stage 1: Filter invoices (same as your main pipeline)
-    {
-        "$match": {
-            "date": {"$gte": "2023-04-01"},
-            "status": {"$nin": ["void", "draft"]},
-            "customer_name": {
-                "$not": {
-                    "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit|Flipkart",
-                    "$options": "i",
-                }
-            },
-        }
-    },
-    # Stage 2: Add normalized city field (same logic as your main pipeline)
-    {
-        "$addFields": {
-            "normalizedCity": {
-                "$switch": {
-                    "branches": [
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(bangalore|bengaluru)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "bengaluru",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(mumbai|bombay)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "mumbai",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(delhi|new delhi)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "delhi",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(kolkata|calcutta)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "kolkata",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(chennai|madras)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "chennai",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(hyderabad|secunderabad)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "hyderabad",
-                        },
-                        {
-                            "case": {
-                                "$regexMatch": {
-                                    "input": "$billing_address.city",
-                                    "regex": "^(pune|poona)$",
-                                    "options": "i",
-                                }
-                            },
-                            "then": "pune",
-                        },
-                    ],
-                    "default": {"$toLower": "$billing_address.city"},
-                }
-            }
-        }
-    },
-    # Stage 3: Group by customer and address (same grouping as your main pipeline)
-    {
-        "$group": {
-            "_id": {
-                "customerId": "$customer_id",
-                "city": "$normalizedCity",
-                "state": "$billing_address.state", 
-                "zip": "$billing_address.zip",
-                "country": "$billing_address.country",
-            }
-        }
-    },
-    # Stage 4: Lookup customer details (to apply same customer filters)
-    {
-        "$lookup": {
-            "from": "customers",
-            "localField": "_id.customerId", 
-            "foreignField": "contact_id",
-            "as": "customerDetails",
-        }
-    },
-    # Stage 5: Count the total unique customer analytics records
-    {
-        "$count": "total_customer_analytics"
-    }
-]
+        # Create thread pool for concurrent database operations
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            # Group 1: Product statistics (can be combined into one aggregation)
+            products_stats_future = executor.submit(get_products_stats)
+            
+            # Group 2: Customer statistics (can be combined)
+            customers_stats_future = executor.submit(get_customers_stats)
+            
+            # Group 3: Billing statistics (complex, keep separate but optimize)
+            billing_stats_future = executor.submit(get_billing_stats, six_months_ago)
+            
+            # Group 4: Sales people statistics
+            sales_people_stats_future = executor.submit(get_sales_people_stats)
+            
+            # Group 5: Orders statistics (can be combined)
+            orders_stats_future = executor.submit(get_orders_stats, start_of_today_ist)
+            
+            # Group 6: Content statistics (catalogues, trainings, announcements)
+            content_stats_future = executor.submit(get_content_stats)
+            
+            # Group 7: Payment and visit statistics
+            payments_visits_future = executor.submit(get_payments_visits_stats, 
+                                                   today_str, day_before_yesterday_str, start_of_today_ist)
+            
+            # Group 8: Miscellaneous counts
+            misc_stats_future = executor.submit(get_misc_stats, start_of_today_ist)
+            
+            # Group 9: Customer analytics (most complex, keep separate)
+            customer_analytics_future = executor.submit(get_customer_analytics_count)
 
-        # Execute the pipeline
-        customer_analytics_result = list(db["invoices"].aggregate(customer_analytics_count_pipeline))
-        total_customer_analytics = customer_analytics_result[0]["total_customer_analytics"] if customer_analytics_result else 0
+            # Wait for all futures to complete
+            products_stats = products_stats_future.result()
+            customers_stats = customers_stats_future.result()
+            billing_stats = billing_stats_future.result()
+            sales_people_stats = sales_people_stats_future.result()
+            orders_stats = orders_stats_future.result()
+            content_stats = content_stats_future.result()
+            payments_visits_stats = payments_visits_future.result()
+            misc_stats = misc_stats_future.result()
+            customer_analytics = customer_analytics_future.result()
 
-
-        return {
-            "active_stock_products": active_stock_products,
-            "active_products": active_products,
-            "inactive_products": inactive_products,
-            "total_products": total_products,
-            "out_of_stock_products": out_of_stock_products,
-            "assigned_customers": assigned_customers,
-            "unassigned_customers": unassigned_customers,
-            "active_customers": active_customers,
-            "inactive_customers": inactive_customers,
-            # New 6-month billing statistics
-            "total_billed_customers_6_months": total_billed_customers_6_months,
-            "total_unbilled_customers_6_months": total_unbilled_customers_6_months,
-            "active_sales_people": active_sales_people,
-            "inactive_sales_people": inactive_sales_people,
-            "total_sales_people": total_sales_people,
-            "orders_draft": orders_draft,
-            "orders_accepted": orders_accepted,
-            "orders_declined": orders_declined,
-            "orders_invoiced": orders_invoiced,
-            "recent_orders": recent_orders,
-            "active_catalogues": active_catalogues,
-            "inactive_catalogues": inactive_catalogues,
-            "active_trainings": active_trainings,
-            "inactive_trainings": inactive_trainings,
-            "active_announcements": active_announcements,
-            "inactive_announcements": inactive_announcements,
-            "total_due_payments": total_due_payments,
-            "total_due_payments_today": total_due_payments_today,
-            "submitted_daily_visits": submitted_daily_visits,
-            "updated_daily_visits": updated_daily_visits,
-            "active_hook_categories": active_hook_categories,
-            "inactive_hook_categories": inactive_hook_categories,
-            "submitted_shop_hooks": submitted_shop_hooks,
-            "submitted_potential_customers": submitted_potential_customers,
-            "submitted_targeted_customers": submitted_targeted_customers,
-            "submitted_expected_reorders": submitted_expected_reorders,
-            "delivery_partners": delivery_partners,
-            "return_orders": return_orders,
-            "brands": brands,
-            "external_links": external_links,
-            "total_customer_analytics": total_customer_analytics,
+        # Combine all results
+        result = {
+            **products_stats,
+            **customers_stats,
+            **billing_stats,
+            **sales_people_stats,
+            **orders_stats,
+            **content_stats,
+            **payments_visits_stats,
+            **misc_stats,
+            **customer_analytics
         }
+
+        return result
 
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+def get_products_stats():
+    """Combine all product-related counts into a single aggregation"""
+    pipeline = [
+        {
+            "$facet": {
+                "active_stock": [{"$match": {"stock": {"$gt": 0}}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}],
+                "total": [{"$count": "count"}],
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "out_of_stock": [{"$match": {"stock": {"$lte": 0}}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["products"].aggregate(pipeline))[0]
+    
+    return {
+        "active_stock_products": result["active_stock"][0]["count"] if result["active_stock"] else 0,
+        "inactive_products": result["inactive"][0]["count"] if result["inactive"] else 0,
+        "total_products": result["total"][0]["count"] if result["total"] else 0,
+        "active_products": result["active"][0]["count"] if result["active"] else 0,
+        "out_of_stock_products": result["out_of_stock"][0]["count"] if result["out_of_stock"] else 0,
+    }
+
+
+def get_customers_stats():
+    """Combine all customer-related counts into a single aggregation"""
+    pipeline = [
+        {
+            "$facet": {
+                "assigned": [
+                    {"$match": {"cf_sales_person": {"$exists": True, "$ne": "", "$ne": None}}},
+                    {"$count": "count"}
+                ],
+                "unassigned": [
+                    {
+                        "$match": {
+                            "$or": [
+                                {"cf_sales_person": {"$exists": False}},
+                                {"cf_sales_person": ""},
+                                {"cf_sales_person": None},
+                            ]
+                        }
+                    },
+                    {"$count": "count"}
+                ],
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["customers"].aggregate(pipeline))[0]
+    
+    return {
+        "assigned_customers": result["assigned"][0]["count"] if result["assigned"] else 0,
+        "unassigned_customers": result["unassigned"][0]["count"] if result["unassigned"] else 0,
+        "active_customers": result["active"][0]["count"] if result["active"] else 0,
+        "inactive_customers": result["inactive"][0]["count"] if result["inactive"] else 0,
+    }
+
+
+def get_billing_stats(six_months_ago):
+    """Optimized billing statistics with single pipeline for billed customers"""
+    # Combined pipeline for billed customers and getting their IDs
+    billed_customers_pipeline = [
+        {
+            "$match": {
+                "status": {"$nin": ["void", "draft"]},
+                "created_time": {"$exists": True},
+            }
+        },
+        {
+            "$addFields": {
+                "parsed_date": {
+                    "$dateFromString": {
+                        "dateString": {"$substr": ["$created_time", 0, 19]}
+                    }
+                }
+            }
+        },
+        {"$match": {"parsed_date": {"$gte": six_months_ago}}},
+        {
+            "$group": {
+                "_id": "$customer_id"
+            }
+        },
+        {
+            "$facet": {
+                "count": [{"$count": "total"}],
+                "customer_ids": [{"$project": {"_id": 1}}]
+            }
+        }
+    ]
+
+    billed_result = list(db["invoices"].aggregate(billed_customers_pipeline))[0]
+    total_billed_customers_6_months = billed_result["count"][0]["total"] if billed_result["count"] else 0
+    billed_customer_ids = [doc["_id"] for doc in billed_result["customer_ids"]]
+
+    # Count unbilled customers
+    unbilled_customers_query = {
+        "status": "active",
+        "contact_id": {"$nin": billed_customer_ids},
+    }
+    total_unbilled_customers_6_months = db["customers"].count_documents(unbilled_customers_query)
+
+    return {
+        "total_billed_customers_6_months": total_billed_customers_6_months,
+        "total_unbilled_customers_6_months": total_unbilled_customers_6_months,
+    }
+
+
+def get_sales_people_stats():
+    """Combine sales people statistics"""
+    pipeline = [
+        {
+            "$match": {"role": "sales_person"}
+        },
+        {
+            "$facet": {
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["users"].aggregate(pipeline))[0]
+    active_sales_people = result["active"][0]["count"] if result["active"] else 0
+    inactive_sales_people = result["inactive"][0]["count"] if result["inactive"] else 0
+    
+    return {
+        "active_sales_people": active_sales_people,
+        "inactive_sales_people": inactive_sales_people,
+        "total_sales_people": active_sales_people + inactive_sales_people,
+    }
+
+
+def get_orders_stats(start_of_today_ist):
+    """Combine all order statistics"""
+    pipeline = [
+        {
+            "$match": {"created_at": {"$gte": start_of_today_ist}}
+        },
+        {
+            "$facet": {
+                "total": [{"$count": "count"}],
+                "draft": [{"$match": {"status": "draft"}}, {"$count": "count"}],
+                "accepted": [{"$match": {"status": "accepted"}}, {"$count": "count"}],
+                "declined": [{"$match": {"status": "declined"}}, {"$count": "count"}],
+                "invoiced": [{"$match": {"status": "invoiced"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["orders"].aggregate(pipeline))[0]
+    
+    return {
+        "recent_orders": result["total"][0]["count"] if result["total"] else 0,
+        "orders_draft": result["draft"][0]["count"] if result["draft"] else 0,
+        "orders_accepted": result["accepted"][0]["count"] if result["accepted"] else 0,
+        "orders_declined": result["declined"][0]["count"] if result["declined"] else 0,
+        "orders_invoiced": result["invoiced"][0]["count"] if result["invoiced"] else 0,
+    }
+
+
+def get_content_stats():
+    """Combine catalogues, trainings, and announcements statistics"""
+    # Use concurrent execution for these independent collections
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        catalogues_future = executor.submit(lambda: {
+            "active": db["catalogues"].count_documents({"is_active": True}),
+            "inactive": db["catalogues"].count_documents({"is_active": False})
+        })
+        
+        trainings_future = executor.submit(lambda: {
+            "active": db["trainings"].count_documents({"is_active": True}),
+            "inactive": db["trainings"].count_documents({"is_active": False})
+        })
+        
+        announcements_future = executor.submit(lambda: {
+            "active": db["announcements"].count_documents({"is_active": True}),
+            "inactive": db["announcements"].count_documents({"is_active": False})
+        })
+        
+        catalogues = catalogues_future.result()
+        trainings = trainings_future.result()
+        announcements = announcements_future.result()
+    
+    return {
+        "active_catalogues": catalogues["active"],
+        "inactive_catalogues": catalogues["inactive"],
+        "active_trainings": trainings["active"],
+        "inactive_trainings": trainings["inactive"],
+        "active_announcements": announcements["active"],
+        "inactive_announcements": announcements["inactive"],
+    }
+
+
+def get_payments_visits_stats(today_str, day_before_yesterday_str, start_of_today_ist):
+    """Combine payment and visit statistics"""
+    # Payments
+    payments_pipeline = [
+        {
+            "$facet": {
+                "overdue": [
+                    {
+                        "$match": {
+                            "due_date": {"$lt": today_str},
+                            "status": {"$nin": ["paid", "void"]},
+                        }
+                    },
+                    {"$count": "count"}
+                ],
+                "due_today": [
+                    {
+                        "$match": {
+                            "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
+                            "status": {"$nin": ["paid", "void"]},
+                        }
+                    },
+                    {"$count": "count"}
+                ]
+            }
+        }
+    ]
+    
+    payments_result = list(db["invoices"].aggregate(payments_pipeline))[0]
+    
+    # Visits
+    visits_pipeline = [
+        {
+            "$match": {"created_at": {"$gte": start_of_today_ist}}
+        },
+        {
+            "$facet": {
+                "submitted": [{"$count": "count"}],
+                "updated": [
+                    {"$match": {"updates": {"$exists": True}}},
+                    {"$count": "count"}
+                ]
+            }
+        }
+    ]
+    
+    visits_result = list(db["daily_visits"].aggregate(visits_pipeline))[0]
+    
+    return {
+        "total_due_payments": payments_result["overdue"][0]["count"] if payments_result["overdue"] else 0,
+        "total_due_payments_today": payments_result["due_today"][0]["count"] if payments_result["due_today"] else 0,
+        "submitted_daily_visits": visits_result["submitted"][0]["count"] if visits_result["submitted"] else 0,
+        "updated_daily_visits": visits_result["updated"][0]["count"] if visits_result["updated"] else 0,
+    }
+
+
+def get_misc_stats(start_of_today_ist):
+    """Get miscellaneous statistics concurrently"""
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        # Hook categories
+        hook_categories_future = executor.submit(lambda: {
+            "active": db["hooks_category"].count_documents({"is_active": True}),
+            "inactive": db["hooks_category"].count_documents({"is_active": False})
+        })
+        
+        # Today's submissions
+        today_filter = {"created_at": {"$gte": start_of_today_ist}}
+        submissions_future = executor.submit(lambda: {
+            "shop_hooks": db["shop_hooks"].count_documents(today_filter),
+            "potential_customers": db["potential_customers"].count_documents(today_filter),
+            "targeted_customers": db["targeted_customers"].count_documents(today_filter),
+            "expected_reorders": db["expected_reorders"].count_documents(today_filter),
+        })
+        
+        # General counts
+        general_counts_future = executor.submit(lambda: {
+            "delivery_partners": db["delivery_partners"].count_documents({}),
+            "return_orders": db["return_orders"].count_documents({}),
+            "brands": db["brands"].count_documents({}),
+            "external_links": db["external_links"].count_documents({}),
+        })
+        
+        hook_categories = hook_categories_future.result()
+        submissions = submissions_future.result()
+        general_counts = general_counts_future.result()
+    
+    return {
+        "active_hook_categories": hook_categories["active"],
+        "inactive_hook_categories": hook_categories["inactive"],
+        "submitted_shop_hooks": submissions["shop_hooks"],
+        "submitted_potential_customers": submissions["potential_customers"],
+        "submitted_targeted_customers": submissions["targeted_customers"],
+        "submitted_expected_reorders": submissions["expected_reorders"],
+        **general_counts
+    }
+
+
+def get_customer_analytics_count():
+    """Optimized customer analytics count with better indexing hints"""
+    customer_analytics_count_pipeline = [
+        # Add hint for better performance if you have the right index
+        {
+            "$match": {
+                "date": {"$gte": "2023-04-01"},
+                "status": {"$nin": ["void", "draft"]},
+                "customer_name": {
+                    "$not": {
+                        "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit|Flipkart",
+                        "$options": "i",
+                    }
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "normalizedCity": {
+                    "$switch": {
+                        "branches": [
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(bangalore|bengaluru)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "bengaluru",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(mumbai|bombay)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "mumbai",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(delhi|new delhi)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "delhi",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(kolkata|calcutta)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "kolkata",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(chennai|madras)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "chennai",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(hyderabad|secunderabad)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "hyderabad",
+                            },
+                            {
+                                "case": {
+                                    "$regexMatch": {
+                                        "input": "$billing_address.city",
+                                        "regex": "^(pune|poona)$",
+                                        "options": "i",
+                                    }
+                                },
+                                "then": "pune",
+                            },
+                        ],
+                        "default": {"$toLower": "$billing_address.city"},
+                    }
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": {
+                    "customerId": "$customer_id",
+                    "city": "$normalizedCity",
+                    "state": "$billing_address.state", 
+                    "zip": "$billing_address.zip",
+                    "country": "$billing_address.country",
+                }
+            }
+        },
+        {
+            "$count": "total_customer_analytics"
+        }
+    ]
+
+    customer_analytics_result = list(db["invoices"].aggregate(customer_analytics_count_pipeline))
+    total_customer_analytics = customer_analytics_result[0]["total_customer_analytics"] if customer_analytics_result else 0
+    
+    return {"total_customer_analytics": total_customer_analytics}
 
 @router.get("/brands")
 def get_all_brands():
@@ -2318,5 +2454,11 @@ router.include_router(
     admin_customer_analytics_router,
     prefix="/customer_analytics",
     tags=["Admin Customer Analytics"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_attendance_router,
+    prefix="/attendance",
+    tags=["Employee Attendance"],
     dependencies=[Depends(JWTBearer())],
 )
