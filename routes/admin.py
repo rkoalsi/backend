@@ -39,6 +39,11 @@ import pandas as pd
 from io import BytesIO
 from pymongo.errors import OperationFailure
 from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, date
+from typing import  List
+import pytz
+from bson import ObjectId
 
 
 load_dotenv()
@@ -49,6 +54,12 @@ products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
+
+# Connect to attendance database
+attendance_db = client.get_database("attendance")
+employees_collection = attendance_db.get_collection("employees")
+attendance_collection = attendance_db.get_collection("attendance")
+device_collection = attendance_db.get_collection("devices")
 
 AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
 AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
@@ -66,10 +77,213 @@ s3_client = boto3.client(
 MAX_FILE_SIZE_MB = 10
 
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, date
-from pytz import timezone as tz
+# Cache for device locations
+DEVICE_CACHE = {}
+
+
+def serialize_objectid_document(doc):
+    """Helper function to recursively convert ObjectIds to strings in MongoDB documents"""
+    if isinstance(doc, dict):
+        return {key: serialize_objectid_document(value) for key, value in doc.items()}
+    elif isinstance(doc, list):
+        return [serialize_objectid_document(item) for item in doc]
+    elif isinstance(doc, ObjectId):
+        return str(doc)
+    else:
+        return doc
+
+
+def convert_utc_to_ist(utc_time):
+    """Convert UTC time to IST"""
+    if utc_time.tzinfo is None:
+        utc_time = pytz.UTC.localize(utc_time)
+    ist = pytz.timezone('Asia/Kolkata')
+    return utc_time.astimezone(ist)
+
+
+def parse_swipe_datetime(swipe_datetime):
+    """Parse swipe_datetime which can be either a string or datetime object"""
+    if isinstance(swipe_datetime, datetime):
+        return swipe_datetime
+    elif isinstance(swipe_datetime, str):
+        try:
+            # Try parsing format like "19-03-2025 09:57:00"
+            return datetime.strptime(swipe_datetime, "%d-%m-%Y %H:%M:%S")
+        except ValueError:
+            try:
+                # Try ISO format
+                return datetime.fromisoformat(swipe_datetime.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    elif isinstance(swipe_datetime, dict) and "$date" in swipe_datetime:
+        # Handle MongoDB date format
+        try:
+            return datetime.fromisoformat(swipe_datetime["$date"].replace("Z", "+00:00"))
+        except:
+            return None
+    return None
+
+
+def get_all_devices_cached():
+    """Cache all devices on first call to avoid repeated queries"""
+    global DEVICE_CACHE
+    
+    if not DEVICE_CACHE:
+        devices = list(device_collection.find({}))
+        for device in devices:
+            serialized_device = serialize_objectid_document(device)
+            device_id = serialized_device["_id"]
+            device_name = serialized_device.get("name", "Unknown Location")
+            DEVICE_CACHE[device_id] = device_name
+            if "name" in serialized_device:
+                DEVICE_CACHE[serialized_device["name"]] = device_name
+    
+    return DEVICE_CACHE
+
+
+def get_attendance_stats(start_of_today_ist, now_ist):
+    """Get attendance statistics for today"""
+    try:
+        # Get today's date in string format for comparison
+        today_str = start_of_today_ist.strftime("%Y-%m-%d")
+        
+        # Cache devices
+        device_cache = get_all_devices_cached()
+        
+        # Get today's attendance records
+        today_attendance_pipeline = [
+            {
+                "$match": {
+                    "$or": [
+                        {"created_at": {"$gte": start_of_today_ist}},
+                        {"swipe_datetime": {"$gte": start_of_today_ist}}
+                    ]
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "employees",
+                    "localField": "employee_id",
+                    "foreignField": "_id",
+                    "as": "employee_info"
+                }
+            },
+            {
+                "$unwind": {
+                    "path": "$employee_info",
+                    "preserveNullAndEmptyArrays": True
+                }
+            }
+        ]
+        
+        attendance_records = list(attendance_collection.aggregate(today_attendance_pipeline))
+        
+        # Process attendance data
+        total_records_today = len(attendance_records)
+        unique_employees_today = set()
+        check_ins_today = 0
+        check_outs_today = 0
+        total_work_hours = 0
+        employee_attendance_summary = {}
+        
+        for record in attendance_records:
+            employee_id = str(record.get("employee_id", ""))
+            employee_name = record.get("employee_info", {}).get("name", "Unknown")
+            
+            # Parse swipe time
+            swipe_time = parse_swipe_datetime(record.get("swipe_datetime"))
+            if not swipe_time:
+                swipe_time = parse_swipe_datetime(record.get("created_at"))
+            
+            if swipe_time:
+                # Convert to IST
+                ist_time = convert_utc_to_ist(swipe_time)
+                date_key = ist_time.strftime("%Y-%m-%d")
+                
+                # Only process today's records
+                if date_key == today_str:
+                    unique_employees_today.add(employee_id)
+                    
+                    # Track check-ins and check-outs
+                    is_check_in = record.get("is_check_in", True)
+                    if is_check_in:
+                        check_ins_today += 1
+                    else:
+                        check_outs_today += 1
+                    
+                    # Group by employee for work hours calculation
+                    if employee_id not in employee_attendance_summary:
+                        employee_attendance_summary[employee_id] = {
+                            "name": employee_name,
+                            "check_ins": [],
+                            "check_outs": []
+                        }
+                    
+                    if is_check_in:
+                        employee_attendance_summary[employee_id]["check_ins"].append(ist_time)
+                    else:
+                        employee_attendance_summary[employee_id]["check_outs"].append(ist_time)
+        
+        # Calculate total work hours
+        employees_with_complete_attendance = 0
+        total_work_minutes = 0
+        
+        for emp_id, emp_data in employee_attendance_summary.items():
+            check_ins = sorted(emp_data["check_ins"])
+            check_outs = sorted(emp_data["check_outs"])
+            
+            # Calculate work hours for employees with both check-in and check-out
+            if check_ins and check_outs:
+                # Use first check-in and last check-out
+                work_duration = check_outs[-1] - check_ins[0]
+                work_minutes = work_duration.total_seconds() / 60
+                total_work_minutes += work_minutes
+                employees_with_complete_attendance += 1
+        
+        # Calculate average work hours
+        average_work_hours = 0
+        if employees_with_complete_attendance > 0:
+            average_work_hours = total_work_minutes / employees_with_complete_attendance / 60
+        
+        # Get total employees count
+        total_employees = employees_collection.count_documents({})
+        
+        # Calculate attendance rate
+        attendance_rate = 0
+        if total_employees > 0:
+            attendance_rate = (len(unique_employees_today) / total_employees) * 100
+        
+        return {
+            "total_attendance_records_today": total_records_today,
+            "unique_employees_present_today": len(unique_employees_today),
+            "total_employees": total_employees,
+            "attendance_rate_percentage": round(attendance_rate, 2),
+            "check_ins_today": check_ins_today,
+            "check_outs_today": check_outs_today,
+            "employees_with_complete_attendance": employees_with_complete_attendance,
+            "average_work_hours_today": round(average_work_hours, 2),
+            "total_devices": len(device_cache),
+            "attendance_date": today_str,
+            "last_updated_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
+        }
+        
+    except Exception as e:
+        print(f"Error getting attendance stats: {e}")
+        return {
+            "total_attendance_records_today": 0,
+            "unique_employees_present_today": 0,
+            "total_employees": 0,
+            "attendance_rate_percentage": 0,
+            "check_ins_today": 0,
+            "check_outs_today": 0,
+            "employees_with_complete_attendance": 0,
+            "average_work_hours_today": 0,
+            "total_devices": 0,
+            "attendance_date": start_of_today_ist.strftime("%Y-%m-%d"),
+            "last_updated_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "error": str(e)
+        }
+
 
 @router.get("/stats")
 async def get_stats():
@@ -85,7 +299,7 @@ async def get_stats():
         today_str = today.isoformat()
 
         # Create thread pool for concurrent database operations
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:  # Increased workers for attendance
             # Group 1: Product statistics (can be combined into one aggregation)
             products_stats_future = executor.submit(get_products_stats)
             
@@ -113,6 +327,9 @@ async def get_stats():
             
             # Group 9: Customer analytics (most complex, keep separate)
             customer_analytics_future = executor.submit(get_customer_analytics_count)
+            
+            # Group 10: Attendance statistics (NEW)
+            attendance_stats_future = executor.submit(get_attendance_stats, start_of_today_ist, now_ist)
 
             # Wait for all futures to complete
             products_stats = products_stats_future.result()
@@ -124,6 +341,7 @@ async def get_stats():
             payments_visits_stats = payments_visits_future.result()
             misc_stats = misc_stats_future.result()
             customer_analytics = customer_analytics_future.result()
+            attendance_stats = attendance_stats_future.result()
 
         # Combine all results
         result = {
@@ -135,7 +353,8 @@ async def get_stats():
             **content_stats,
             **payments_visits_stats,
             **misc_stats,
-            **customer_analytics
+            **customer_analytics,
+            **attendance_stats  # Add attendance stats to response
         }
 
         return result
@@ -145,6 +364,7 @@ async def get_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# All existing helper functions remain the same
 def get_products_stats():
     """Combine all product-related counts into a single aggregation"""
     pipeline = [
