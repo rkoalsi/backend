@@ -114,7 +114,6 @@ def create_external_link(external_link: dict):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-
 @router.put("/{external_link_id}")
 def update_external_link(external_link_id: str, external_link: dict):
     """
@@ -122,25 +121,42 @@ def update_external_link(external_link_id: str, external_link: dict):
     Only the fields sent in the request will be updated.
     """
     try:
+        # Validate ObjectId format
+        try:
+            obj_id = ObjectId(external_link_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid external_link_id format")
+        
+        # Check if the document exists first
+        existing_doc = db.external_links.find_one({"_id": obj_id})
+        if not existing_doc:
+            raise HTTPException(status_code=404, detail="External Link not found")
+        
         # Build a dictionary of fields to update (skip any that are None)
         update_data = {k: v for k, v in external_link.items() if v is not None}
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
-
+        
+        print("Update data:", update_data)
+        print("Existing document:", existing_doc)
+        
+        # Perform the update
         result = db.external_links.update_one(
-            {"_id": ObjectId(external_link_id)}, {"$set": update_data}
+            {"_id": obj_id}, 
+            {"$set": update_data}
         )
-
-        if result.modified_count == 1:
-            # Fetch and return the updated document.
-            updated_external_link = db.external_links.find_one(
-                {"_id": ObjectId(external_link_id)}
-            )
-            return serialize_mongo_document(updated_external_link)
-        else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
+        
+        # Check if update was successful
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="External Link not found")
+        
+        # Fetch and return the updated document
+        updated_external_link = db.external_links.find_one({"_id": obj_id})
+        return serialize_mongo_document(updated_external_link)
+        
+    except HTTPException:
+        # Re-raise HTTPExceptions to preserve their status codes
+        raise
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
