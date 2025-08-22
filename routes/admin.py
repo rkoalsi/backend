@@ -320,7 +320,284 @@ async def get_stats():
             
             # Group 7: Payment and visit statistics
             payments_visits_future = executor.submit(get_payments_visits_stats, 
-                                                   today_str, day_before_yesterday_str, start_of_today_ist)
+                                                   today_str, day_before_yesterday_str, start_of_today_ist, today, day_before_yesterday)
+            
+            # Group 8: Miscellaneous counts
+            misc_stats_future = executor.submit(get_misc_stats, start_of_today_ist)
+            
+            # Group 9: Customer analytics (most complex, keep separate)
+            customer_analytics_future = executor.submit(get_customer_analytics_count)
+            
+            # Group 10: Attendance statistics (NEW)
+            attendance_stats_future = executor.submit(get_attendance_stats, start_of_today_ist, now_ist)
+
+            # Wait for all futures to complete
+            products_stats = products_stats_future.result()
+            customers_stats = customers_stats_future.result()
+            billing_stats = billing_stats_future.result()
+            sales_people_stats = sales_people_stats_future.result()
+            orders_stats = orders_stats_future.result()
+            content_stats = content_stats_future.result()
+            payments_visits_stats = payments_visits_future.result()
+            misc_stats = misc_stats_future.result()
+            customer_analytics = customer_analytics_future.result()
+            attendance_stats = attendance_stats_future.result()
+
+        # Combine all results
+        result = {
+            **products_stats,
+            **customers_stats,
+            **billing_stats,
+            **sales_people_stats,
+            **orders_stats,
+            **content_stats,
+            **payments_visits_stats,
+            **misc_stats,
+            **customer_analytics,
+            **attendance_stats  # Add attendance stats to response
+        }
+
+        return result
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# All existing helper functions remain the same
+def get_products_stats():
+    """Combine all product-related counts into a single aggregation"""
+    pipeline = [
+        {
+            "$facet": {
+                "active_stock": [{"$match": {"stock": {"$gt": 0}}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}],
+                "total": [{"$count": "count"}],
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "out_of_stock": [{"$match": {"stock": {"$lte": 0}}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["products"].aggregate(pipeline))[0]
+    
+    return {
+        "active_stock_products": result["active_stock"][0]["count"] if result["active_stock"] else 0,
+        "inactive_products": result["inactive"][0]["count"] if result["inactive"] else 0,
+        "total_products": result["total"][0]["count"] if result["total"] else 0,
+        "active_products": result["active"][0]["count"] if result["active"] else 0,
+        "out_of_stock_products": result["out_of_stock"][0]["count"] if result["out_of_stock"] else 0,
+    }
+
+
+def get_customers_stats():
+    """Combine all customer-related counts into a single aggregation"""
+    pipeline = [
+        {
+            "$facet": {
+                "assigned": [
+                    {"$match": {"cf_sales_person": {"$exists": True, "$ne": "", "$ne": None}}},
+                    {"$count": "count"}
+                ],
+                "unassigned": [
+                    {
+                        "$match": {
+                            "$or": [
+                                {"cf_sales_person": {"$exists": False}},
+                                {"cf_sales_person": ""},
+                                {"cf_sales_person": None},
+                            ]
+                        }
+                    },
+                    {"$count": "count"}
+                ],
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["customers"].aggregate(pipeline))[0]
+    
+    return {
+        "assigned_customers": result["assigned"][0]["count"] if result["assigned"] else 0,
+        "unassigned_customers": result["unassigned"][0]["count"] if result["unassigned"] else 0,
+        "active_customers": result["active"][0]["count"] if result["active"] else 0,
+        "inactive_customers": result["inactive"][0]["count"] if result["inactive"] else 0,
+    }
+
+
+def get_billing_stats(six_months_ago):
+    """Optimized billing statistics with single pipeline for billed customers"""
+    # Combined pipeline for billed customers and getting their IDs
+    billed_customers_pipeline = [
+        {
+            "$match": {
+                "status": {"$nin": ["void", "draft"]},
+                "created_time": {"$exists": True},
+            }
+        },
+        {
+            "$addFields": {
+                "parsed_date": {
+                    "$dateFromString": {
+                        "dateString": {"$substr": ["$created_time", 0, 19]}
+                    }
+                }
+            }
+        },
+        {"$match": {"parsed_date": {"$gte": six_months_ago}}},
+        {
+            "$group": {
+                "_id": "$customer_id"
+            }
+        },
+        {
+            "$facet": {
+                "count": [{"$count": "total"}],
+                "customer_ids": [{"$project": {"_id": 1}}]
+            }
+        }
+    ]
+
+    billed_result = list(db["invoices"].aggregate(billed_customers_pipeline))[0]
+    total_billed_customers_6_months = billed_result["count"][0]["total"] if billed_result["count"] else 0
+    billed_customer_ids = [doc["_id"] for doc in billed_result["customer_ids"]]
+
+    # Count unbilled customers
+    unbilled_customers_query = {
+        "status": "active",
+        "contact_id": {"$nin": billed_customer_ids},
+    }
+    total_unbilled_customers_6_months = db["customers"].count_documents(unbilled_customers_query)
+
+    return {
+        "total_billed_customers_6_months": total_billed_customers_6_months,
+        "total_unbilled_customers_6_months": total_unbilled_customers_6_months,
+    }
+
+
+def get_sales_people_stats():
+    """Combine sales people statistics"""
+    pipeline = [
+        {
+            "$match": {"role": "sales_person"}
+        },
+        {
+            "$facet": {
+                "active": [{"$match": {"status": "active"}}, {"$count": "count"}],
+                "inactive": [{"$match": {"status": "inactive"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["users"].aggregate(pipeline))[0]
+    active_sales_people = result["active"][0]["count"] if result["active"] else 0
+    inactive_sales_people = result["inactive"][0]["count"] if result["inactive"] else 0
+    
+    return {
+        "active_sales_people": active_sales_people,
+        "inactive_sales_people": inactive_sales_people,
+        "total_sales_people": active_sales_people + inactive_sales_people,
+    }
+
+
+def get_orders_stats(start_of_today_ist):
+    """Combine all order statistics"""
+    pipeline = [
+        {
+            "$match": {"created_at": {"$gte": start_of_today_ist}}
+        },
+        {
+            "$facet": {
+                "total": [{"$count": "count"}],
+                "draft": [{"$match": {"status": "draft"}}, {"$count": "count"}],
+                "accepted": [{"$match": {"status": "accepted"}}, {"$count": "count"}],
+                "declined": [{"$match": {"status": "declined"}}, {"$count": "count"}],
+                "invoiced": [{"$match": {"status": "invoiced"}}, {"$count": "count"}]
+            }
+        }
+    ]
+    
+    result = list(db["orders"].aggregate(pipeline))[0]
+    
+    return {
+        "recent_orders": result["total"][0]["count"] if result["total"] else 0,
+        "orders_draft": result["draft"][0]["count"] if result["draft"] else 0,
+        "orders_accepted": result["accepted"][0]["count"] if result["accepted"] else 0,
+        "orders_declined": result["declined"][0]["count"] if result["declined"] else 0,
+        "orders_invoiced": result["invoiced"][0]["count"] if result["invoiced"] else 0,
+    }
+
+
+def get_content_stats():
+    """Combine catalogues, trainings, and announcements statistics"""
+    # Use concurrent execution for these independent collections
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        catalogues_future = executor.submit(lambda: {
+            "active": db["catalogues"].count_documents({"is_active": True}),
+            "inactive": db["catalogues"].count_documents({"is_active": False})
+        })
+        
+        trainings_future = executor.submit(lambda: {
+            "active": db["trainings"].count_documents({"is_active": True}),
+            "inactive": db["trainings"].count_documents({"is_active": False})
+        })
+        
+        announcements_future = executor.submit(lambda: {
+            "active": db["announcements"].count_documents({"is_active": True}),
+            "inactive": db["announcements"].count_documents({"is_active": False})
+        })
+        
+        catalogues = catalogues_future.result()
+        trainings = trainings_future.result()
+        announcements = announcements_future.result()
+    
+    return {
+        "active_catalogues": catalogues["active"],
+        "inactive_catalogues": catalogues["inactive"],
+        "active_trainings": trainings["active"],
+        "inactive_trainings": trainings["inactive"],
+        "active_announcements": announcements["active"],
+        "inactive_announcements": announcements["inactive"],
+    }
+
+@router.get("/stats")
+async def get_stats():
+    try:
+        # Pre-calculate common date values
+        ist = tz("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        six_months_ago = now_ist - timedelta(days=180)
+        start_of_today_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = date.today()
+        day_before_yesterday = today - timedelta(days=2)
+        day_before_yesterday_str = day_before_yesterday.isoformat()
+        today_str = today.isoformat()
+
+        # Create thread pool for concurrent database operations
+        with ThreadPoolExecutor(max_workers=10) as executor:  # Increased workers for attendance
+            # Group 1: Product statistics (can be combined into one aggregation)
+            products_stats_future = executor.submit(get_products_stats)
+            
+            # Group 2: Customer statistics (can be combined)
+            customers_stats_future = executor.submit(get_customers_stats)
+            
+            # Group 3: Billing statistics (complex, keep separate but optimize)
+            billing_stats_future = executor.submit(get_billing_stats, six_months_ago)
+            
+            # Group 4: Sales people statistics
+            sales_people_stats_future = executor.submit(get_sales_people_stats)
+            
+            # Group 5: Orders statistics (can be combined)
+            orders_stats_future = executor.submit(get_orders_stats, start_of_today_ist)
+            
+            # Group 6: Content statistics (catalogues, trainings, announcements)
+            content_stats_future = executor.submit(get_content_stats)
+            
+            # Group 7: Payment and visit statistics
+            payments_visits_future = executor.submit(get_payments_visits_stats, 
+                                                   today_str, day_before_yesterday_str, start_of_today_ist, today, day_before_yesterday)
             
             # Group 8: Miscellaneous counts
             misc_stats_future = executor.submit(get_misc_stats, start_of_today_ist)
@@ -563,16 +840,29 @@ def get_content_stats():
     }
 
 
-def get_payments_visits_stats(today_str, day_before_yesterday_str, start_of_today_ist):
-    """Combine payment and visit statistics"""
-    # Payments
+def get_payments_visits_stats(today_str, day_before_yesterday_str, start_of_today_ist, today_date, day_before_yesterday_date):
+    """Combine payment and visit statistics with mixed due_date support"""
+    # Convert date objects to datetime objects for MongoDB comparison
+    today_datetime = datetime.combine(today_date, datetime.min.time())
+    day_before_yesterday_datetime = datetime.combine(day_before_yesterday_date, datetime.min.time())
+    
+    # Payments with mixed due_date format support
     payments_pipeline = [
         {
             "$facet": {
                 "overdue": [
                     {
                         "$match": {
-                            "due_date": {"$lt": today_str},
+                            "$or": [
+                                # Case 1: due_date is a string
+                                {
+                                    "due_date": {"$type": "string", "$lt": today_str}
+                                },
+                                # Case 2: due_date is a date
+                                {
+                                    "due_date": {"$type": "date", "$lt": today_datetime}
+                                }
+                            ],
                             "status": {"$nin": ["paid", "void"]},
                         }
                     },
@@ -581,7 +871,24 @@ def get_payments_visits_stats(today_str, day_before_yesterday_str, start_of_toda
                 "due_today": [
                     {
                         "$match": {
-                            "due_date": {"$gt": day_before_yesterday_str, "$lt": today_str},
+                            "$or": [
+                                # Case 1: due_date is a string
+                                {
+                                    "due_date": {
+                                        "$type": "string", 
+                                        "$gt": day_before_yesterday_str, 
+                                        "$lt": today_str
+                                    }
+                                },
+                                # Case 2: due_date is a date
+                                {
+                                    "due_date": {
+                                        "$type": "date", 
+                                        "$gt": day_before_yesterday_datetime, 
+                                        "$lt": today_datetime
+                                    }
+                                }
+                            ],
                             "status": {"$nin": ["paid", "void"]},
                         }
                     },
@@ -617,7 +924,6 @@ def get_payments_visits_stats(today_str, day_before_yesterday_str, start_of_toda
         "submitted_daily_visits": visits_result["submitted"][0]["count"] if visits_result["submitted"] else 0,
         "updated_daily_visits": visits_result["updated"][0]["count"] if visits_result["updated"] else 0,
     }
-
 
 def get_misc_stats(start_of_today_ist):
     """Get miscellaneous statistics concurrently"""
@@ -1595,7 +1901,6 @@ async def export_orders(
 
     return Response(content=output.getvalue())
 
-
 @router.get("/payments_due")
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
@@ -1608,36 +1913,61 @@ def read_all_orders(
     page:  0-based page index
     limit: number of invoices per page
     """
-    # Get today's date in ISO format (YYYY-MM-DD)
+    # Get today's date in ISO format (YYYY-MM-DD) and as Date object
     today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Query to match invoices with a due_date less than today
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
-    # If you also want to ensure the invoice has a specific status (e.g., "overdue"),
-    # you can combine conditions like this:
-    # query = {"due_date": {"$lt": today_str}, "status": "overdue"}
+    # Handle both string and date formats for due_date
+    base_query = {
+        "$or": [
+            # Case 1: due_date is a string
+            {
+                "due_date": {"$type": "string", "$lt": today_str}
+            },
+            # Case 2: due_date is a date
+            {
+                "due_date": {"$type": "date", "$lt": today_date}
+            }
+        ],
+        "status": {"$nin": ["paid", "void"]}
+    }
+
+    # Additional filters
+    additional_conditions = []
+    
     if sales_person:
         escaped_sales_person = re.escape(sales_person)
-        query["$or"] = [
-            {
-                "cf_sales_person": {
-                    "$regex": f"^{escaped_sales_person}$",
-                    "$options": "i",
-                }
-            },
-            {
-                "salesperson_name": {
-                    "$regex": f"^{escaped_sales_person}$",
-                    "$options": "i",
-                }
-            },
-        ]
+        additional_conditions.append({
+            "$or": [
+                {
+                    "cf_sales_person": {
+                        "$regex": f"^{escaped_sales_person}$",
+                        "$options": "i",
+                    }
+                },
+                {
+                    "salesperson_name": {
+                        "$regex": f"^{escaped_sales_person}$",
+                        "$options": "i",
+                    }
+                },
+            ]
+        })
 
     if invoice_number:
-        query["invoice_number"] = {
-            "$regex": f"^{invoice_number.strip()}$",
-            "$options": "i",
-        }
+        additional_conditions.append({
+            "invoice_number": {
+                "$regex": f"^{invoice_number.strip()}$",
+                "$options": "i",
+            }
+        })
+
+    # Combine base query with additional conditions
+    if additional_conditions:
+        query = {"$and": [base_query] + additional_conditions}
+    else:
+        query = base_query
 
     # Basic query stage for the aggregation pipeline
     match_stage = {"$match": query}
@@ -1682,7 +2012,14 @@ def read_all_orders(
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                "due_date": {"$dateFromString": {"dateString": "$due_date"}},
+                # Handle both string and date formats for due_date
+                "due_date": {
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                        "then": {"$dateFromString": {"dateString": "$due_date"}},
+                        "else": "$due_date"
+                    }
+                },
                 "balance": 1,
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
@@ -1696,7 +2033,13 @@ def read_all_orders(
                 "created_by_name": 1,
                 "overdue_by_days": {
                     "$dateDiff": {
-                        "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                        "startDate": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                                "then": {"$dateFromString": {"dateString": "$due_date"}},
+                                "else": "$due_date"
+                            }
+                        },
                         "endDate": "$$NOW",
                         "unit": "day",
                     }
@@ -1736,21 +2079,59 @@ def download_payments_due_csv(sales_person: str):
     """
     Download all invoices past their due_date (and not paid) as a CSV file.
     """
+    # Get today's date in ISO format (YYYY-MM-DD) and as Date object
     today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Query to match invoices with a due_date less than today and status not in ["paid"]
-    query = {"due_date": {"$lt": today_str}, "status": {"$nin": ["paid", "void"]}}
+    # Handle both string and date formats for due_date
+    base_query = {
+        "$or": [
+            # Case 1: due_date is a string
+            {
+                "due_date": {"$type": "string", "$lt": today_str}
+            },
+            # Case 2: due_date is a date
+            {
+                "due_date": {"$type": "date", "$lt": today_date}
+            }
+        ],
+        "status": {"$nin": ["paid", "void"]}
+    }
+
     if sales_person:
-        query["$or"] = [
-            {"cf_sales_person": sales_person},
-            {"salesperson_name": sales_person},
-        ]
+        query = {
+            "$and": [
+                base_query,
+                {
+                    "$or": [
+                        {"cf_sales_person": sales_person},
+                        {"salesperson_name": sales_person},
+                    ]
+                }
+            ]
+        }
+    else:
+        query = base_query
+
     match_stage = {"$match": query}
 
     # Build the aggregation pipeline similar to the table data route
     pipeline = [
         match_stage,
-        {"$sort": {"due_date": -1}},
+        {
+            "$addFields": {
+                # Normalize due_date for sorting
+                "normalized_due_date": {
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                        "then": {"$dateFromString": {"dateString": "$due_date"}},
+                        "else": "$due_date"
+                    }
+                }
+            }
+        },
+        {"$sort": {"normalized_due_date": -1}},
         {
             "$lookup": {
                 "from": "invoice_notes",  # Collection to join
@@ -1769,7 +2150,14 @@ def download_payments_due_csv(sales_person: str):
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                "due_date": {"$dateFromString": {"dateString": "$due_date"}},
+                # Handle both string and date formats for due_date
+                "due_date": {
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                        "then": {"$dateFromString": {"dateString": "$due_date"}},
+                        "else": "$due_date"
+                    }
+                },
                 "balance": 1,
                 # For CSV purposes, you may output the status directly if needed
                 "status": {"$toString": "overdue"},
@@ -1784,7 +2172,13 @@ def download_payments_due_csv(sales_person: str):
                 "line_items": 1,
                 "overdue_by_days": {
                     "$dateDiff": {
-                        "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                        "startDate": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                                "then": {"$dateFromString": {"dateString": "$due_date"}},
+                                "else": "$due_date"
+                            }
+                        },
                         "endDate": "$$NOW",
                         "unit": "day",
                     }
@@ -1846,7 +2240,6 @@ def download_payments_due_csv(sales_person: str):
     response = Response(content=csv_data, media_type="text/csv")
     response.headers["Content-Disposition"] = "attachment; filename=payments_due.csv"
     return response
-
 
 @router.get("/sales-people")
 def get_sales_people():
