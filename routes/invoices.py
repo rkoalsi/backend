@@ -2,7 +2,7 @@ from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Res
 from config.root import connect_to_mongo, serialize_mongo_document  
 from typing import Optional, List
 from bson import ObjectId
-import re, uuid, boto3, os, requests
+import re, uuid, boto3, os, requests, json
 from datetime import date, datetime
 from urllib.parse import urlparse
 from .helpers import get_access_token
@@ -37,6 +37,18 @@ def get_invoice(
         return serialize_mongo_document(invoice)
     return None
 
+def get_invoice(
+    invoice_id: str,
+):
+    result = invoice_collection.find_one(
+        {"_id": ObjectId(invoice_id), "status": {"$nin": ["void", "paid"]}}
+    )
+    if result:
+        invoice = result
+        invoice["status"] = str(invoice["status"]).capitalize()
+        return serialize_mongo_document(invoice)
+    return None
+
 
 @router.get("")
 def get_invoices(
@@ -56,35 +68,55 @@ def get_invoices(
         "(Company customers|defaulters|Amazon|staff purchase|marketing inv's)"
     )
 
-    # Today's date in ISO format (YYYY-MM-DD)
+    # Today's date in ISO format (YYYY-MM-DD) and as Date object
     today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     escaped_sales_person = re.escape(code)
 
     # Build the query to match invoices past their due date and not marked as paid.
+    # Handle both string and date formats for due_date
     query = {
-        "due_date": {"$lt": today_str},
+        "$or": [
+            # Case 1: due_date is a string
+            {
+                "due_date": {"$type": "string", "$lt": today_str}
+            },
+            # Case 2: due_date is a date
+            {
+                "due_date": {"$type": "date", "$lt": today_date}
+            }
+        ],
         "status": {"$nin": ["paid", "void"]},
         # Must match 'code' in either cf_sales_person or salesperson_name
-        "$or": [
+        "$and": [
             {
-                "cf_sales_person": {
-                    "$regex": f"^{escaped_sales_person}$",
-                    "$options": "i",
-                }
+                "$or": [
+                    {
+                        "cf_sales_person": {
+                            "$regex": f"^{escaped_sales_person}$",
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "salesperson_name": {
+                            "$regex": f"^{escaped_sales_person}$",
+                            "$options": "i",
+                        }
+                    },
+                ]
             },
+            # Exclude documents if cf_sales_person or salesperson_name contains any forbidden keywords
             {
-                "salesperson_name": {
-                    "$regex": f"^{escaped_sales_person}$",
-                    "$options": "i",
-                }
-            },
-        ],
-        # Exclude documents if cf_sales_person or salesperson_name contains any forbidden keywords
-        "cf_sales_person": {"$not": {"$regex": forbidden_keywords, "$options": "i"}},
-        "salesperson_name": {"$not": {"$regex": forbidden_keywords, "$options": "i"}},
+                "$and": [
+                    {"cf_sales_person": {"$not": {"$regex": forbidden_keywords, "$options": "i"}}},
+                    {"salesperson_name": {"$not": {"$regex": forbidden_keywords, "$options": "i"}}}
+                ]
+            }
+        ]
     }
 
     # Define the projection, including a new field to calculate the overdue days.
+    # Handle both string and date formats for due_date in overdue_by_days calculation
     project = {
         "_id": 1,
         "invoice_id": 1,
@@ -101,7 +133,13 @@ def get_invoices(
         "created_at": 1,
         "overdue_by_days": {
             "$dateDiff": {
-                "startDate": {"$dateFromString": {"dateString": "$due_date"}},
+                "startDate": {
+                    "$cond": {
+                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                        "then": {"$dateFromString": {"dateString": "$due_date"}},
+                        "else": "$due_date"
+                    }
+                },
                 "endDate": "$$NOW",
                 "unit": "day",
             },
@@ -147,13 +185,11 @@ def get_invoices(
         print(f"Error counting documents: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    print(total_invoices)
     # Return the response
     return {
         "invoices": all_invoices,
         "total": total_invoices,
     }
-
 
 @router.post("/notes")
 async def create_invoice_note(
