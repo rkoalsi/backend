@@ -829,16 +829,16 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
         # Clear existing jobs to avoid duplicates
         scheduler_instance.remove_all_jobs()
         
-        # Add jobs with timezone awareness
-        scheduler_instance.add_job(
-            invoices_cron,
-            "cron",
-            hour=14,
-            minute=15,
-            id="invoices_cron",
-            replace_existing=True,
-            misfire_grace_time=300  # 5 minutes grace period
-        )
+        # # Add jobs with timezone awareness
+        # scheduler_instance.add_job(
+        #     invoices_cron,
+        #     "cron",
+        #     hour=14,
+        #     minute=15,
+        #     id="invoices_cron",
+        #     replace_existing=True,
+        #     misfire_grace_time=300  # 5 minutes grace period
+        # )
 
         scheduler_instance.add_job(
             credit_notes_cron,
