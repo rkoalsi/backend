@@ -21,6 +21,7 @@ from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from .external_links import router as external_links
 from .customer_analytics import router as customer_analytics
+from .permissions import router as permissions_router
 from config.auth import JWTBearer 
 
 router = APIRouter()
@@ -58,6 +59,8 @@ router.include_router(external_links, prefix="/external_links", tags=["External 
 router.include_router(attendance, prefix="/attendance", tags=["Attendance"])
 
 router.include_router(customer_analytics, prefix="/customer_analytics", tags=["Customer Analytics"])
+
+router.include_router(permissions_router, prefix="/permissions", tags=["Permissions"])
 
 
 @router.get("/")
