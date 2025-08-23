@@ -78,19 +78,20 @@ def get_all_brands():
         )
         brands = []
         for brand_name in brand_names:
-            # Find brand document in brands collection
-            brand_doc = db.brands.find_one(
-                {"name": {"$regex": brand_name, "$options": "i"}}
-            )
+            if brand_name != '':
+                # Find brand document in brands collection
+                brand_doc = db.brands.find_one(
+                    {"name": {"$regex": brand_name, "$options": "i"}}
+                )
 
-            if brand_doc:
-                # Create brand object with name and image
-                brand = {"brand": brand_name, "image": brand_doc.get("image_url")}
-            else:
-                # If no brand document found, just include the name
-                brand = {"brand": brand_name, "image": None}
+                if brand_doc:
+                    # Create brand object with name and image
+                    brand = {"brand": brand_name, "image": brand_doc.get("image_url")}
+                else:
+                    # If no brand document found, just include the name
+                    brand = {"brand": brand_name, "image": None}
 
-            brands.append(brand)
+                brands.append(brand)
 
         return {"brands": brands}
     except Exception as e:
