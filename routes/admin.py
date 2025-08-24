@@ -949,7 +949,9 @@ def get_misc_stats(start_of_today_ist):
             "return_orders": db["return_orders"].count_documents({}),
             "brands": db["brands"].count_documents({}),
             "external_links": db["external_links"].count_documents({}),
+            "permissions":db["permissions"].count_documents({"is_active":True}),
         })
+        
         
         hook_categories = hook_categories_future.result()
         submissions = submissions_future.result()
