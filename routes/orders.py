@@ -180,7 +180,7 @@ def get_all_orders(
         query["created_by"] = ObjectId(created_by)
         query["is_deleted"] = {"$exists": False}
         query["$or"] = [
-            {"total_amount": {"$gte": 0}, "estimate_created": True},
+            {"total_amount": {"$gte": 0}},
             {"spreadsheet_created": True}
         ]
     if status:
