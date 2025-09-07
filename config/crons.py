@@ -833,8 +833,8 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
         scheduler_instance.add_job(
             invoices_cron,
             "cron",
-            hour=14,
-            minute=15,
+            hour=16,
+            minute=0,
             id="invoices_cron",
             replace_existing=True,
             misfire_grace_time=300  # 5 minutes grace period
