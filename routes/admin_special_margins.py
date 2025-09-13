@@ -151,6 +151,7 @@ def create_brand_special_margins(customer_id: str, data: dict = Body(...)):
     # Build new special margin documents.
     new_docs = [
         {
+            "updated_at": datetime.now(),
             "created_at": datetime.now(),
             "customer_id": customer_obj_id,
             "product_id": p["_id"],
@@ -240,6 +241,7 @@ def create_customer_special_margin(customer_id: str, data: dict = Body(...)):
         "name": data["name"],
         "margin": data["margin"],
         "created_at": datetime.now(),
+        "updated_at":datetime.now()
     }
 
     result = db.special_margins.insert_one(new_margin)
