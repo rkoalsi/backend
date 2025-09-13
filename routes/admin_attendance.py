@@ -9,6 +9,12 @@ from typing import Optional, Dict, Any, List
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from fastapi import APIRouter, HTTPException, Body
+from pydantic import BaseModel, EmailStr, validator
+from bson import ObjectId
+from datetime import datetime
+from typing import Optional
+import re
 
 router = APIRouter()
 
@@ -481,3 +487,373 @@ def convert_utc_to_ist(timestamp):
         print(f"Error converting timestamp: {e}")
         return timestamp
 
+class CreateEmployeeRequest(BaseModel):
+    name: str
+    phone: str
+    email: EmailStr
+    employee_number: Optional[str] = None
+    department: Optional[str] = None
+    designation: Optional[str] = None
+    joining_date: Optional[str] = None
+    
+    @validator('name')
+    def validate_name(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError('Name must be at least 2 characters long')
+        return v.strip()
+    
+    @validator('phone')
+    def validate_phone(cls, v):
+        # Remove any non-digit characters
+        phone_digits = re.sub(r'\D', '', v)
+        # Check if it's a valid Indian phone number (10 digits)
+        if len(phone_digits) != 10:
+            raise ValueError('Phone number must be 10 digits')
+        if not phone_digits.startswith(('6', '7', '8', '9')):
+            raise ValueError('Invalid Indian phone number format')
+        return phone_digits
+    
+    @validator('employee_number')
+    def validate_employee_number(cls, v):
+        if v:
+            v = v.strip()
+            if len(v) < 3:
+                raise ValueError('Employee number must be at least 3 characters long')
+        return v
+
+class EmployeeResponse(BaseModel):
+    id: str
+    name: str
+    phone: str
+    email: str
+    employee_number: Optional[str]
+    department: Optional[str]
+    designation: Optional[str]
+    joining_date: Optional[str]
+
+
+@router.get("/employees")
+async def list_employees(
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    department: Optional[str] = None,
+):
+    """
+    List all employees with optional filtering and pagination
+    """
+    try:
+        # Build filter query
+        filter_query = {}
+        
+        if search:
+            filter_query["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+                {"employee_number": {"$regex": search, "$options": "i"}}
+            ]
+        
+        if department:
+            filter_query["department"] = {"$regex": department, "$options": "i"}
+        
+        # Get total count
+        total_count = employees_collection.count_documents(filter_query)
+        
+        # Get employees with pagination
+        employees = list(employees_collection.find(filter_query)
+                        .sort("name", 1)
+                        .skip(skip)
+                        .limit(limit))
+        
+        # Serialize response
+        employee_list = []
+        for emp in employees:
+            employee_list.append({
+                "id": str(emp["_id"]),
+                "name": emp["name"],
+                "phone": emp["phone"],
+                "email": emp["email"],
+                "employee_number": emp.get("employee_number"),
+                "department": emp.get("department"),
+                "designation": emp.get("designation"),
+                "joining_date": emp.get("joining_date"),
+                "status": emp.get("status", "active"),
+                # "created_at": emp["created_at"].isoformat(),
+                # "updated_at": emp["updated_at"].isoformat()
+            })
+        
+        return {
+            "employees": employee_list,
+            "pagination": {
+                "total": total_count,
+                "skip": skip,
+                "limit": limit,
+                "has_more": skip + len(employee_list) < total_count
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error listing employees: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
+@router.post("/employees", response_model=EmployeeResponse)
+async def create_employee(employee_data: CreateEmployeeRequest):
+    """
+    Create a new employee in the attendance system
+    """
+    try:
+        # Check if employee with same email already exists
+        existing_email = employees_collection.find_one({"email": employee_data.email})
+        if existing_email:
+            raise HTTPException(
+                status_code=400, 
+                detail="Employee with this email already exists"
+            )
+        
+        # Check if employee with same phone already exists
+        existing_phone = employees_collection.find_one({"phone": employee_data.phone})
+        if existing_phone:
+            raise HTTPException(
+                status_code=400, 
+                detail="Employee with this phone number already exists"
+            )
+        
+        # Check if employee number is provided and unique
+        if employee_data.employee_number:
+            existing_emp_num = employees_collection.find_one({
+                "employee_number": employee_data.employee_number
+            })
+            if existing_emp_num:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Employee with this employee number already exists"
+                )
+        else:
+            # Generate employee number if not provided
+            # Get the highest existing employee number and increment
+            last_employee = employees_collection.find_one(
+                {"employee_number": {"$regex": "^EMP"}}, 
+                sort=[("employee_number", -1)]
+            )
+            
+            if last_employee and "employee_number" in last_employee:
+                try:
+                    last_num = int(last_employee["employee_number"].replace("EMP", ""))
+                    new_emp_num = f"EMP{last_num + 1:04d}"
+                except:
+                    # If parsing fails, start from EMP0001
+                    new_emp_num = "EMP0001"
+            else:
+                new_emp_num = "EMP0001"
+            
+            employee_data.employee_number = new_emp_num
+        
+        # Prepare employee document
+        current_time = datetime.utcnow()
+        employee_doc = {
+            "name": employee_data.name,
+            "phone": employee_data.phone,
+            "email": employee_data.email,
+            "employee_number": employee_data.employee_number,
+            "department": employee_data.department,
+            "designation": employee_data.designation,
+            "joining_date": employee_data.joining_date,
+            "status": "active",  # Default status
+            "created_at": current_time,
+            "updated_at": current_time
+        }
+        
+        # Insert into database
+        result = employees_collection.insert_one(employee_doc)
+        
+        if not result.inserted_id:
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to create employee"
+            )
+        
+        # Return the created employee
+        created_employee = employees_collection.find_one({"_id": result.inserted_id})
+        
+        return EmployeeResponse(
+            id=str(created_employee["_id"]),
+            name=created_employee["name"],
+            phone=created_employee["phone"],
+            email=created_employee["email"],
+            employee_number=created_employee.get("employee_number"),
+            department=created_employee.get("department"),
+            designation=created_employee.get("designation"),
+            joining_date=created_employee.get("joining_date"),
+            created_at=created_employee["created_at"].isoformat(),
+            updated_at=created_employee["updated_at"].isoformat()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating employee: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Internal server error while creating employee"
+        )
+
+@router.get("/employees/{employee_id}", response_model=EmployeeResponse)
+async def get_employee(employee_id: str):
+    """
+    Get a specific employee by ID
+    """
+    try:
+        if not ObjectId.is_valid(employee_id):
+            raise HTTPException(status_code=400, detail="Invalid employee ID format")
+        
+        employee = employees_collection.find_one({"_id": ObjectId(employee_id)})
+        
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        
+        return EmployeeResponse(
+            id=str(employee["_id"]),
+            name=employee["name"],
+            phone=employee["phone"],
+            email=employee["email"],
+            employee_number=employee.get("employee_number"),
+            department=employee.get("department"),
+            designation=employee.get("designation"),
+            joining_date=employee.get("joining_date"),
+            created_at=employee["created_at"].isoformat(),
+            updated_at=employee["updated_at"].isoformat()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching employee: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.put("/employees/{employee_id}", response_model=EmployeeResponse)
+async def update_employee(employee_id: str, employee_data: CreateEmployeeRequest):
+    """
+    Update an existing employee
+    """
+    try:
+        if not ObjectId.is_valid(employee_id):
+            raise HTTPException(status_code=400, detail="Invalid employee ID format")
+        print
+        # Check if employee exists
+        existing_employee = employees_collection.find_one({"_id": ObjectId(employee_id)})
+        if not existing_employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        
+        # Check for duplicate email (excluding current employee)
+        existing_email = employees_collection.find_one({
+            "email": employee_data.email,
+            "_id": {"$ne": ObjectId(employee_id)}
+        })
+        if existing_email:
+            raise HTTPException(
+                status_code=400, 
+                detail="Another employee with this email already exists"
+            )
+        
+        # Check for duplicate phone (excluding current employee)
+        existing_phone = employees_collection.find_one({
+            "phone": employee_data.phone,
+            "_id": {"$ne": ObjectId(employee_id)}
+        })
+        if existing_phone:
+            raise HTTPException(
+                status_code=400, 
+                detail="Another employee with this phone number already exists"
+            )
+        
+        # Check for duplicate employee number (excluding current employee)
+        if employee_data.employee_number:
+            existing_emp_num = employees_collection.find_one({
+                "employee_number": employee_data.employee_number,
+                "_id": {"$ne": ObjectId(employee_id)}
+            })
+            if existing_emp_num:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Another employee with this employee number already exists"
+                )
+        
+        # Update employee document
+        update_doc = {
+            "$set": {
+                "name": employee_data.name,
+                "phone": employee_data.phone,
+                "email": employee_data.email,
+                "employee_number": employee_data.employee_number or existing_employee.get("employee_number"),
+                "department": employee_data.department,
+                "designation": employee_data.designation,
+                "joining_date": employee_data.joining_date,
+                "updated_at": datetime.now()
+            }
+        }
+        
+        result = employees_collection.update_one(
+            {"_id": ObjectId(employee_id)}, 
+            update_doc
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to update employee"
+            )
+        
+        # Return updated employee
+        updated_employee = employees_collection.find_one({"_id": ObjectId(employee_id)})
+        
+        return EmployeeResponse(
+            id=str(updated_employee["_id"]),
+            name=updated_employee["name"],
+            phone=updated_employee["phone"],
+            email=updated_employee["email"],
+            employee_number=updated_employee.get("employee_number"),
+            department=updated_employee.get("department"),
+            designation=updated_employee.get("designation"),
+            joining_date=updated_employee.get("joining_date"),
+            # created_at=updated_employee["created_at"].isoformat(),
+            # updated_at=updated_employee["updated_at"].isoformat()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating employee: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.delete("/employees/{employee_id}")
+async def delete_employee(employee_id: str):
+    """
+    Delete an employee (soft delete by setting status to inactive)
+    """
+    try:
+        if not ObjectId.is_valid(employee_id):
+            raise HTTPException(status_code=400, detail="Invalid employee ID format")
+        
+        # Check if employee exists
+        existing_employee = employees_collection.find_one({"_id": ObjectId(employee_id)})
+        if not existing_employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        
+        # Soft delete by updating status
+        result = employees_collection.delete_one(
+            {"_id": ObjectId(employee_id)},
+        )
+        
+        if result.deleted_count == 1:
+            raise HTTPException(
+                status_code=500, 
+                detail="Failed to delete employee"
+            )
+        
+        return {"message": "Employee deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting employee: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
