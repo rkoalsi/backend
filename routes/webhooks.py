@@ -144,6 +144,7 @@ def create_special_margins_for_new_product(
                         "product_id": ObjectId(product_id),
                         "margin": margin,
                         "name": product_name,
+                        "updated_at":datetime.datetime.now()
                     }
                 )
                 print(
