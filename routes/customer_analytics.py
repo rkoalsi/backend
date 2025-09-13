@@ -28,12 +28,24 @@ def get_customer_analytics(
         match_stage = {
             "date": {"$gte": "2023-04-01"},
             "status": {"$nin": ["void", "draft"]},
-            "customer_name": {
-                "$not": {
-                    "$regex": "(EC)|(NA)|(amzb2b)|(amz2b2)|(PUPEV)|(RS)|(MKT)|(SPUR)|(SSAM)|(OSAM)|Blinkit|Flipkart",
-                    "$options": "i",
-                }
-            },
+            "$and": [
+                {
+                    "customer_name": {
+                        "$not": {
+                            "$regex": r"\b(EC|NA|PUPEV|RS|MKT|SPUR|SSAM|OSAMP)\b",
+                            "$options": "i",
+                        }
+                    }
+                },
+                {
+                    "customer_name": {
+                        "$not": {
+                            "$regex": r"(amzb2b|amz2b2|Blinkit|Flipkart)",
+                            "$options": "i",
+                        }
+                    }
+                },
+            ],
         }
         customer_status_match_stage = {}
         sort_stage = {"$sort": {"totalSalesCurrentMonth": 1}}
