@@ -12,6 +12,7 @@ from .helpers import send_email
 from typing import Dict, Any
 from bson import ObjectId
 from collections import defaultdict
+from calendar import monthrange
 
 load_dotenv()
 
@@ -381,10 +382,10 @@ def fetch_with_retries(url, headers, retries=3, timeout=10, page_number=None):
                 return None
 
 
-def get_zoho_stock(day=None, month=None, year=None):
+def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
     """
-    Fetch stock data from Zoho Inventory with retries and timeout handling.
-    Fetches multiple pages concurrently to optimize performance.
+    Unified function that fetches stock data from Zoho Inventory with proper error handling
+    and supports both API response structures.
     """
     # Set the date
     if day and month and year:
@@ -394,16 +395,38 @@ def get_zoho_stock(day=None, month=None, year=None):
             print(f"Invalid date provided: {e}")
             return []
     else:
-        now_date = datetime.datetime.utcnow()
+        # If no complete date provided, use current date logic
+        if month is None:
+            month = now.month
+        if year is None:
+            year = now.year
+            
+        if day is None:
+            if month == now.month and year == now.year:
+                # Current month - use current day
+                day = now.day
+            else:
+                # Previous month - use last day of that month
+                day = monthrange(year, month)[1]
+        
+        now_date = datetime.datetime(year, month, day)
+    
     to_date = now_date.date()
-    print(f"Fetching stock for {now_date.strftime('%b-%Y')} with date {to_date}")
+    sheet_name = f'{now_date.strftime("%b")} {year}'
+    print(f"Fetching stock for {now_date.strftime('%b')}-{year} with date {to_date}")
 
     warehouse_stock = []
     access_token = get_cached_access_token()
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    # Fetch the total number of pages
+    # Define target warehouse names (both formats for compatibility)
+    target_warehouses = {
+        "pupscribe enterprises private limited",
+        "Pupscribe Enterprises Private Limited"
+    }
+
     try:
+        # Fetch the total number of pages
         response = fetch_with_retries(
             url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
             headers=headers,
@@ -419,7 +442,7 @@ def get_zoho_stock(day=None, month=None, year=None):
         print(f"Total pages to fetch: {total_pages}")
 
         # Define the maximum number of concurrent threads
-        max_workers = 5  # Adjust based on API rate limits and performance
+        max_workers = 5
         failed_pages = []
 
         def fetch_page(page_number):
@@ -444,8 +467,8 @@ def get_zoho_stock(day=None, month=None, year=None):
             else:
                 return None
 
+        # Fetch all pages concurrently
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all page fetch tasks
             future_to_page = {
                 executor.submit(fetch_page, i): i for i in range(1, total_pages + 1)
             }
@@ -477,32 +500,65 @@ def get_zoho_stock(day=None, month=None, year=None):
 
     print(f"Total warehouse stock items fetched: {len(warehouse_stock)}")
 
-    # Filter and process warehouse stock data
+    # Process warehouse stock data - handle both API structures
     arr = []
-    target_warehouse = "pupscribe enterprises private limited".strip().lower()
     for item in warehouse_stock:
-        item_name = item.get("item_name", "").strip().lower()
-        warehouses = item.get("warehouses", [])
-        for w in warehouses:
-            warehouse_name = w.get("warehouse_name", "").strip().lower()
-            if warehouse_name == target_warehouse:
-                try:
-                    stock_quantity = int(w.get("quantity_available_for_sale", 0))
-                    arr.append(
-                        {
+        if not isinstance(item, dict):
+            print(f"Skipping item {item} because it is not a dictionary")
+            continue
+
+        # Handle new API structure with "warehouse_stock" array
+        if "warehouse_stock" in item:
+            for warehouse_entry in item["warehouse_stock"]:
+                warehouse_name = warehouse_entry.get("warehouse_name", "")
+                if warehouse_name in target_warehouses:
+                    try:
+                        stock_quantity = int(warehouse_entry.get("quantity_available_for_sale", 0))
+                        item_name = warehouse_entry.get("item_name", "").strip().lower()
+                        arr.append({
                             "name": item_name,
                             "stock": stock_quantity,
-                        }
-                    )
-                    print(f"Added stock for '{item_name}': {stock_quantity}")
-                except ValueError:
-                    print(
-                        f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}"
-                    )
-    print(f"Total stock items after filtering: {len(arr)}")
-    print("Data fetching complete. Proceeding to update the database.")
-    return arr
+                        })
+                        print(f"Added stock for '{item_name}': {stock_quantity}")
+                        break  # Found the warehouse we want
+                    except ValueError:
+                        print(f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}")
 
+        # Handle old API structure with direct warehouse info
+        elif "warehouses" in item:
+            item_name = item.get("item_name", "").strip().lower()
+            warehouses = item.get("warehouses", [])
+            for w in warehouses:
+                warehouse_name = w.get("warehouse_name", "")
+                # Check both exact and lowercase versions
+                if (warehouse_name in target_warehouses or 
+                    warehouse_name.strip().lower() in {name.lower() for name in target_warehouses}):
+                    try:
+                        stock_quantity = int(w.get("quantity_available_for_sale", 0))
+                        arr.append({
+                            "name": item_name,
+                            "stock": stock_quantity,
+                        })
+                        print(f"Added stock for '{item_name}': {stock_quantity}")
+                        break  # Found the warehouse we want
+                    except ValueError:
+                        print(f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}")
+
+        # Handle direct warehouse structure (fallback)
+        elif item.get("warehouse_name") in target_warehouses:
+            try:
+                stock_quantity = int(item.get("quantity_available_for_sale", 0))
+                item_name = item.get("item_name", "").strip().lower()
+                arr.append({
+                    "name": item_name,
+                    "stock": stock_quantity,
+                })
+                print(f"Added stock for '{item_name}': {stock_quantity}")
+            except ValueError:
+                print(f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}")
+
+    print(f"Total stock items after filtering: {len(arr)}")
+    return arr
 
 def update_stock():
     """
