@@ -747,7 +747,7 @@ async def stock_cron():
                 logger.error("Failed to get access token")
                 return
 
-            # Fetch warehouse stock for yesterday
+            # Fetch the first page to determine total pages
             warehouse_url = (
                 f"https://inventory.zoho.com/api/v1/reports/warehouse?"
                 f"page=1&per_page=2000&sort_column=item_name&sort_order=A&"
@@ -761,29 +761,57 @@ async def stock_cron():
                 return
 
             warehouse_stock = data["warehouse_stock_info"]
+            total_pages = data.get("page_context", {}).get("total_pages", 1)
+
+            # Fetch remaining pages if there are more than 1 page
+            if total_pages > 1:
+                logger.info(f"Fetching {total_pages} pages for {yesterday}")
+                
+                for page in range(2, total_pages + 1):
+                    page_url = (
+                        f"https://inventory.zoho.com/api/v1/reports/warehouse?"
+                        f"page={page}&per_page=2000&sort_column=item_name&sort_order=A&"
+                        f"response_option=1&filter_by=TransactionDate.CustomDate&"
+                        f"show_actual_stock=false&to_date={yesterday}&organization_id={org_id}"
+                    )
+                    
+                    page_data = await api_client.make_request(page_url)
+                    if page_data and "warehouse_stock_info" in page_data:
+                        warehouse_stock.extend(page_data["warehouse_stock_info"])
+
+            logger.info(f"Processing {len(warehouse_stock)} warehouse stock items for {yesterday}")
             processed_data = []
 
             for item in warehouse_stock:
-                if not isinstance(item, dict) or "warehouses" not in item:
+                if not isinstance(item, dict):
                     continue
 
-                item_name = item.get("item_name", "")
-                if not item_name:
-                    continue
-
-                # Find Pupscribe warehouse stock
                 pupscribe_stock = None
-                for warehouse in item.get("warehouses", []):
-                    if (
-                        warehouse.get("warehouse_name")
-                        == "Pupscribe Enterprises Private Limited"
-                    ):
-                        pupscribe_stock = int(
-                            warehouse.get("quantity_available_for_sale", 0)
-                        )
-                        break
+                item_name = None
 
-                if pupscribe_stock is None:
+                # Handle NEW API structure (warehouse_stock array)
+                if "warehouse_stock" in item:
+                    for warehouse_entry in item["warehouse_stock"]:
+                        if warehouse_entry.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
+                            pupscribe_stock = int(warehouse_entry.get("quantity_available_for_sale", 0))
+                            item_name = warehouse_entry.get("item_name", "")
+                            break  # Found the warehouse we want, no need to check others
+                
+                # Handle OLD API structure (backwards compatibility)
+                elif "warehouses" in item:
+                    item_name = item.get("item_name", "")
+                    for warehouse in item.get("warehouses", []):
+                        if warehouse.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
+                            pupscribe_stock = int(warehouse.get("quantity_available_for_sale", 0))
+                            break
+                
+                # Fallback: Direct warehouse entry (old structure)
+                elif item.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
+                    pupscribe_stock = int(item.get("quantity_available_for_sale", 0))
+                    item_name = item.get("item_name", "")
+
+                # Skip if we couldn't find Pupscribe stock or item name
+                if pupscribe_stock is None or not item_name:
                     continue
 
                 # Find matching product ID
@@ -816,13 +844,13 @@ async def stock_cron():
                 details={
                     "processed": len(processed_data),
                     "duration": duration,
+                    "pages_fetched": total_pages,
+                    "total_items": len(warehouse_stock),
                 },
             )
     except Exception as e:
         logger.error(f"Error in warehouse stock sync: {e}")
         send_slack_notification("Stock Cron Error", success=False, error_msg=str(e))
-
-
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
