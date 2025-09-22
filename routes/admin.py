@@ -2826,6 +2826,8 @@ async def update_product(
     sub_category: Optional[str] = Form(None),
     series: Optional[str] = Form(None),
     cf_sku_code: Optional[str] = Form(None),
+    upc_code: Optional[str] = Form(None),  # Added this missing parameter
+    catalogue_page: Optional[str] = Form(None),  # Also added this one if needed
     rate: Optional[float] = Form(None),
     stock: Optional[int] = Form(None),
     status: Optional[str] = Form(None),
@@ -2863,6 +2865,8 @@ async def update_product(
             "sub_category": sub_category,
             "series": series,
             "cf_sku_code": cf_sku_code,
+            "upc_code": upc_code,  # Added this field to the form_data dict
+            "catalogue_page": catalogue_page,  # Added this field too if needed
             "rate": rate,
             "stock": stock,
             "status": status,
@@ -2984,8 +2988,6 @@ async def update_product(
             for file in files:
                 if hasattr(file, "file") and not file.file.closed:
                     file.file.close()
-
-
     
 router.include_router(
     admin_special_margins_router,
