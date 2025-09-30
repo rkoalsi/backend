@@ -861,6 +861,7 @@ def handle_estimate(data: dict):
         exists = serialize_mongo_document(
             db.estimates.find_one({"estimate_id": estimate_id})
         )
+        
         if not exists:
             db.estimates.insert_one(
                 {
@@ -873,8 +874,10 @@ def handle_estimate(data: dict):
                 {"estimate_id": estimate_id},
                 {"$set": {**estimate, "updated_at": datetime.datetime.now()}},
             )
+            estimate_number = estimate.get("estimate_number", exists.get('estimate_number'))
+            estimate_url = estimate.get("estimate_url", exists.get('estimate_url'))
             db.orders.update_one(
-                {"estimate_id": estimate_id}, {"$set": {"status": estimate_status}}
+                {"estimate_id": estimate_id}, {"$set": {"status": estimate_status, "estimate_url":estimate_url, "estimate_number":estimate_number}}
             )
     else:
         print("Estimate Does Not Exist. Webhook Received")
