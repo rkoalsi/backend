@@ -767,7 +767,7 @@ def handle_invoice(data: dict):
         # 3) Schedule one job for each valid (unique) salesperson
         for sp in valid_salespeople:
             name = sp.get("name")
-            email = sp.get("email")
+            email = sp.get(-"email")
             phone = sp.get("phone")
             if not phone:
                 print(f"Phone does not exist for SP:{name}")
@@ -1272,7 +1272,7 @@ def handle_shipment(data: dict):
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
             for person in [sales_admin_1, sales_admin_2, sales_admin_3]:
-                phone = int(person.get("phone"))
+                phone = person.get("phone")
                 print("if", phone)
                 if phone:  # Validate phone exists and is not empty
                     try:
@@ -1300,7 +1300,7 @@ def handle_shipment(data: dict):
 
             for sp in valid_salespeople:
                 name = sp.get("name", "Unknown")
-                phone = int(sp.get("phone"))
+                phone = sp.get("phone")
                 print("else", phone)
                 try:
                     send_whatsapp(phone, {**template}, {**params})
