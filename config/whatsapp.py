@@ -83,10 +83,15 @@ def generate_whatsapp_template(template_doc: dict, dynamic_params: dict) -> Temp
 
 def send_whatsapp(to: str, template_doc: dict, params: dict):
     try:
+        cleaned_phone = ''.join(char for char in str(to) if char.isdigit())
+        
+        if not cleaned_phone:
+            raise ValueError(f"Invalid phone number after cleaning: {to}")
+        
         response = client.messages.create(
             type_="whatsapp",
             src=FROM_NUMBER,
-            dst=f"+91{to}",
+            dst=f"+91{cleaned_phone}",
             template=generate_whatsapp_template(template_doc, params),
         )
         return response
