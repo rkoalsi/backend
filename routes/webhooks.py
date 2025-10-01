@@ -1205,7 +1205,7 @@ def handle_shipment(data: dict):
         dict(db["delivery_partners"].find_one({"name": tracking_partner}))
     )
     tracking_url = delivery_partner.get("tracking_url", "")
-
+    invoice = None
     if invoice_number != "":
         invoice = serialize_mongo_document(
             dict(db["invoices"].find_one({"invoice_number": invoice_number}))
@@ -1215,7 +1215,6 @@ def handle_shipment(data: dict):
         button_url = f"{invoice.get('_id')}"
 
     if salesorder_number != "":
-        # Use regex to find invoice where reference_number contains salesorder_number
         invoice_query = {"reference_number": {"$regex": salesorder_number}}
         found_invoice = db["invoices"].find_one(invoice_query)
 
@@ -1223,11 +1222,10 @@ def handle_shipment(data: dict):
             invoice = serialize_mongo_document(dict(found_invoice))
             salesorder_number = invoice.get("invoice_number", salesorder_number)
 
-    if salesorder_number != "" or invoice_number != "":
+    if invoice is not None and (salesorder_number != "" or invoice_number != ""):
         invoice_sales_person = invoice.get("cf_sales_person", "")
         salesperson = invoice.get("salesperson_name", "")
         button_url = f"{invoice.get('_id')}"
-        print(invoice_number)
 
         sales_admin_1 = serialize_mongo_document(
             dict(db.users.find_one({"designation": "Customer Care"}))
@@ -1308,7 +1306,8 @@ def handle_shipment(data: dict):
                     send_whatsapp(phone, {**template}, {**params})
                 except Exception as e:
                     print(f"Failed to send WhatsApp to {name}: {e}")
-
+    else:
+        print("Invoice Not Found for Given Shipment")
 
 @router.post("/estimate")
 def estimate(data: dict):
