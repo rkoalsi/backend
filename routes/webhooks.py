@@ -502,7 +502,7 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
 
     # Process warehouse stock data - handle both API structures
     arr = []
-    print(json.dump(warehouse_stock, indent=4))
+    print(json.dumps(warehouse_stock, indent=4))
     for item in warehouse_stock:
         if not isinstance(item, dict):
             print(f"Skipping item {item} because it is not a dictionary")
