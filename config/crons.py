@@ -788,13 +788,14 @@ async def stock_cron():
 
                 pupscribe_stock = None
                 item_name = None
-
+                item_id = None
                 # Handle NEW API structure (warehouse_stock array)
                 if "warehouse_stock" in item:
                     for warehouse_entry in item["warehouse_stock"]:
                         if warehouse_entry.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
                             pupscribe_stock = int(warehouse_entry.get("quantity_available_for_sale", 0))
                             item_name = warehouse_entry.get("item_name", "")
+                            item_id = warehouse_entry.get("item_id", "")
                             break  # Found the warehouse we want, no need to check others
                 
                 # Handle OLD API structure (backwards compatibility)
@@ -803,12 +804,14 @@ async def stock_cron():
                     for warehouse in item.get("warehouses", []):
                         if warehouse.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
                             pupscribe_stock = int(warehouse.get("quantity_available_for_sale", 0))
+                            item_id = warehouse.get("item_id", "")
                             break
                 
                 # Fallback: Direct warehouse entry (old structure)
                 elif item.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
                     pupscribe_stock = int(item.get("quantity_available_for_sale", 0))
                     item_name = item.get("item_name", "")
+                    item_id = item.get("item_id", "")
 
                 # Skip if we couldn't find Pupscribe stock or item name
                 if pupscribe_stock is None or not item_name:
@@ -824,7 +827,7 @@ async def stock_cron():
                     "date": target_date,
                     "product_id": product_id,
                     "created_at": datetime.now(),
-                    "zoho_item_id": item.get("item_id"),
+                    "zoho_item_id": item_id,
                 }
 
                 processed_data.append(stock_document)
@@ -851,6 +854,7 @@ async def stock_cron():
     except Exception as e:
         logger.error(f"Error in warehouse stock sync: {e}")
         send_slack_notification("Stock Cron Error", success=False, error_msg=str(e))
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
