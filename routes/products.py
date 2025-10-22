@@ -150,6 +150,7 @@ def get_catalogue_pages(brand: str):
         print(f"Error fetching catalogue pages: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @router.get("")
 def get_products(
     role: str = "salesperson",
@@ -216,58 +217,70 @@ def get_products(
             query["catalogue_order"] = {"$exists": True, "$ne": None}
         sort_stage = {"catalogue_order": ASCENDING}
     else:
-        # Default sort: Extract color and size for proper variant sorting
-        pipeline.append({
-            "$addFields": {
-                # Extract color (last word before parenthesis or end)
-                "extracted_color": {
-                    "$arrayElemAt": [
-                        {
-                            "$split": [
-                                {
-                                    "$trim": {
-                                        "input": {
-                                            "$arrayElemAt": [
-                                                {"$split": ["$name", "("]},
-                                                0,
-                                            ]
+        pipeline.append(
+            {
+                "$addFields": {
+                    # Extract color (last word before parenthesis or end)
+                    "extracted_color": {
+                        "$arrayElemAt": [
+                            {
+                                "$split": [
+                                    {
+                                        "$trim": {
+                                            "input": {
+                                                "$arrayElemAt": [
+                                                    {"$split": ["$name", "("]},
+                                                    0,
+                                                ]
+                                            }
                                         }
-                                    }
-                                },
-                                " ",
-                            ]
-                        },
-                        -1,
-                    ]
-                },
-                # Extract size (look for XS, S, M, L, XL patterns)
-                "extracted_size": {
-                    "$regexFind": {
-                        "input": "$name",
-                        "regex": r"(XXL|XL|XS|S|M|L)\s",
-                    }
-                },
+                                    },
+                                    " ",
+                                ]
+                            },
+                            -1,
+                        ]
+                    },
+                    # Extract size - match XS, S, M, L, XL, XXL with word boundaries
+                    "extracted_size": {
+                        "$regexFind": {
+                            "input": "$name",
+                            "regex": r"\b(XXL|XL|XS|S|M|L)\b",
+                        }
+                    },
+                }
             }
-        })
+        )
 
-        pipeline.append({
-            "$addFields": {
-                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
-                "size_order": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
-                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
-                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
-                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
-                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
-                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
-                        ],
-                        "default": 99,
-                    }
-                },
+        # Stage 2: Create size_for_sort from extracted_size
+        pipeline.append(
+            {
+                "$addFields": {
+                    "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+                }
             }
-        })
+        )
+
+        # Stage 3: Create size_order from size_for_sort
+        pipeline.append(
+            {
+                "$addFields": {
+                    "size_order": {
+                        "$switch": {
+                            "branches": [
+                                {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
+                                {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
+                                {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
+                                {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
+                                {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
+                                {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
+                            ],
+                            "default": 99,
+                        }
+                    },
+                }
+            }
+        )
 
         sort_stage = {
             "brand": ASCENDING,
@@ -275,8 +288,8 @@ def get_products(
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": ASCENDING,
-            "extracted_color": ASCENDING,  # Color first
-            "size_order": ASCENDING,  # Then size by order
+            "size_order": ASCENDING,  # Size first
+            "extracted_color": ASCENDING,  # Then color
             "rate": ASCENDING,
             "name": ASCENDING,
         }
@@ -287,7 +300,7 @@ def get_products(
     # Only use skip if not in catalogue mode, because catalogue_page is used as a filter
     if sort != "catalogue":
         pipeline.append({"$skip": (page - 1) * per_page})
-    
+
     pipeline.append({"$limit": per_page})
 
     try:
@@ -321,6 +334,7 @@ def get_products(
         "category": category,
         "search": search,
     }
+
 
 @router.get("/all")
 def get_all_products(
