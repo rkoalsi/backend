@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import HTMLResponse
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
 from pymongo import ASCENDING, DESCENDING
@@ -78,7 +78,7 @@ def get_all_brands():
         )
         brands = []
         for brand_name in brand_names:
-            if brand_name != '':
+            if brand_name != "":
                 # Find brand document in brands collection
                 brand_doc = db.brands.find_one(
                     {"name": {"$regex": brand_name, "$options": "i"}}
@@ -150,7 +150,6 @@ def get_catalogue_pages(brand: str):
         print(f"Error fetching catalogue pages: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
 @router.get("")
 def get_products(
     role: str = "salesperson",
@@ -189,28 +188,6 @@ def get_products(
 
     three_months_ago = datetime.now() - relativedelta(months=3)
 
-    # Adjust query and sort based on sort order
-    if sort == "price_asc":
-        sort_stage = {"rate": ASCENDING}
-    elif sort == "price_desc":
-        sort_stage = {"rate": DESCENDING}
-    elif sort == "catalogue":
-        # Use the catalogue_page parameter to filter documents.
-        if catalogue_page is not None and not search:
-            query["catalogue_page"] = catalogue_page
-            query["catalogue_order"] = {"$exists": True, "$ne": None}
-        sort_stage = {"catalogue_order": ASCENDING}
-    else:
-        sort_stage = {
-            "brand": ASCENDING,
-            "new": DESCENDING,
-            "category": ASCENDING,
-            "sub_category": ASCENDING,
-            "series": ASCENDING,
-            "rate": ASCENDING,
-            "name": ASCENDING,
-        }
-
     # Build the aggregation pipeline
     pipeline = [
         {"$match": query},
@@ -225,12 +202,92 @@ def get_products(
                 }
             }
         },
-        {"$sort": sort_stage},
     ]
+
+    # Adjust query and sort based on sort order
+    if sort == "price_asc":
+        sort_stage = {"rate": ASCENDING}
+    elif sort == "price_desc":
+        sort_stage = {"rate": DESCENDING}
+    elif sort == "catalogue":
+        # Use the catalogue_page parameter to filter documents.
+        if catalogue_page is not None and not search:
+            query["catalogue_page"] = catalogue_page
+            query["catalogue_order"] = {"$exists": True, "$ne": None}
+        sort_stage = {"catalogue_order": ASCENDING}
+    else:
+        # Default sort: Extract color and size for proper variant sorting
+        pipeline.append({
+            "$addFields": {
+                # Extract color (last word before parenthesis or end)
+                "extracted_color": {
+                    "$arrayElemAt": [
+                        {
+                            "$split": [
+                                {
+                                    "$trim": {
+                                        "input": {
+                                            "$arrayElemAt": [
+                                                {"$split": ["$name", "("]},
+                                                0,
+                                            ]
+                                        }
+                                    }
+                                },
+                                " ",
+                            ]
+                        },
+                        -1,
+                    ]
+                },
+                # Extract size (look for XS, S, M, L, XL patterns)
+                "extracted_size": {
+                    "$regexFind": {
+                        "input": "$name",
+                        "regex": r"(XXL|XL|XS|S|M|L)\s",
+                    }
+                },
+            }
+        })
+
+        pipeline.append({
+            "$addFields": {
+                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+                "size_order": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
+                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
+                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
+                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
+                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
+                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
+                        ],
+                        "default": 99,
+                    }
+                },
+            }
+        })
+
+        sort_stage = {
+            "brand": ASCENDING,
+            "new": DESCENDING,
+            "category": ASCENDING,
+            "sub_category": ASCENDING,
+            "series": ASCENDING,
+            "extracted_color": ASCENDING,  # Color first
+            "size_order": ASCENDING,  # Then size by order
+            "rate": ASCENDING,
+            "name": ASCENDING,
+        }
+
+    # Add sort stage
+    pipeline.append({"$sort": sort_stage})
 
     # Only use skip if not in catalogue mode, because catalogue_page is used as a filter
     if sort != "catalogue":
         pipeline.append({"$skip": (page - 1) * per_page})
+    
     pipeline.append({"$limit": per_page})
 
     try:
@@ -264,7 +321,6 @@ def get_products(
         "category": category,
         "search": search,
     }
-
 
 @router.get("/all")
 def get_all_products(
