@@ -151,6 +151,64 @@ def get_catalogue_pages(brand: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def extract_base_name(product_name: str) -> str:
+    """
+    Extract the base name from a product name by removing size indicators.
+    This matches the frontend logic in groupProducts.ts
+    """
+    import re
+
+    base_name = product_name
+
+    # Define size patterns (both abbreviated and full words)
+    size_pattern_abbrev = '(XXS|XS|S|M|L|XL|XXL|XXXL)'
+    size_pattern_full = '(X-Large|X-Small|XX-Large|XXX-Large|Extra Large|Extra Small|Large|Medium|Small)'
+
+    # Remove various size patterns (matching frontend logic)
+    # First, handle full word size patterns
+    full_word_patterns = [
+        rf'\s+-\s+{size_pattern_full}$',        # " - Large", " - Medium", " - X-Large" at end
+        rf'\s+{size_pattern_full}$',            # " Large", " Medium" at end
+        rf'-{size_pattern_full}$',              # "-Large", "-Medium" at end
+        rf'\s+-\s+{size_pattern_full}\s+',      # " - Large ", " - Medium " in middle
+        rf'\s+{size_pattern_full}\s+',          # " Large ", " Medium " in middle
+    ]
+
+    for pattern in full_word_patterns:
+        base_name = re.sub(pattern, '', base_name, flags=re.IGNORECASE)
+
+    # Then handle abbreviated size patterns
+    abbrev_patterns = [
+        rf'-([A-Za-z][^-]+)-{size_pattern_abbrev}$',  # Pattern 1
+        rf'\s+{size_pattern_abbrev}\s+-\s+',           # Pattern 2
+        rf'\s+-\s+{size_pattern_abbrev}\s+',           # Pattern 3
+        rf'-{size_pattern_abbrev}-',                   # Pattern 4
+        rf'-{size_pattern_abbrev}\s+',                 # Pattern 5
+        rf'-{size_pattern_abbrev}$',                   # Pattern 6
+        rf'\s+{size_pattern_abbrev}\s+',               # Pattern 7
+        rf'\s+{size_pattern_abbrev}$',                 # Pattern 8
+        rf'^{size_pattern_abbrev}\s+',                 # Pattern 9
+        rf'\s*\({size_pattern_abbrev}\)$',             # Pattern 10
+        rf'\s*#\d+\s*',                                # Pattern 11 - shoe sizes
+        rf'\s*\d+\.?\d*mm\s*',                         # Pattern 12 - measurements in mm
+        rf'\s*\d+\.?\d*[Mm]\s*',                       # Pattern 13 - measurements in meters (3M, 5M)
+        rf'\s+{size_pattern_abbrev}-',                 # Pattern 14
+    ]
+
+    for pattern in abbrev_patterns:
+        base_name = re.sub(pattern, ' ', base_name, flags=re.IGNORECASE)
+
+    # Remove weight indicators
+    base_name = re.sub(r'\s*\(Max\s+\d+kgs?\)', '', base_name, flags=re.IGNORECASE)
+    base_name = re.sub(r'\s*\(\d+-\d+kgs?\)', '', base_name, flags=re.IGNORECASE)
+
+    # Clean up extra spaces and dashes
+    base_name = re.sub(r'\s*-+\s*$', '', base_name)
+    base_name = re.sub(r'\s+', ' ', base_name).strip()
+
+    return base_name
+
+
 @router.get("")
 def get_products(
     role: str = "salesperson",
@@ -165,6 +223,7 @@ def get_products(
     sort: Optional[str] = Query(
         "default", description="Sort order: default, price_asc, price_desc, catalogue"
     ),
+    group_by_name: Optional[bool] = Query(False, description="Group products by base name"),
 ):
     """
     Retrieves paginated products with optional filters.
@@ -217,70 +276,66 @@ def get_products(
             query["catalogue_order"] = {"$exists": True, "$ne": None}
         sort_stage = {"catalogue_order": ASCENDING}
     else:
-        pipeline.append(
-            {
-                "$addFields": {
-                    # Extract color (last word before parenthesis or end)
-                    "extracted_color": {
-                        "$arrayElemAt": [
-                            {
-                                "$split": [
-                                    {
-                                        "$trim": {
-                                            "input": {
-                                                "$arrayElemAt": [
-                                                    {"$split": ["$name", "("]},
-                                                    0,
-                                                ]
-                                            }
+        # Stage 1: Extract color and size
+        pipeline.append({
+            "$addFields": {
+                # Extract color (last word before parenthesis or end)
+                "extracted_color": {
+                    "$arrayElemAt": [
+                        {
+                            "$split": [
+                                {
+                                    "$trim": {
+                                        "input": {
+                                            "$arrayElemAt": [
+                                                {"$split": ["$name", "("]},
+                                                0,
+                                            ]
                                         }
-                                    },
-                                    " ",
-                                ]
-                            },
-                            -1,
-                        ]
-                    },
-                    # Extract size - match XS, S, M, L, XL, XXL with word boundaries
-                    "extracted_size": {
-                        "$regexFind": {
-                            "input": "$name",
-                            "regex": r"\b(XXL|XL|XS|S|M|L)\b",
-                        }
-                    },
-                }
+                                    }
+                                },
+                                " ",
+                            ]
+                        },
+                        -1,
+                    ]
+                },
+                # Extract size - match XS, S, M, L, XL, XXL, XXXL with word boundaries
+                "extracted_size": {
+                    "$regexFind": {
+                        "input": "$name",
+                        "regex": r"\b(XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",  # XXXL must come before XXL and XL
+                    }
+                },
             }
-        )
+        })
 
         # Stage 2: Create size_for_sort from extracted_size
-        pipeline.append(
-            {
-                "$addFields": {
-                    "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
-                }
+        pipeline.append({
+            "$addFields": {
+                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
             }
-        )
+        })
 
         # Stage 3: Create size_order from size_for_sort
-        pipeline.append(
-            {
-                "$addFields": {
-                    "size_order": {
-                        "$switch": {
-                            "branches": [
-                                {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
-                                {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
-                                {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
-                                {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
-                                {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
-                                {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
-                            ],
-                            "default": 99,
-                        }
-                    },
-                }
+        pipeline.append({
+            "$addFields": {
+                "size_order": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
+                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
+                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
+                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
+                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
+                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
+                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},  # Added XXXL
+                        ],
+                        "default": 99,
+                    }
+                },
             }
-        )
+        })
 
         sort_stage = {
             "brand": ASCENDING,
@@ -288,8 +343,8 @@ def get_products(
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": ASCENDING,
-            "size_order": ASCENDING,  # Size first
-            "extracted_color": ASCENDING,  # Then color
+            "extracted_color": ASCENDING,   # COLOR FIRST - groups colors together
+            "size_order": ASCENDING,        # SIZE SECOND - sorts sizes within each color
             "rate": ASCENDING,
             "name": ASCENDING,
         }
@@ -323,6 +378,67 @@ def get_products(
 
     if page > total_pages and total_pages != 0:
         raise HTTPException(status_code=400, detail="Page number out of range")
+
+    # Handle grouping if requested
+    if group_by_name:
+        # Preserve the original sort order from the aggregation pipeline
+        # Build groups while maintaining the order products appear in the list
+
+        result_items = []  # Mixed list of groups and individual products in order
+        seen_base_names = {}  # Track which base names we've seen and their position
+
+        for product in all_products:
+            base_name = extract_base_name(product["name"])
+            base_name_key = base_name.lower()
+
+            # Check if we've already started a group for this base name
+            if base_name_key in seen_base_names:
+                # Add to existing group at the position where it first appeared
+                position = seen_base_names[base_name_key]
+                result_items[position]["products"].append(product)
+                result_items[position]["is_group"] = True  # Mark as multi-product group
+            else:
+                # First time seeing this base name - add at current position
+                position = len(result_items)
+                seen_base_names[base_name_key] = position
+                result_items.append({
+                    "is_group": False,  # Will be set to True if more products added
+                    "groupId": f"group-{base_name_key.replace(' ', '-')}",
+                    "baseName": base_name,
+                    "products": [product],
+                    "primaryProduct": product,
+                })
+
+        # Convert to final format maintaining exact order
+        items_in_order = []
+
+        for item in result_items:
+            if item["is_group"]:
+                # This is a true group (2+ products)
+                items_in_order.append({
+                    "type": "group",
+                    "groupId": item["groupId"],
+                    "baseName": item["baseName"],
+                    "products": item["products"],
+                    "primaryProduct": item["primaryProduct"],
+                })
+            else:
+                # Single product
+                items_in_order.append({
+                    "type": "product",
+                    "product": item["products"][0],
+                })
+
+        return {
+            "items": items_in_order,  # Ordered list with type indicators
+            "total": total_products,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "brand": brand,
+            "category": category,
+            "search": search,
+        }
 
     return {
         "products": all_products,
