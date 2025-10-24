@@ -150,11 +150,15 @@ def download_return_orders_report():
                     "Return Order ID": order.get("_id", ""),
                     "Customer Name": order.get("customer_name", ""),
                     "Customer ID": order.get("customer_id", ""),
+                    "Return Form Date": order.get("return_form_date", ""),
                     "Return Date": order.get("return_date", ""),
+                    "Contact Number": order.get("contact_no", ""),
+                    "Box Count": order.get("box_count", ""),
                     "Status": order.get("status", "").upper(),
                     "Return Reason": order.get("return_reason", ""),
                     "Total Items": total_items,
                     "Items Details": items_string,
+                    "Debit Note Document": order.get("debit_note_document", ""),
                     "Created By": order.get(
                         "created_by_user", [{"name": "Unknown User"}]
                     )[0].get("name"),
@@ -195,16 +199,20 @@ def download_return_orders_report():
             worksheet.set_column("A:A", 25)  # Return Order ID
             worksheet.set_column("B:B", 20)  # Customer Name
             worksheet.set_column("C:C", 20)  # Customer ID
-            worksheet.set_column("D:D", 15)  # Return Date
-            worksheet.set_column("E:E", 12)  # Status
-            worksheet.set_column("F:F", 30)  # Return Reason
-            worksheet.set_column("G:G", 12)  # Total Items
-            worksheet.set_column("H:H", 50)  # Items Details
-            worksheet.set_column("I:I", 15)  # Created By
-            worksheet.set_column("J:J", 40)  # Pickup Address
-            worksheet.set_column("K:K", 15)  # Pickup Phone
-            worksheet.set_column("L:L", 15)  # Created At
-            worksheet.set_column("M:M", 15)  # Updated At
+            worksheet.set_column("D:D", 18)  # Return Form Date
+            worksheet.set_column("E:E", 15)  # Return Date
+            worksheet.set_column("F:F", 15)  # Contact Number
+            worksheet.set_column("G:G", 12)  # Box Count
+            worksheet.set_column("H:H", 12)  # Status
+            worksheet.set_column("I:I", 30)  # Return Reason
+            worksheet.set_column("J:J", 12)  # Total Items
+            worksheet.set_column("K:K", 50)  # Items Details
+            worksheet.set_column("L:L", 50)  # Debit Note Document
+            worksheet.set_column("M:M", 15)  # Created By
+            worksheet.set_column("N:N", 40)  # Pickup Address
+            worksheet.set_column("O:O", 15)  # Pickup Phone
+            worksheet.set_column("P:P", 15)  # Created At
+            worksheet.set_column("Q:Q", 15)  # Updated At
 
         output.seek(0)
 
