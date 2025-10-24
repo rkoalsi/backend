@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, File, UploadFile
 from config.root import connect_to_mongo, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo import DESCENDING
@@ -6,11 +6,31 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
 from config.whatsapp import send_whatsapp
+import os
+import boto3
+import io
+from dotenv import load_dotenv
+from botocore.exceptions import ClientError
 
+load_dotenv()
 router = APIRouter()
 
 client, db = connect_to_mongo()
 return_orders_collection = db["return_orders"]
+
+# S3 Configuration
+AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
+AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
+AWS_S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+AWS_S3_REGION = os.getenv("S3_REGION", "ap-south-1")
+AWS_S3_URL = os.getenv("S3_URL")
+
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_S3_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
 
 
 def format_address(address):
@@ -63,10 +83,14 @@ class ReturnOrderCreate(BaseModel):
     customer_id: Optional[str] = None
     return_reason: str
     return_date: Optional[datetime] = None
+    return_form_date: Optional[datetime] = None
+    contact_no: Optional[str] = None
+    box_count: Optional[int] = None
+    debit_note_document: Optional[str] = None
     status: str = "draft"
     pickup_address: PickupAddress
     items: List[ReturnItem] = []
-    created_by: str  
+    created_by: str
 
 
 class ReturnOrderUpdate(BaseModel):
@@ -74,6 +98,10 @@ class ReturnOrderUpdate(BaseModel):
     return_reason: Optional[str] = None
     return_amount: Optional[float] = None
     return_date: Optional[datetime] = None
+    return_form_date: Optional[datetime] = None
+    contact_no: Optional[str] = None
+    box_count: Optional[int] = None
+    debit_note_document: Optional[str] = None
     status: Optional[str] = None
     items: Optional[List[ReturnItem]] = None
     pickup_address: Optional[PickupAddress] = None
@@ -93,13 +121,22 @@ def return_order_notification(params, created_by):
         sales_admin = db.users.find_one({"email": "pupscribeinvoicee@gmail.com"})
         warehouse_admin = db.users.find_one({"email": "barkbutleracc@gmail.com"})
         customer_care_admin = db.users.find_one({"designation": "Customer Care"})
+        office_coordinator = db.users.find_one(
+            {"email": "pupscribeoffcoordinator@gmail.com"}
+        )
 
         template = db.templates.find_one({"name": "return_order_notification"})
         if not template:
             print("Warning: return_order_notification template not found")
             return
 
-        for salesperson in [sp, sales_admin, warehouse_admin, customer_care_admin]:
+        for salesperson in [
+            sp,
+            sales_admin,
+            warehouse_admin,
+            customer_care_admin,
+            office_coordinator,
+        ]:
             if not salesperson:
                 continue
             phone = salesperson.get("phone")
@@ -126,12 +163,18 @@ async def create_return_order(return_order: ReturnOrderCreate):
         try:
             order_dict["created_by"] = ObjectId(order_dict["created_by"])
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid created_by ID: {order_dict.get('created_by')} - {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid created_by ID: {order_dict.get('created_by')} - {str(e)}",
+            )
 
         try:
             order_dict["customer_id"] = ObjectId(order_dict["customer_id"])
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid customer_id ID: {order_dict.get('customer_id')} - {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid customer_id ID: {order_dict.get('customer_id')} - {str(e)}",
+            )
 
         # Set default values
         order_dict["created_at"] = datetime.now()
@@ -151,7 +194,10 @@ async def create_return_order(return_order: ReturnOrderCreate):
             try:
                 item["product_id"] = ObjectId(item["product_id"])
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid product_id for item {idx}: {item.get('product_id')} - {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid product_id for item {idx}: {item.get('product_id')} - {str(e)}",
+                )
 
         # Insert the document
         result = return_orders_collection.insert_one(order_dict)
@@ -355,6 +401,21 @@ async def delete_return_order(return_order_id: str):
     try:
         object_id = validate_object_id(return_order_id)
 
+        # Get the return order to check if it has files to delete
+        return_order = return_orders_collection.find_one({"_id": object_id})
+        if not return_order:
+            raise HTTPException(status_code=404, detail="Return order not found")
+
+        # Delete S3 file if it exists
+        if return_order.get("debit_note_document"):
+            try:
+                old_key = return_order["debit_note_document"].replace(
+                    f"{AWS_S3_URL}/", ""
+                )
+                s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=old_key)
+            except ClientError as e:
+                print(f"Warning: Could not delete file from S3: {e}")
+
         result = return_orders_collection.delete_one({"_id": object_id})
 
         if result.deleted_count == 0:
@@ -367,4 +428,92 @@ async def delete_return_order(return_order_id: str):
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error deleting return order: {str(e)}"
+        )
+
+
+@router.post("/{return_order_id}/upload-document")
+async def upload_debit_note_document(
+    return_order_id: str, file: UploadFile = File(...)
+):
+    """
+    Upload a debit note document (xlsx, csv, or image) for a return order.
+    Files are stored in S3 under return_orders/{return_order_id}/
+    """
+    try:
+        object_id = validate_object_id(return_order_id)
+
+        # Check if return order exists
+        return_order = return_orders_collection.find_one({"_id": object_id})
+        if not return_order:
+            raise HTTPException(status_code=404, detail="Return order not found")
+
+        # Validate file type (allow images, xlsx, csv)
+        allowed_extensions = {".xlsx", ".xls", ".csv", ".jpg", ".jpeg", ".png", ".pdf"}
+        file_extension = os.path.splitext(file.filename)[1].lower()
+
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}",
+            )
+
+        # Delete old file from S3 if it exists
+        if return_order.get("debit_note_document"):
+            try:
+                old_key = return_order["debit_note_document"].replace(
+                    f"{AWS_S3_URL}/", ""
+                )
+                s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=old_key)
+            except ClientError as e:
+                print(f"Warning: Could not delete old file from S3: {e}")
+
+        # Read file content
+        file_content = await file.read()
+
+        # Generate filename with structure: return_orders/{return_order_id}/{filename}
+        s3_key = f"return_orders/{return_order_id}/{file.filename}"
+
+        # Upload to S3
+        try:
+            s3_client.upload_fileobj(
+                io.BytesIO(file_content),
+                AWS_S3_BUCKET_NAME,
+                s3_key,
+                ExtraArgs={
+                    "ContentType": file.content_type or "application/octet-stream",
+                    "ACL": "public-read",
+                },
+            )
+
+            # Store the S3 URL in the database
+            document_url = f"{AWS_S3_URL}/{s3_key}"
+            result = return_orders_collection.update_one(
+                {"_id": object_id},
+                {
+                    "$set": {
+                        "debit_note_document": document_url,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+
+            if result.modified_count == 0 and result.matched_count == 0:
+                raise HTTPException(
+                    status_code=404, detail="Return order not found during update"
+                )
+
+            return {
+                "message": "Document uploaded successfully",
+                "document_url": document_url,
+            }
+
+        except ClientError as e:
+            print(f"Error uploading to S3: {e}")
+            raise HTTPException(status_code=500, detail="Failed to upload document")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error uploading document: {str(e)}"
         )
