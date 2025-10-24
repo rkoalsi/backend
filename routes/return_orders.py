@@ -47,9 +47,10 @@ class PickupAddress(BaseModel):
     address: str
     city: str
     address_id: str
-    county: str
     country_code: str
-    # phone: str
+    phone: Optional[str] = None
+    phone_formatted: Optional[str] = None
+    tax_info_id: Optional[str] = None
     attention: str
     street2: str
     state: str
@@ -65,7 +66,7 @@ class ReturnOrderCreate(BaseModel):
     status: str = "draft"
     pickup_address: PickupAddress
     items: List[ReturnItem] = []
-    created_by: str  # This will be stored as ObjectId
+    created_by: str  
 
 
 class ReturnOrderUpdate(BaseModel):
@@ -93,16 +94,23 @@ def return_order_notification(params, created_by):
         warehouse_admin = db.users.find_one({"email": "barkbutleracc@gmail.com"})
         customer_care_admin = db.users.find_one({"designation": "Customer Care"})
 
-        template = db.templates.find({"name": "return_order_notification"})
+        template = db.templates.find_one({"name": "return_order_notification"})
+        if not template:
+            print("Warning: return_order_notification template not found")
+            return
+
         for salesperson in [sp, sales_admin, warehouse_admin, customer_care_admin]:
+            if not salesperson:
+                continue
             phone = salesperson.get("phone")
             template_doc = {**template}
             parameters = {**params}
-            if phone != "":
+            if phone and phone != "":
                 x = send_whatsapp(phone, template_doc, parameters)
-        pass
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid ID format")
+    except Exception as e:
+        # Log the error but don't fail the entire request
+        print(f"Error sending return order notification: {str(e)}")
+        # Don't raise exception - notification failure shouldn't fail the order creation
 
 
 @router.post("")
@@ -115,8 +123,15 @@ async def create_return_order(return_order: ReturnOrderCreate):
         order_dict = return_order.dict()
 
         # Convert created_by to ObjectId
-        order_dict["created_by"] = ObjectId(order_dict["created_by"])
-        order_dict["customer_id"] = ObjectId(order_dict["customer_id"])
+        try:
+            order_dict["created_by"] = ObjectId(order_dict["created_by"])
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid created_by ID: {order_dict.get('created_by')} - {str(e)}")
+
+        try:
+            order_dict["customer_id"] = ObjectId(order_dict["customer_id"])
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid customer_id ID: {order_dict.get('customer_id')} - {str(e)}")
 
         # Set default values
         order_dict["created_at"] = datetime.now()
@@ -132,8 +147,11 @@ async def create_return_order(return_order: ReturnOrderCreate):
                 item.dict() if hasattr(item, "dict") else item
                 for item in order_dict["items"]
             ]
-        for item in order_dict["items"]:
-            item["product_id"] = ObjectId(item["product_id"])
+        for idx, item in enumerate(order_dict["items"]):
+            try:
+                item["product_id"] = ObjectId(item["product_id"])
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid product_id for item {idx}: {item.get('product_id')} - {str(e)}")
 
         # Insert the document
         result = return_orders_collection.insert_one(order_dict)
