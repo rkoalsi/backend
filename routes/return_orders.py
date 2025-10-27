@@ -130,20 +130,36 @@ def return_order_notification(params, created_by):
             print("Warning: return_order_notification template not found")
             return
 
-        for salesperson in [
+        # Create a list of all users to notify
+        recipients = [
             sp,
             sales_admin,
             warehouse_admin,
             customer_care_admin,
             office_coordinator,
-        ]:
+        ]
+
+        # Track unique user IDs to avoid duplicate messages
+        notified_users = set()
+
+        for salesperson in recipients:
             if not salesperson:
                 continue
+
+            # Get user ID (use string representation for comparison)
+            user_id = str(salesperson.get("_id"))
+
+            # Skip if we already sent a message to this user
+            if user_id in notified_users:
+                continue
+
             phone = salesperson.get("phone")
             template_doc = {**template}
             parameters = {**params}
             if phone and phone != "":
                 x = send_whatsapp(phone, template_doc, parameters)
+                # Mark this user as notified
+                notified_users.add(user_id)
     except Exception as e:
         # Log the error but don't fail the entire request
         print(f"Error sending return order notification: {str(e)}")
