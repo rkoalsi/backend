@@ -201,9 +201,13 @@ async def create_return_order(return_order: ReturnOrderCreate):
 
         # Insert the document
         result = return_orders_collection.insert_one(order_dict)
+
+        # Calculate total quantity of items
+        total_quantity = sum(item.get("quantity", 0) for item in order_dict.get("items", []))
+
         params = {
             "customer_name": order_dict.get("customer_name"),
-            "items": len(order_dict.get("items", [])),
+            "items": total_quantity,
             "status": str(order_dict.get("status", [])).capitalize(),
             "reason": str(order_dict.get("return_reason", [])).capitalize(),
             "address": format_address(order_dict.get("pickup_address", [])),
@@ -368,9 +372,13 @@ async def update_return_order(return_order_id: str, update_data: ReturnOrderUpda
         updated_order = return_orders_collection.find_one({"_id": object_id})
         serialized_order = serialize_mongo_document(updated_order)
         serialized_order["items_count"] = len(serialized_order.get("items", []))
+
+        # Calculate total quantity of items
+        total_quantity = sum(item.get("quantity", 0) for item in data.get("items", []))
+
         params = {
             "customer_name": data.get("customer_name"),
-            "items": len(data.get("items", [])),
+            "items": total_quantity,
             "status": str(data.get("status", [])).capitalize(),
             "reason": str(data.get("return_reason", [])).capitalize(),
             "address": format_address(data.get("pickup_address", [])),
