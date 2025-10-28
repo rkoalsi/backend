@@ -1530,7 +1530,19 @@ async def finalise(order_dict: dict):
                 json=payload,
             )
             print(estimate_response.json())
-            estimate_data = estimate_response.json()["estimate"]
+
+            # Check if the response contains an error
+            response_json = estimate_response.json()
+            if estimate_response.status_code != 201 or "code" in response_json:
+                error_message = response_json.get("message", "Unknown error occurred")
+                error_code = response_json.get("code", "")
+                return {
+                    "status": "error",
+                    "message": error_message,
+                    "error_code": error_code
+                }
+
+            estimate_data = response_json["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
             estimate_url = estimate_data.get("estimate_url")
@@ -1596,9 +1608,19 @@ async def finalise(order_dict: dict):
                 headers=headers,
                 json=payload,
             )
-            if y.status_code != 200:
-                return {"status": "error", "message": f"{y.json().get('message','')}"}
-            estimate_data = y.json()["estimate"]
+
+            # Check if the response contains an error
+            response_json = y.json()
+            if y.status_code != 200 or "code" in response_json:
+                error_message = response_json.get("message", "Unknown error occurred")
+                error_code = response_json.get("code", "")
+                return {
+                    "status": "error",
+                    "message": error_message,
+                    "error_code": error_code
+                }
+
+            estimate_data = response_json["estimate"]
             estimate_id = estimate_data.get("estimate_id")
             estimate_number = estimate_data.get("estimate_number")
             estimate_url = estimate_data.get("estimate_url")
