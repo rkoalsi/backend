@@ -1533,7 +1533,8 @@ async def finalise(order_dict: dict):
 
             # Check if the response contains an error
             response_json = estimate_response.json()
-            if estimate_response.status_code != 201 or "code" in response_json:
+            # Zoho returns code: 0 for success, non-zero for errors
+            if estimate_response.status_code != 201 or (response_json.get("code", 0) != 0):
                 error_message = response_json.get("message", "Unknown error occurred")
                 error_code = response_json.get("code", "")
                 return {
@@ -1611,7 +1612,8 @@ async def finalise(order_dict: dict):
 
             # Check if the response contains an error
             response_json = y.json()
-            if y.status_code != 200 or "code" in response_json:
+            # Zoho returns code: 0 for success, non-zero for errors
+            if y.status_code != 200 or (response_json.get("code", 0) != 0):
                 error_message = response_json.get("message", "Unknown error occurred")
                 error_code = response_json.get("code", "")
                 return {
