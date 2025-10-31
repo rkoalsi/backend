@@ -533,8 +533,17 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> D
                 
             rate = product.get("rate", 0)
             
+            # Get image URL - check image_url first, then images array
+            image_url = product.get("image_url", "")
+            if not image_url:
+                # If image_url doesn't exist, check for images array
+                images = product.get("images", [])
+                if images and len(images) > 0:
+                    # Use the first image from the images array
+                    image_url = images[0] if isinstance(images[0], str) else images[0].get("url", "")
+            
             rows.append([
-                f'=IMAGE("{product.get("image_url", "")}", 1)',
+                f'=IMAGE("{image_url}", 1)',
                 product.get("name", ""),
                 product.get("sub_category", ""),
                 product.get("series", ""),
@@ -551,7 +560,6 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> D
         brand_data[brand_name] = rows
     
     return brand_data
-
 def create_format_requests(sheet_id: int, rows_count: int) -> List[Dict]:
     """Create formatting requests for a sheet"""
     return [
