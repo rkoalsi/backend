@@ -776,33 +776,98 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
         
         # Step 3: Create sheets and add data (SEMI-CRITICAL)
         print("📋 Adding sheets and data...")
-        
+
         brand_data = prepare_brand_data(brands, customer, special_margins)
+
+        # Normalize brand names to avoid case-sensitive duplicates
+        # Google Sheets treats sheet names as case-insensitive
+        normalized_brand_data = {}
+        brand_name_mapping = {}  # Maps normalized name to original name
+
+        for brand_name, data in brand_data.items():
+            # Use the first occurrence of each case-insensitive brand name
+            normalized_name = brand_name
+            normalized_lower = brand_name.lower()
+
+            if normalized_lower not in [k.lower() for k in normalized_brand_data.keys()]:
+                normalized_brand_data[normalized_name] = data
+                brand_name_mapping[normalized_name] = brand_name
+            else:
+                # Find the existing key with same case-insensitive name
+                existing_key = next(k for k in normalized_brand_data.keys() if k.lower() == normalized_lower)
+                # Merge the products from this duplicate brand into the existing one
+                normalized_brand_data[existing_key].extend(data)
+                print(f"⚠️ Merged duplicate brand '{brand_name}' into '{existing_key}'")
+
+        brand_data = normalized_brand_data
         sorted_brands = sorted(brand_data.keys())
+
+        # Get existing sheet names to avoid duplicates
+        existing_sheets = {sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+                          for sheet in spreadsheet.get("sheets", [])}
+
+        # Create case-insensitive lookup for existing sheets
+        existing_sheets_lower = {name.lower(): (name, sheet_id)
+                                for name, sheet_id in existing_sheets.items()}
+
+        print(f"🔍 DEBUG: Existing sheets: {list(existing_sheets.keys())}")
+        print(f"🔍 DEBUG: Brands needed: {sorted_brands}")
+
+        # Create sheets only for brands that don't exist yet (case-insensitive check)
+        sheet_requests = []
+        brands_to_create = [brand for brand in sorted_brands
+                           if brand.lower() not in existing_sheets_lower]
+
+        print(f"🔍 DEBUG: Brands to create: {brands_to_create}")
+        print(f"🔍 DEBUG: Brands already exist: {[b for b in sorted_brands if b in existing_sheets]}")
+
+        for brand in brands_to_create:
+            sheet_requests.append({"addSheet": {"properties": {"title": brand}}})
+
+        # Only delete Sheet1 if it exists
+        if "Sheet1" in existing_sheets:
+            sheet_requests.append({"deleteSheet": {"sheetId": existing_sheets["Sheet1"]}})
+
+        print(f"🔍 DEBUG: Total sheet requests: {len(sheet_requests)}")
         
-        # Create sheets
-        sheet_requests = [
-            {"addSheet": {"properties": {"title": brand}}}
-            for brand in sorted_brands
-        ]
-        sheet_requests.append({"deleteSheet": {"sheetId": 0}})  # Remove Sheet1
-        
-        batch_response, error = await safe_execute(
-            "Creating brand sheets",
-            lambda: sheets_service.spreadsheets().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={"requests": sheet_requests}
-            ).execute(),
-            critical=False
-        )
-        
-        if batch_response:
-            operations_status["sheets_creation"] = f"✓ Created {len(sorted_brands)} brand sheets"
-            
-            # Map brand names to sheet IDs
-            brand_sheets = {}
-            for i, brand in enumerate(sorted_brands):
-                brand_sheets[brand] = batch_response["replies"][i]["addSheet"]["properties"]["sheetId"]
+        # Only execute batch update if there are requests
+        if sheet_requests:
+            batch_response, error = await safe_execute(
+                "Creating brand sheets",
+                lambda: sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": sheet_requests}
+                ).execute(),
+                critical=False
+            )
+        else:
+            batch_response = None
+            error = None
+
+        # Map brand names to sheet IDs
+        brand_sheets = {}
+
+        if batch_response or not sheet_requests:
+            operations_status["sheets_creation"] = f"✓ Using {len(sorted_brands)} brand sheets ({len(brands_to_create)} new, {len(sorted_brands) - len(brands_to_create)} existing)"
+
+            # Add existing sheets to the mapping (case-insensitive)
+            for brand in sorted_brands:
+                if brand.lower() in existing_sheets_lower:
+                    _, sheet_id = existing_sheets_lower[brand.lower()]
+                    brand_sheets[brand] = sheet_id
+
+            # Add newly created sheets to the mapping
+            if batch_response and "replies" in batch_response:
+                reply_index = 0
+                for brand in brands_to_create:
+                    # Find the corresponding reply (skip deleteSheet replies)
+                    while reply_index < len(batch_response["replies"]):
+                        reply = batch_response["replies"][reply_index]
+                        if "addSheet" in reply:
+                            brand_sheets[brand] = reply["addSheet"]["properties"]["sheetId"]
+                            reply_index += 1
+                            break
+                        reply_index += 1
             
             # Add data to sheets
             data_updates = []
