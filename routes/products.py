@@ -161,8 +161,13 @@ def extract_base_name(product_name: str) -> str:
     base_name = product_name
 
     # Define size patterns (both abbreviated and full words)
-    size_pattern_abbrev = '(XXS|XS|S|M|L|XL|XXL|XXXL)'
+    # IMPORTANT: Longer sizes must come first to avoid partial matches (XXXXL before XXXL before XXL before XL before L)
+    size_pattern_abbrev = '(XXXXL|XXXL|XXL|XL|XXS|XS|S|M|L)'
     size_pattern_full = '(X-Large|X-Small|XX-Large|XXX-Large|Extra Large|Extra Small|Large|Medium|Small)'
+
+    # NEW: Remove (SIZE/measurement) pattern first - e.g., (XXL/62CM), (M/32CM), （XL/48CM）
+    # Handles both regular parentheses () and full-width parentheses （）
+    base_name = re.sub(rf'[（(]\s*{size_pattern_abbrev}\s*/\s*\d+\s*[Cc]?[Mm]\s*[)）]', '', base_name, flags=re.IGNORECASE)
 
     # Remove various size patterns (matching frontend logic)
     # First, handle full word size patterns
@@ -178,8 +183,12 @@ def extract_base_name(product_name: str) -> str:
         base_name = re.sub(pattern, '', base_name, flags=re.IGNORECASE)
 
     # Then handle abbreviated size patterns
+    # Pattern 1: Special handling to keep the color part
+    pattern1 = rf'-([A-Za-z][^-]+)-{size_pattern_abbrev}$'
+    base_name = re.sub(pattern1, r' \1', base_name, flags=re.IGNORECASE)
+
+    # Remaining patterns - replace with space
     abbrev_patterns = [
-        rf'-([A-Za-z][^-]+)-{size_pattern_abbrev}$',  # Pattern 1
         rf'\s+{size_pattern_abbrev}\s+-\s+',           # Pattern 2
         rf'\s+-\s+{size_pattern_abbrev}\s+',           # Pattern 3
         rf'-{size_pattern_abbrev}-',                   # Pattern 4
@@ -203,7 +212,9 @@ def extract_base_name(product_name: str) -> str:
     base_name = re.sub(r'\s*\(\d+-\d+kgs?\)', '', base_name, flags=re.IGNORECASE)
 
     # Clean up extra spaces and dashes
-    base_name = re.sub(r'\s*-+\s*$', '', base_name)
+    base_name = re.sub(r'\s*-+\s*$', '', base_name)  # Remove trailing dashes
+    base_name = re.sub(r'^\s*-+\s*', '', base_name)  # Remove leading dashes
+    base_name = re.sub(r'\s*-\s*', ' - ', base_name)  # Normalize spacing around dashes
     base_name = re.sub(r'\s+', ' ', base_name).strip()
 
     return base_name
@@ -300,11 +311,11 @@ def get_products(
                         -1,
                     ]
                 },
-                # Extract size - match XS, S, M, L, XL, XXL, XXXL with word boundaries
+                # Extract size - match XS, S, M, L, XL, XXL, XXXL, XXXXL with word boundaries
                 "extracted_size": {
                     "$regexFind": {
                         "input": "$name",
-                        "regex": r"\b(XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",  # XXXL must come before XXL and XL
+                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
                     }
                 },
             }
@@ -329,7 +340,8 @@ def get_products(
                             {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
                             {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
                             {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
-                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},  # Added XXXL
+                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},
+                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 8},
                         ],
                         "default": 99,
                     }
