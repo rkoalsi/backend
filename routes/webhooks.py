@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from config.root import connect_to_mongo, serialize_mongo_document 
-from config.scheduler import schedule_job, remove_scheduled_jobs 
-from config.whatsapp import send_whatsapp 
+from config.root import connect_to_mongo, serialize_mongo_document
+from config.scheduler import schedule_job, remove_scheduled_jobs
+from config.whatsapp import send_whatsapp
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
@@ -145,7 +145,7 @@ def create_special_margins_for_new_product(
                         "product_id": ObjectId(product_id),
                         "margin": margin,
                         "name": product_name,
-                        "updated_at":datetime.datetime.now()
+                        "updated_at": datetime.datetime.now(),
                     }
                 )
                 print(
@@ -400,7 +400,7 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             month = now.month
         if year is None:
             year = now.year
-            
+
         if day is None:
             if month == now.month and year == now.year:
                 # Current month - use current day
@@ -408,9 +408,9 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             else:
                 # Previous month - use last day of that month
                 day = monthrange(year, month)[1]
-        
+
         now_date = datetime.datetime(year, month, day)
-    
+
     to_date = now_date.date()
     sheet_name = f'{now_date.strftime("%b")} {year}'
     print(f"Fetching stock for {now_date.strftime('%b')}-{year} with date {to_date}")
@@ -422,7 +422,7 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
     # Define target warehouse names (both formats for compatibility)
     target_warehouses = {
         "pupscribe enterprises private limited",
-        "Pupscribe Enterprises Private Limited"
+        "Pupscribe Enterprises Private Limited",
     }
 
     try:
@@ -513,16 +513,22 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
                 warehouse_name = warehouse_entry.get("warehouse_name", "")
                 if warehouse_name in target_warehouses:
                     try:
-                        stock_quantity = int(warehouse_entry.get("quantity_available_for_sale", 0))
+                        stock_quantity = int(
+                            warehouse_entry.get("quantity_available_for_sale", 0)
+                        )
                         item_name = warehouse_entry.get("item_name", "").strip().lower()
-                        arr.append({
-                            "name": item_name,
-                            "stock": stock_quantity,
-                        })
+                        arr.append(
+                            {
+                                "name": item_name,
+                                "stock": stock_quantity,
+                            }
+                        )
                         print(f"Added stock for '{item_name}': {stock_quantity}")
                         break  # Found the warehouse we want
                     except ValueError:
-                        print(f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}")
+                        print(
+                            f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}"
+                        )
 
         # Handle old API structure with direct warehouse info
         elif "warehouses" in item:
@@ -531,34 +537,46 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             for w in warehouses:
                 warehouse_name = w.get("warehouse_name", "")
                 # Check both exact and lowercase versions
-                if (warehouse_name in target_warehouses or 
-                    warehouse_name.strip().lower() in {name.lower() for name in target_warehouses}):
+                if (
+                    warehouse_name in target_warehouses
+                    or warehouse_name.strip().lower()
+                    in {name.lower() for name in target_warehouses}
+                ):
                     try:
                         stock_quantity = int(w.get("quantity_available_for_sale", 0))
-                        arr.append({
-                            "name": item_name,
-                            "stock": stock_quantity,
-                        })
+                        arr.append(
+                            {
+                                "name": item_name,
+                                "stock": stock_quantity,
+                            }
+                        )
                         print(f"Added stock for '{item_name}': {stock_quantity}")
                         break  # Found the warehouse we want
                     except ValueError:
-                        print(f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}")
+                        print(
+                            f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}"
+                        )
 
         # Handle direct warehouse structure (fallback)
         elif item.get("warehouse_name") in target_warehouses:
             try:
                 stock_quantity = int(item.get("quantity_available_for_sale", 0))
                 item_name = item.get("item_name", "").strip().lower()
-                arr.append({
-                    "name": item_name,
-                    "stock": stock_quantity,
-                })
+                arr.append(
+                    {
+                        "name": item_name,
+                        "stock": stock_quantity,
+                    }
+                )
                 print(f"Added stock for '{item_name}': {stock_quantity}")
             except ValueError:
-                print(f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}")
+                print(
+                    f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}"
+                )
 
     print(f"Total stock items after filtering: {len(arr)}")
     return arr
+
 
 def update_stock():
     """
@@ -861,7 +879,7 @@ def handle_estimate(data: dict):
         exists = serialize_mongo_document(
             db.estimates.find_one({"estimate_id": estimate_id})
         )
-        
+
         if not exists:
             db.estimates.insert_one(
                 {
@@ -874,10 +892,19 @@ def handle_estimate(data: dict):
                 {"estimate_id": estimate_id},
                 {"$set": {**estimate, "updated_at": datetime.datetime.now()}},
             )
-            estimate_number = estimate.get("estimate_number", exists.get('estimate_number'))
-            estimate_url = estimate.get("estimate_url", exists.get('estimate_url'))
+            estimate_number = estimate.get(
+                "estimate_number", exists.get("estimate_number")
+            )
+            estimate_url = estimate.get("estimate_url", exists.get("estimate_url"))
             db.orders.update_one(
-                {"estimate_id": estimate_id}, {"$set": {"status": estimate_status, "estimate_url":estimate_url, "estimate_number":estimate_number}}
+                {"estimate_id": estimate_id},
+                {
+                    "$set": {
+                        "status": estimate_status,
+                        "estimate_url": estimate_url,
+                        "estimate_number": estimate_number,
+                    }
+                },
             )
     else:
         print("Estimate Does Not Exist. Webhook Received")
@@ -1270,7 +1297,7 @@ def handle_shipment(data: dict):
             "tracking_number": tracking_number,
             "button_url": button_url,
         }
-        valid_salespeople = [sales_admin_1, sales_admin_2]
+        valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
@@ -1311,6 +1338,7 @@ def handle_shipment(data: dict):
                     print(f"Failed to send WhatsApp to {name}: {e}")
     else:
         print("Invoice Not Found for Given Shipment")
+
 
 @router.post("/estimate")
 def estimate(data: dict):
