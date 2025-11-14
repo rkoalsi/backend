@@ -1236,6 +1236,9 @@ def handle_shipment(data: dict):
         sales_admin_3 = serialize_mongo_document(
             dict(db.users.find_one({"email": "events@barkbutler.in"}))
         )
+        sales_admin_4 = serialize_mongo_document(
+            dict(db.users.find_one({"email": "hitesh@barkbutler.in"}))
+        )
         template = serialize_mongo_document(
             dict(db.templates.find_one({"name": "shipment_notification"}))
         )
@@ -1271,7 +1274,7 @@ def handle_shipment(data: dict):
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
-            for person in [sales_admin_1, sales_admin_2, sales_admin_3]:
+            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4]:
                 phone = str(person.get("phone"))
                 print("if", phone)
                 if phone:  # Validate phone exists and is not empty
