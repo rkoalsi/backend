@@ -365,6 +365,39 @@ def process_credit_note_data(credit_note_data):
     return sort_dict_recursively(credit_note_data)
 
 
+def process_shipment_data(shipment_data):
+    """Process shipment data to ensure proper formatting and datetime conversion."""
+    shipment_data["shipment_id"] = str(shipment_data.get("shipment_id", ""))
+
+    # Handle all datetime fields - convert to MongoDB date format
+    datetime_fields = [
+        "created_time", "date", "last_modified_time",
+        "created_time_formatted", "last_modified_time_formatted",
+        "mail_first_viewed_time", "mail_last_viewed_time"
+    ]
+
+    for field in datetime_fields:
+        if field in shipment_data and shipment_data[field]:
+            datetime_value = parse_datetime_field(shipment_data[field])
+            if isinstance(datetime_value, datetime):
+                shipment_data[field] = datetime_value
+
+    # Set created_at from created_time or date
+    if "created_time" in shipment_data:
+        shipment_data["created_at"] = shipment_data.get("created_time")
+    elif "date" in shipment_data:
+        date_val = parse_datetime_field(shipment_data["date"])
+        if isinstance(date_val, datetime):
+            shipment_data["created_at"] = date_val
+        else:
+            shipment_data["created_at"] = shipment_data["date"]
+
+    if "created_at" not in shipment_data:
+        logger.warning(f"No created_at field for shipment {shipment_data.get('shipment_id')}")
+
+    return sort_dict_recursively(shipment_data)
+
+
 def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[str]:
     """Find product ID by querying MongoDB with various matching strategies."""
     if not item_name:
@@ -721,6 +754,176 @@ async def credit_notes_cron():
         )
 
 
+async def shipments_cron():
+    """Cron job for syncing all shipments from Zoho Inventory daily."""
+    logger.info("🚀 Starting daily shipments sync...")
+    start_time = time.time()
+
+    total_processed = 0
+    total_inserted = 0
+    total_errors = 0
+
+    try:
+        _, db = connect_to_mongo()
+        collection = db["shipments"]
+
+        async with ZohoAPIClient("inventory") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages first
+            logger.info("🔍 Determining total number of pages...")
+            shipments_url = (
+                f"https://www.zohoapis.com/inventory/v1/shipmentorders?"
+                f"response_option=2&"
+                f"organization_id={org_id}"
+            )
+
+            data = await api_client.make_request(shipments_url)
+            if not data:
+                logger.error("Failed to get response from shipments API")
+                return
+
+            page_context = data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            total_shipments = page_context.get("total", 0)
+
+            logger.info(f"📊 Found {total_shipments} total shipments across {total_pages} pages")
+            logger.info(f"🚀 Starting reverse processing: Page {total_pages} → Page 1")
+
+            # Process pages in reverse order (oldest first)
+            for page in range(total_pages, 0, -1):
+                logger.info(f"--- Processing Page {page}/{total_pages} ---")
+
+                page_url = (
+                    f"https://www.zohoapis.com/inventory/v1/shipmentorders?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                # Get shipments from response
+                page_shipments = page_data.get("shipmentorders") or page_data.get("shipment_orders")
+                if not page_shipments:
+                    logger.warning(f"No shipments found for page {page}")
+                    continue
+
+                logger.info(f"Page {page}: Found {len(page_shipments)} shipments")
+
+                # Filter new shipments
+                new_shipment_ids = []
+                existing_count = 0
+
+                for shipment in page_shipments:
+                    ship_id = str(
+                        shipment.get("shipment_order_id") or
+                        shipment.get("shipmentorder_id") or
+                        shipment.get("shipment_id") or
+                        ""
+                    )
+                    if not ship_id:
+                        continue
+
+                    total_processed += 1
+                    existing_doc = collection.find_one({"shipment_id": ship_id}, {"_id": 1})
+                    if not existing_doc:
+                        new_shipment_ids.append(ship_id)
+                    else:
+                        existing_count += 1
+
+                logger.info(f"Page {page}: {len(new_shipment_ids)} new, {existing_count} existing")
+
+                if new_shipment_ids:
+                    # Fetch details for new shipments
+                    logger.info(f"Fetching details for {len(new_shipment_ids)} shipments...")
+
+                    shipments_to_insert = []
+
+                    # Process in batches
+                    batch_size = 5
+                    for i in range(0, len(new_shipment_ids), batch_size):
+                        batch_ids = new_shipment_ids[i:i + batch_size]
+
+                        detail_tasks = []
+                        for ship_id in batch_ids:
+                            detail_url = (
+                                f"https://www.zohoapis.com/inventory/v1/shipmentorders/{ship_id}?"
+                                f"organization_id={org_id}"
+                            )
+                            detail_tasks.append(api_client.make_request(detail_url))
+
+                        results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+
+                        for j, result in enumerate(results):
+                            try:
+                                if isinstance(result, Exception):
+                                    logger.error(f"Error fetching shipment {batch_ids[j]}: {result}")
+                                    total_errors += 1
+                                    continue
+
+                                shipment_detail = None
+                                if result:
+                                    shipment_detail = result.get("shipment_order") or result.get("shipmentorder")
+
+                                if shipment_detail:
+                                    processed = process_shipment_data(shipment_detail)
+                                    shipments_to_insert.append(processed)
+                                else:
+                                    total_errors += 1
+                            except Exception as e:
+                                logger.error(f"Error processing shipment: {e}")
+                                total_errors += 1
+
+                    # Bulk insert
+                    if shipments_to_insert:
+                        try:
+                            result = collection.insert_many(shipments_to_insert, ordered=False)
+                            inserted = len(result.inserted_ids)
+                            total_inserted += inserted
+                            logger.info(f"✅ Inserted {inserted} shipments from page {page}")
+                        except Exception as e:
+                            logger.error(f"Error during bulk insert for page {page}: {e}")
+                            # Fallback to individual inserts
+                            for doc in shipments_to_insert:
+                                try:
+                                    collection.insert_one(doc)
+                                    total_inserted += 1
+                                except Exception as e2:
+                                    logger.error(f"Failed to insert shipment: {e2}")
+                                    total_errors += 1
+
+                # Brief pause between pages
+                if page > 1:
+                    await asyncio.sleep(1)
+
+            duration = time.time() - start_time
+
+            logger.info(f"🎉 Shipments sync completed!")
+            logger.info(f"📊 Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}")
+
+            send_slack_notification(
+                "Shipments Cron",
+                success=True,
+                details={
+                    "processed": total_processed,
+                    "inserted": total_inserted,
+                    "pages": total_pages,
+                    "duration": duration,
+                },
+            )
+
+    except Exception as e:
+        error_msg = f"Error in shipments sync: {e}"
+        logger.error(error_msg)
+        send_slack_notification("Shipments Cron Error", success=False, error_msg=str(e))
+
+
 async def stock_cron():
     """Cron job for syncing warehouse stock data daily."""
     logger.info("🚀 Starting daily warehouse stock sync...")
@@ -891,7 +1094,17 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             replace_existing=True,
             misfire_grace_time=300
         )
-        
+
+        scheduler_instance.add_job(
+            shipments_cron,
+            "cron",
+            hour=16,
+            minute=0,
+            id="shipments_cron",
+            replace_existing=True,
+            misfire_grace_time=300
+        )
+
         logger.info(f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully")
         
         # Log next run times for debugging
