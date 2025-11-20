@@ -12,6 +12,7 @@ from .daily_visits import router as daily_visits
 from .hooks import router as hooks
 from .announcements import router as announcements
 from .invoices import router as invoices
+from .shipments import router as shipments
 from .webhooks import router as webhooks
 from .potential_customers import router as potential_customers
 from .expected_reorders import router as expected_reorders
@@ -40,6 +41,7 @@ router.include_router(
 )
 router.include_router(util, prefix="/util", tags=["Util"])
 router.include_router(invoices, prefix="/invoices", tags=["Invoice"])
+router.include_router(shipments, prefix="/shipments", tags=["Shipments"])
 router.include_router(webhooks, prefix="/zoho/webhooks", tags=["Zoho"])
 router.include_router(
     potential_customers, prefix="/potential_customers", tags=["Potential Customers"]
