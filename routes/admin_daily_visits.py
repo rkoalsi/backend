@@ -14,6 +14,118 @@ client, db = connect_to_mongo()
 IST_OFFSET = 19800000
 
 
+@router.post("/{daily_visit_id}/admin_comments")
+async def add_admin_comment(daily_visit_id: str, request: Request):
+    """
+    Add an admin comment to a daily visit.
+    Can be at visit level or shop level.
+    """
+    try:
+        body = await request.json()
+        comment_text = body.get("comment")
+        admin_id = body.get("admin_id")
+        admin_name = body.get("admin_name")
+        shop_id = body.get("shop_id")  # Optional: if provided, comment is for specific shop
+
+        if not comment_text:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+
+        comment = {
+            "_id": ObjectId(),
+            "text": comment_text,
+            "admin_id": ObjectId(admin_id) if admin_id else None,
+            "admin_name": admin_name or "Admin",
+            "created_at": datetime.datetime.now(),
+            "shop_id": shop_id  # None for visit-level, shop id for shop-level
+        }
+
+        result = db.daily_visits.update_one(
+            {"_id": ObjectId(daily_visit_id)},
+            {
+                "$push": {"admin_comments": comment},
+                "$set": {"updated_at": datetime.datetime.now()}
+            }
+        )
+
+        if result.modified_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Comment added successfully", "comment_id": str(comment["_id"])}
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Daily visit not found")
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{daily_visit_id}/admin_comments/{comment_id}")
+async def delete_admin_comment(daily_visit_id: str, comment_id: str):
+    """
+    Delete an admin comment from a daily visit.
+    """
+    try:
+        result = db.daily_visits.update_one(
+            {"_id": ObjectId(daily_visit_id)},
+            {
+                "$pull": {"admin_comments": {"_id": ObjectId(comment_id)}},
+                "$set": {"updated_at": datetime.datetime.now()}
+            }
+        )
+
+        if result.modified_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Comment deleted successfully"}
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Daily visit or comment not found")
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.put("/{daily_visit_id}/admin_comments/{comment_id}")
+async def update_admin_comment(daily_visit_id: str, comment_id: str, request: Request):
+    """
+    Update an admin comment.
+    """
+    try:
+        body = await request.json()
+        comment_text = body.get("comment")
+
+        if not comment_text:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+
+        result = db.daily_visits.update_one(
+            {
+                "_id": ObjectId(daily_visit_id),
+                "admin_comments._id": ObjectId(comment_id)
+            },
+            {
+                "$set": {
+                    "admin_comments.$.text": comment_text,
+                    "admin_comments.$.updated_at": datetime.datetime.now(),
+                    "updated_at": datetime.datetime.now()
+                }
+            }
+        )
+
+        if result.modified_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Comment updated successfully"}
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Daily visit or comment not found")
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.get("")
 async def get_daily_visits(request: Request):
     page = int(request.query_params.get("page", 0))
@@ -94,6 +206,30 @@ async def get_daily_visits(request: Request):
                                             "date": {
                                                 "$add": [
                                                     "$$update.updated_at",
+                                                    IST_OFFSET,
+                                                ]
+                                            },
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    }
+                },
+                "admin_comments": {
+                    "$map": {
+                        "input": {"$ifNull": ["$admin_comments", []]},
+                        "as": "comment",
+                        "in": {
+                            "$mergeObjects": [
+                                "$$comment",
+                                {
+                                    "created_at": {
+                                        "$dateToString": {
+                                            "format": "%Y-%m-%d %H:%M:%S",
+                                            "date": {
+                                                "$add": [
+                                                    "$$comment.created_at",
                                                     IST_OFFSET,
                                                 ]
                                             },
