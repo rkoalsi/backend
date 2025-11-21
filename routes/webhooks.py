@@ -1218,7 +1218,60 @@ def handle_draft_invoice(data: dict):
 
 
 def handle_shipment(data: dict):
-    shipment = data.get("shipmentorder")
+    shipment = data.get("shipmentorder") or data.get("shipment_order")
+    if not shipment:
+        print("No shipment data found in webhook")
+        return
+
+    # Get shipment_id - try multiple possible field names
+    shipment_id = str(
+        shipment.get("shipment_order_id") or
+        shipment.get("shipmentorder_id") or
+        shipment.get("shipment_id") or
+        ""
+    )
+
+    # Find or create shipment in database
+    if shipment_id:
+        shipment["shipment_id"] = shipment_id
+        existing_shipment = db.shipments.find_one({"shipment_id": shipment_id})
+
+        # Sort all keys alphabetically
+        sorted_data = sort_dict_keys(shipment)
+        current_time = datetime.datetime.now()
+
+        # Parse datetime fields
+        datetime_fields = [
+            'created_time', 'date', 'last_modified_time',
+            'created_time_formatted', 'last_modified_time_formatted'
+        ]
+
+        for field in datetime_fields:
+            if field in sorted_data and sorted_data[field]:
+                parsed_dt = parse_datetime(sorted_data[field])
+                if isinstance(parsed_dt, datetime.datetime):
+                    sorted_data[field] = parsed_dt
+
+        if existing_shipment:
+            # Update existing shipment
+            sorted_data["updated_at"] = current_time
+            if "created_at" not in sorted_data and "created_at" in existing_shipment:
+                sorted_data["created_at"] = existing_shipment["created_at"]
+            elif "created_at" not in sorted_data:
+                sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+
+            db.shipments.update_one(
+                {"shipment_id": shipment_id}, {"$set": sorted_data}
+            )
+            print(f"Updated shipment with shipment_id {shipment_id}")
+        else:
+            # Create new shipment
+            sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+            sorted_data["updated_at"] = current_time
+            db.shipments.insert_one(sorted_data)
+            print(f"Created new shipment with shipment_id {shipment_id}")
+
+    # Continue with existing notification logic
     invoices = shipment.get("invoices", [])
     invoice_number = invoices[-1].get("invoice_number", "") if len(invoices) > 0 else ""
     salesorder_number = (
