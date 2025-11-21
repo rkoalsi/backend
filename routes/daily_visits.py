@@ -1,9 +1,9 @@
-from fastapi import APIRouter, APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from bson import ObjectId
 import boto3, os, uuid, logging, datetime, json, pytz
 from config.root import connect_to_mongo, serialize_mongo_document
-from config.whatsapp import send_whatsapp 
+from config.whatsapp import send_whatsapp
 
 router = APIRouter()
 
@@ -514,3 +514,138 @@ async def update_daily_visit_update(
             "daily_visit": serialize_mongo_document(updated_daily_visit),
         },
     )
+
+
+@router.post("/{daily_visit_id}/comments/{comment_id}/reply")
+async def add_reply_to_comment(daily_visit_id: str, comment_id: str, request: Request):
+    """
+    Add a reply to an admin comment. Only one reply allowed per comment.
+    Used by salesperson.
+    """
+    try:
+        body = await request.json()
+        reply_text = body.get("reply")
+        user_id = body.get("user_id")
+        user_name = body.get("user_name")
+        user_role = body.get("user_role", "salesperson")
+
+        if not reply_text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Reply text is required"}
+            )
+
+        reply = {
+            "_id": ObjectId(),
+            "text": reply_text,
+            "user_id": ObjectId(user_id) if user_id and user_id != "" else None,
+            "user_name": user_name or "User",
+            "user_role": user_role,
+            "created_at": datetime.datetime.now(),
+        }
+
+        result = db.daily_visits.update_one(
+            {
+                "_id": ObjectId(daily_visit_id),
+                "admin_comments._id": ObjectId(comment_id)
+            },
+            {
+                "$set": {
+                    "admin_comments.$.reply": reply,
+                    "updated_at": datetime.datetime.now()
+                }
+            }
+        )
+
+        if result.matched_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Reply added successfully", "reply_id": str(reply["_id"])}
+            )
+        else:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Daily visit or comment not found"}
+            )
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.put("/{daily_visit_id}/comments/{comment_id}/reply")
+async def update_reply(daily_visit_id: str, comment_id: str, request: Request):
+    """
+    Update a reply to a comment.
+    """
+    try:
+        body = await request.json()
+        reply_text = body.get("reply")
+
+        if not reply_text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Reply text is required"}
+            )
+
+        result = db.daily_visits.update_one(
+            {
+                "_id": ObjectId(daily_visit_id),
+                "admin_comments._id": ObjectId(comment_id)
+            },
+            {
+                "$set": {
+                    "admin_comments.$.reply.text": reply_text,
+                    "admin_comments.$.reply.updated_at": datetime.datetime.now(),
+                    "updated_at": datetime.datetime.now()
+                }
+            }
+        )
+
+        if result.matched_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Reply updated successfully"}
+            )
+        else:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Daily visit or comment not found"}
+            )
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{daily_visit_id}/comments/{comment_id}/reply")
+async def delete_reply(daily_visit_id: str, comment_id: str):
+    """
+    Delete a reply from a comment.
+    """
+    try:
+        result = db.daily_visits.update_one(
+            {
+                "_id": ObjectId(daily_visit_id),
+                "admin_comments._id": ObjectId(comment_id)
+            },
+            {
+                "$unset": {"admin_comments.$.reply": ""},
+                "$set": {"updated_at": datetime.datetime.now()}
+            }
+        )
+
+        if result.matched_count == 1:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Reply deleted successfully"}
+            )
+        else:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Daily visit or comment not found"}
+            )
+
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
