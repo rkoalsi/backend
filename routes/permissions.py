@@ -38,8 +38,6 @@ class PermissionService:
     def get_user_menu_items(self, user_roles: List[str]) -> List[dict]:
         """Get menu items that user has access to"""
         try:
-            print(f"Fetching menu items for roles: {user_roles}")
-            
             # Find all active permissions where user has access
             permissions_docs = list(
                 self.permissions_collection.find({
@@ -47,8 +45,6 @@ class PermissionService:
                     "allowed_roles": {"$in": user_roles}
                 })
             )
-
-            print(f"Found {len(permissions_docs)} matching permissions")
 
             if not permissions_docs:
                 return []
@@ -310,7 +306,6 @@ def get_user_menu_items(credentials: HTTPAuthorizationCredentials = Depends(secu
         user_roles = [user_roles]
 
     menu_items = permission_service.get_user_menu_items(user_roles)
-    print("/menu-items", f"Found {len(menu_items)} items for roles: {user_roles}")
     return {"menu_items": menu_items}
 
 
@@ -328,7 +323,6 @@ def get_user_dashboard_sections(
         user_roles = [user_roles]
     
     sections = permission_service.get_user_dashboard_sections(user_roles)
-    print("/dashboard-sections", f"Found {len(sections)} sections for roles: {user_roles}")
     return {"dashboard_sections": sections}
 
 
@@ -345,9 +339,6 @@ def check_route_access(
     # Handle both string and list roles
     if isinstance(user_roles, str):
         user_roles = [user_roles]
-    
-    print(f"Checking access for route: {route_path}, roles: {user_roles}")
-    
     if not route_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="route_path is required"
@@ -386,7 +377,6 @@ def get_user_permissions(credentials: HTTPAuthorizationCredentials = Depends(sec
 def get_all_users(_ = Depends(require_admin_or_sales_admin)):
     """Get all users with their permissions (admin and sales_admin only)"""
     users = permission_service.get_all_users()
-    print(f"/users - Found {len(users)} users")
     return {"users": users}
 
 
