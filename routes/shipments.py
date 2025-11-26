@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Query, HTTPException
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from typing import Optional
 from bson import ObjectId
 from datetime import datetime
 
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 shipments_collection = db["shipments"]
 customers_collection = db["customers"]
 invoices_collection = db["invoices"]

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from config.scheduler import schedule_job, remove_scheduled_jobs
 from config.whatsapp import send_whatsapp
 from .helpers import get_access_token
@@ -18,7 +18,7 @@ load_dotenv()
 
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 
 now = datetime.datetime.utcnow()
 TOTAL_WAREHOUSE_URL = os.getenv("TOTAL_WAREHOUSE_URL")

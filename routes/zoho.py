@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from config.root import connect_to_mongo  
+from config.root import get_database
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import os, requests
@@ -14,7 +14,7 @@ org_id = os.getenv("ORG_ID")
 
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 
 
 def clean_data(data):

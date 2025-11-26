@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from datetime import datetime, timedelta
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_client, get_database, serialize_mongo_document
 from bson import ObjectId
 import pandas as pd
 from io import BytesIO
@@ -18,7 +18,9 @@ import re
 
 router = APIRouter()
 
-client, pupscribe_db = connect_to_mongo()
+# Use shared client and database instances
+client = get_client()
+pupscribe_db = get_database()
 
 attendance_db = client.get_database("attendance")
 employees_collection = attendance_db.get_collection("employees")

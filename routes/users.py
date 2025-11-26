@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
@@ -9,7 +9,7 @@ import os
 
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 
 
 # Define constants for password reset
@@ -29,7 +29,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1440 * 7
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-client, db = connect_to_mongo()
+db = get_database()
 users_collection = db["users"]
 password_resets_collection = db["password_resets"]
 
