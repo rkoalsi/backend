@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Body, Query
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from pymongo import UpdateOne
 from datetime import datetime
 
-client, db = connect_to_mongo()
+db = get_database()
 
 router = APIRouter()
 

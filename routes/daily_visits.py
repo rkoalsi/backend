@@ -2,7 +2,7 @@ from fastapi import APIRouter, APIRouter, UploadFile, File, Form, HTTPException,
 from fastapi.responses import JSONResponse
 from bson import ObjectId
 import boto3, os, uuid, logging, datetime, json, pytz
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from config.whatsapp import send_whatsapp
 
 router = APIRouter()
@@ -10,7 +10,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 logger.propagate = False
 
-client, db = connect_to_mongo()
+# Use shared database instance
+db = get_database()
 
 
 AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
@@ -521,6 +522,7 @@ async def add_reply_to_comment(daily_visit_id: str, comment_id: str, request: Re
     """
     Add a reply to an admin comment. Only one reply allowed per comment.
     Used by salesperson.
+    Sends WhatsApp template to the admin who created the comment.
     """
     try:
         body = await request.json()
@@ -544,6 +546,22 @@ async def add_reply_to_comment(daily_visit_id: str, comment_id: str, request: Re
             "created_at": datetime.datetime.now(),
         }
 
+        # Get the daily visit and find the specific comment
+        daily_visit = db.daily_visits.find_one({"_id": ObjectId(daily_visit_id)})
+
+        if not daily_visit:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "Daily visit not found"}
+            )
+
+        # Find the admin comment to get admin details
+        admin_comment = None
+        for comment in daily_visit.get("admin_comments", []):
+            if str(comment.get("_id")) == comment_id:
+                admin_comment = comment
+                break
+
         result = db.daily_visits.update_one(
             {
                 "_id": ObjectId(daily_visit_id),
@@ -558,6 +576,22 @@ async def add_reply_to_comment(daily_visit_id: str, comment_id: str, request: Re
         )
 
         if result.matched_count == 1:
+            # Send WhatsApp notification to admin if admin_id exists
+            if admin_comment and admin_comment.get("admin_id"):
+                admin = db.users.find_one({"_id": admin_comment.get("admin_id")})
+                template = db.templates.find_one({"name": "salesperson_comment"})
+
+                if admin and template:
+                    send_whatsapp(
+                        admin.get("phone"),
+                        {**template},
+                        {
+                            "name": admin.get("first_name", ""),
+                            "salesperson_name": user_name or "Salesperson",
+                            "button_url": f"{daily_visit_id}"
+                        }
+                    )
+
             return JSONResponse(
                 status_code=200,
                 content={"message": "Reply added successfully", "reply_id": str(reply["_id"])}

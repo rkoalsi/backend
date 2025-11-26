@@ -3,14 +3,14 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 
 import logging
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
 logger.propagate = False
 
-client, db = connect_to_mongo()
+db = get_database()
 @router.get("")
 def get_customer_analytics(
     status: Optional[str] = Query(None, description="Filter by invoice status"),

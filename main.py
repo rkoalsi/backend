@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .routes.api import router
-from .config.root import connect_to_mongo, disconnect_on_exit
+from .config.root import get_database, disconnect_on_exit
 from .config.crons import cron_shutdown, cron_startup
 from .config.scheduler import notification_scheduler_startup, notification_scheduler_shutdown, scheduler
 import uvicorn
@@ -19,9 +19,6 @@ origins = [
 ]
 
 # Initialize the app
-client, db = connect_to_mongo()
-
-
 app = FastAPI()
 
 # Add CORS Middleware
@@ -36,10 +33,24 @@ app.add_middleware(
 # Include API router
 app.include_router(router, prefix="/api")
 
+
+# Startup handler to initialize database connection
+@app.on_event("startup")
+async def startup_db():
+    """Initialize the shared database connection on startup."""
+    get_database()
+
+
+# Shutdown handler for MongoDB and other resources
+@app.on_event("shutdown")
+async def shutdown_db():
+    """Close the shared database connection on shutdown."""
+    disconnect_on_exit()
+
+
 # Add shutdown handler for MongoDB
 # app.add_event_handler("startup", notification_scheduler_startup)
 app.add_event_handler("startup", cron_startup)
-app.add_event_handler("shutdown", disconnect_on_exit(client))
 app.add_event_handler("shutdown", cron_shutdown)
 # app.add_event_handler("shutdown", notification_scheduler_shutdown)
 

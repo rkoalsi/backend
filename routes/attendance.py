@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import re
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_client, get_database, serialize_mongo_document
 from bson import ObjectId
 from Crypto.Signature import PKCS1_v1_5
 from Crypto.Hash import SHA  # Note: This is SHA1, not SHA256
@@ -17,7 +17,9 @@ load_dotenv()
 
 router = APIRouter()
 
-client, pupscribe_db = connect_to_mongo()
+# Use shared client and database instances
+client = get_client()
+pupscribe_db = get_database()
 
 attendance_db = client.get_database("attendance")
 employees_collection = attendance_db.get_collection("employees")

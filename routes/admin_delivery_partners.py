@@ -5,7 +5,7 @@ from fastapi import (
     Body,
 )
 from fastapi.responses import JSONResponse
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, datetime
@@ -13,7 +13,7 @@ import os, datetime
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
-client, db = connect_to_mongo()
+db = get_database()
 delivery_partners_collection = db["delivery_partners"]
 
 

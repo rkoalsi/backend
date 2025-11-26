@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Body, status
 from bson import ObjectId
 from .helpers import notify_sales_admin
 import pytz, logging
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_database, serialize_mongo_document  
 from datetime import datetime
 
 router = APIRouter()
@@ -10,7 +10,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 logger.propagate = False
 
-client, db = connect_to_mongo()
+db = get_database()
 
 
 @router.post("")

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException, File, UploadFile
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo import DESCENDING
 from datetime import datetime
@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 load_dotenv()
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 return_orders_collection = db["return_orders"]
 
 # S3 Configuration

@@ -5,7 +5,7 @@ from fastapi import (
     Body,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
-from config.root import connect_to_mongo, serialize_mongo_document 
+from config.root import get_database, serialize_mongo_document 
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os, openpyxl, io
@@ -14,7 +14,7 @@ from datetime import timezone, datetime
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
-client, db = connect_to_mongo()
+db = get_database()
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
