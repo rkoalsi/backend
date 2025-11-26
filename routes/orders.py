@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket
 from dotenv import load_dotenv
@@ -27,7 +27,7 @@ PDF_URL = os.getenv("PDF_URL")
 
 
 # Connect to MongoDB
-client, db = connect_to_mongo()
+db = get_database()
 orders_collection = db["orders"]
 customers_collection = db["customers"]
 users_collection = db["users"]

@@ -1,4 +1,4 @@
-from .root import connect_to_mongo
+from .root import get_database
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 import logging, asyncio, aiohttp, time, re, os, requests
@@ -481,7 +481,7 @@ async def invoices_cron():
     deleted_count = 0
     
     try:
-        _, db = connect_to_mongo()
+        db = get_database()
         collection = db["invoices"]
 
         # Step 1: Delete existing invoices for the target period
@@ -629,7 +629,7 @@ async def credit_notes_cron():
     all_new_credit_notes = []
     new_creditnote_ids = []
     try:
-        _, db = connect_to_mongo()
+        db = get_database()
         collection = db["credit_notes"]
 
         async with ZohoAPIClient("books") as api_client:
@@ -764,7 +764,7 @@ async def shipments_cron():
     total_errors = 0
 
     try:
-        _, db = connect_to_mongo()
+        db = get_database()
         collection = db["shipments"]
 
         async with ZohoAPIClient("inventory") as api_client:
@@ -929,7 +929,7 @@ async def stock_cron():
     logger.info("🚀 Starting daily warehouse stock sync...")
     start_time = time.time()
     try:
-        _, db = connect_to_mongo()
+        db = get_database()
         zoho_stock_collection = db["zoho_stock"]
         products_collection = db["products"]
 

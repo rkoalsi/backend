@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
-from config.root import connect_to_mongo, serialize_mongo_document 
+from config.root import get_database, serialize_mongo_document 
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import math, datetime, io, openpyxl
@@ -8,7 +8,7 @@ import math, datetime, io, openpyxl
 load_dotenv()
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 
 
 @router.get("")

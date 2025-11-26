@@ -1,15 +1,17 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
+from config.whatsapp import send_whatsapp
 from dotenv import load_dotenv
 import math, datetime, io, openpyxl
 
 load_dotenv()
 router = APIRouter()
 
-client, db = connect_to_mongo()
+# Use shared database instance
+db = get_database()
 
 IST_OFFSET = 19800000
 
@@ -19,6 +21,7 @@ async def add_admin_comment(daily_visit_id: str, request: Request):
     """
     Add an admin comment to a daily visit.
     Can be at visit level or shop level.
+    Sends WhatsApp template to the salesperson who created the daily visit.
     """
     try:
         body = await request.json()
@@ -48,6 +51,27 @@ async def add_admin_comment(daily_visit_id: str, request: Request):
         )
 
         if result.modified_count == 1:
+            # Get the daily visit to find the creator
+            daily_visit = db.daily_visits.find_one({"_id": ObjectId(daily_visit_id)})
+            if daily_visit and daily_visit.get("created_by"):
+                # Get the salesperson who created the daily visit
+                salesperson = db.users.find_one({"_id": daily_visit.get("created_by")})
+
+                # Get the template for admin comment notification
+                template = db.templates.find_one({"name": "admin_comment_daily_visit"})
+
+                if salesperson and template:
+                    # Send WhatsApp message to salesperson
+                    send_whatsapp(
+                        salesperson.get("phone"),
+                        {**template},
+                        {
+                            "name": salesperson.get("first_name", ""),
+                            "admin_name": admin_name or "Admin",
+                            "button_url": f"{daily_visit_id}"
+                        }
+                    )
+
             return JSONResponse(
                 status_code=200,
                 content={"message": "Comment added successfully", "comment_id": str(comment["_id"])}

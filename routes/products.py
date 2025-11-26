@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import HTMLResponse
-from config.root import connect_to_mongo, serialize_mongo_document
+from config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
 from pymongo import ASCENDING, DESCENDING
@@ -11,7 +11,7 @@ import os, json
 
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 products_collection = db["products"]
 
 

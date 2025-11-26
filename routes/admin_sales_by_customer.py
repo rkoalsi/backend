@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_database, serialize_mongo_document  
 from dotenv import load_dotenv
 import os
 from typing import List, Dict, Optional
@@ -12,7 +12,7 @@ from enum import Enum
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
-client, db = connect_to_mongo()
+db = get_database()
 products_collection = db["products"]
 CUSTOMERS_COLLECTION = "customers"
 customers_collection = db[CUSTOMERS_COLLECTION]

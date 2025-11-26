@@ -8,7 +8,7 @@ from fastapi import (
     Depends,
 )
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_client, get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import get_access_token
 from typing import Optional, List
@@ -34,7 +34,7 @@ from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_attendance import router as admin_attendance_router
-from config.auth import JWTBearer 
+from config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
 from pymongo.errors import OperationFailure
@@ -49,7 +49,11 @@ from bson import ObjectId
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
-client, db = connect_to_mongo()
+
+# Use shared client and database instances
+client = get_client()
+db = get_database()
+
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]

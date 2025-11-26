@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, File, UploadFile
 from fastapi.responses import JSONResponse
-from config.root import connect_to_mongo, serialize_mongo_document  
+from config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
 from dotenv import load_dotenv
@@ -9,7 +9,7 @@ import boto3, os, uuid
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
-client, db = connect_to_mongo()
+db = get_database()
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]

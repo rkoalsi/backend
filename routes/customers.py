@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import JSONResponse
-from config.root import connect_to_mongo, serialize_mongo_document 
+from config.root import get_database, serialize_mongo_document 
 from config.constants import GST_STATE_CODES, STATE_CODES 
 import re, requests, os, json, time
 from bson.objectid import ObjectId
@@ -18,7 +18,7 @@ from math import ceil
 load_dotenv()
 router = APIRouter()
 
-client, db = connect_to_mongo()
+db = get_database()
 org_id = os.getenv("ORG_ID")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")

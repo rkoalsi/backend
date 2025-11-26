@@ -4,12 +4,12 @@ from typing import List, Optional
 import jwt
 from pymongo import MongoClient
 from functools import lru_cache
-from config.root import connect_to_mongo
+from config.root import get_database
 from config.auth import JWT_SECRET_KEY
 from pydantic import BaseModel
 from bson import ObjectId
 
-client, db = connect_to_mongo()
+db = get_database()
 permissions_collection = db.get_collection("permissions")
 users_collection = db.get_collection("users")
 
