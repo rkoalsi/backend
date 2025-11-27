@@ -1,14 +1,26 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from bson import ObjectId
 from config.root import get_database, serialize_mongo_document
 from config.auth import get_current_user
 from routes.helpers import notify_sales_admin
 from config.whatsapp import send_whatsapp
+import os
+import requests
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# Zoho configuration from environment variables
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+GRANT_TYPE = os.getenv("GRANT_TYPE")
+BOOKS_REFRESH_TOKEN = os.getenv("BOOKS_REFRESH_TOKEN")
+ORG_ID = os.getenv("ORG_ID")
+BOOKS_URL = os.getenv("BOOKS_URL")
 
 class CustomerCreationRequest(BaseModel):
     shop_name: str
@@ -22,6 +34,12 @@ class CustomerCreationRequest(BaseModel):
     tier_category: str
     sales_person: str
     margin_details: Optional[str] = None
+    billing_address: Optional[str] = None
+    shipping_address: Optional[str] = None
+    place_of_supply: Optional[str] = None
+    customer_mail_id: Optional[str] = None
+    gst_treatment: Optional[str] = None
+    pincode: Optional[str] = None
 
 class CommentCreate(BaseModel):
     text: str
@@ -31,6 +49,186 @@ class ReplyCreate(BaseModel):
     user_id: str
     user_name: str
     user_role: str
+
+# Zoho Helper Functions
+
+def get_zoho_books_access_token() -> Optional[str]:
+    """
+    Get access token for Zoho Books API using refresh token.
+
+    Returns:
+        str: Access token if successful, None otherwise
+    """
+    if not all([CLIENT_ID, CLIENT_SECRET, GRANT_TYPE, BOOKS_REFRESH_TOKEN, BOOKS_URL]):
+        logger.error("Missing Zoho Books configuration in environment variables")
+        return None
+
+    try:
+        url = BOOKS_URL.format(
+            clientId=CLIENT_ID,
+            clientSecret=CLIENT_SECRET,
+            grantType=GRANT_TYPE,
+            books_refresh_token=BOOKS_REFRESH_TOKEN,
+        )
+
+        response = requests.post(url, timeout=30)
+
+        if response.status_code == 200:
+            data = response.json()
+            access_token = data.get("access_token", "")
+            logger.info(f"Got Zoho Books Access Token: ...{access_token[-4:]}")
+            return access_token
+        else:
+            logger.error(f"Failed to get access token: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error getting Zoho Books access token: {e}")
+        return None
+
+
+def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Create a contact (customer) in Zoho Books.
+
+    Args:
+        customer_data: Dictionary containing customer information
+
+    Returns:
+        dict: Response with 'success' (bool), 'contact_id' (str if success), and 'message' (str)
+    """
+    if not ORG_ID:
+        logger.error("Missing ORG_ID in environment variables")
+        return {"success": False, "message": "Zoho organization ID not configured"}
+
+    # Get access token
+    access_token = get_zoho_books_access_token()
+    if not access_token:
+        return {"success": False, "message": "Failed to get Zoho access token"}
+
+    # Prepare the request
+    url = f"https://www.zohoapis.com/books/v3/contacts?organization_id={ORG_ID}"
+
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    # Build the contact payload according to Zoho Books API
+    contact_payload = {
+        "contact_name": customer_data.get("shop_name", ""),
+        "company_name": customer_data.get("shop_name", ""),
+        "contact_type": "customer",
+        "customer_sub_type": "business",
+        "payment_terms_label": customer_data.get("payment_terms", ""),
+    }
+
+    # Add contact person
+    if customer_data.get("customer_name") or customer_data.get("customer_mail_id"):
+        contact_persons = [{
+            "first_name": customer_data.get("customer_name", ""),
+            "email": customer_data.get("customer_mail_id", ""),
+            "phone": customer_data.get("whatsapp_no", ""),
+            "is_primary_contact": True
+        }]
+        contact_payload["contact_persons"] = contact_persons
+
+    # Add billing address
+    if customer_data.get("billing_address"):
+        billing_address = {
+            "attention": customer_data.get("customer_name", ""),
+            "address": customer_data.get("billing_address", ""),
+            "city": customer_data.get("place_of_supply", ""),
+            "state": customer_data.get("place_of_supply", ""),
+            "zip": customer_data.get("pincode", ""),
+            "country": "India"
+        }
+        contact_payload["billing_address"] = billing_address
+
+    # Add shipping address
+    if customer_data.get("shipping_address"):
+        shipping_address = {
+            "attention": customer_data.get("customer_name", ""),
+            "address": customer_data.get("shipping_address", ""),
+            "city": customer_data.get("place_of_supply", ""),
+            "state": customer_data.get("place_of_supply", ""),
+            "zip": customer_data.get("pincode", ""),
+            "country": "India"
+        }
+        contact_payload["shipping_address"] = shipping_address
+
+    # Add custom fields for Indian tax information
+    custom_fields = []
+
+    if customer_data.get("gst_no"):
+        custom_fields.append({
+            "label": "GST Number",
+            "value": customer_data.get("gst_no")
+        })
+        contact_payload["gst_no"] = customer_data.get("gst_no")
+
+    if customer_data.get("pan_card_no"):
+        custom_fields.append({
+            "label": "PAN Number",
+            "value": customer_data.get("pan_card_no")
+        })
+
+    if customer_data.get("gst_treatment"):
+        custom_fields.append({
+            "label": "GST Treatment",
+            "value": customer_data.get("gst_treatment")
+        })
+        # Map GST treatment to Zoho format
+        gst_treatment_map = {
+            "Business GST": "business_gst",
+            "Unregistered Business": "unregistered_business",
+            "Consumer": "consumer"
+        }
+        zoho_gst_treatment = gst_treatment_map.get(customer_data.get("gst_treatment"), "business_gst")
+        contact_payload["gst_treatment"] = zoho_gst_treatment
+
+    if customer_data.get("place_of_supply"):
+        contact_payload["place_of_contact"] = customer_data.get("place_of_supply")
+
+    if custom_fields:
+        contact_payload["custom_fields"] = custom_fields
+
+    # Add notes if margin details provided
+    if customer_data.get("margin_details"):
+        contact_payload["notes"] = f"Margin Details: {customer_data.get('margin_details')}\nSales Person: {customer_data.get('sales_person', 'N/A')}"
+
+    try:
+        logger.info(f"Creating Zoho contact for: {customer_data.get('shop_name')}")
+
+        response = requests.post(url, json=contact_payload, headers=headers, timeout=30)
+
+        if response.status_code == 201:
+            response_data = response.json()
+            contact = response_data.get("contact", {})
+            contact_id = contact.get("contact_id")
+
+            logger.info(f"Successfully created Zoho contact with ID: {contact_id}")
+
+            return {
+                "success": True,
+                "contact_id": contact_id,
+                "message": "Customer created successfully in Zoho Books"
+            }
+        else:
+            error_message = response.text
+            logger.error(f"Failed to create Zoho contact: {response.status_code} - {error_message}")
+
+            return {
+                "success": False,
+                "message": f"Zoho API error: {error_message}"
+            }
+
+    except Exception as e:
+        logger.error(f"Exception while creating Zoho contact: {e}")
+        return {
+            "success": False,
+            "message": f"Error creating customer in Zoho: {str(e)}"
+        }
 
 @router.post("/")
 async def create_customer_request(
@@ -73,6 +271,12 @@ async def create_customer_request(
             "tier_category": request_data.tier_category,
             "sales_person": request_data.sales_person,
             "margin_details": request_data.margin_details,
+            "billing_address": request_data.billing_address,
+            "shipping_address": request_data.shipping_address,
+            "place_of_supply": request_data.place_of_supply,
+            "customer_mail_id": request_data.customer_mail_id,
+            "gst_treatment": request_data.gst_treatment,
+            "pincode": request_data.pincode,
             "created_by": user_id,
             "created_by_name": created_by_name,
             "created_at": datetime.now(),
@@ -181,29 +385,79 @@ async def update_request_status(
             user_id = ObjectId(user_id)
 
         # Validate status
-        valid_statuses = ["pending", "approved", "rejected", "admin_commented", "salesperson_replied"]
+        valid_statuses = ["pending", "approved", "rejected", "admin_commented", "salesperson_replied", "created_on_zoho"]
         if status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+
+        # Get the request details
+        request_doc = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+        if not request_doc:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        # Check if already created on Zoho - prevent further status changes
+        if request_doc.get("status") == "created_on_zoho":
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot modify request that has been created in Zoho Books"
+            )
+
+        # If status is being set to "approved", create customer in Zoho
+        zoho_contact_id = None
+        final_status = status
+
+        if status == "approved":
+            logger.info(f"Creating customer in Zoho for request: {request_id}")
+
+            # Create customer in Zoho
+            zoho_result = create_zoho_contact(request_doc)
+
+            if zoho_result.get("success"):
+                zoho_contact_id = zoho_result.get("contact_id")
+                final_status = "created_on_zoho"
+                logger.info(f"Customer created in Zoho with contact_id: {zoho_contact_id}")
+            else:
+                # If Zoho creation fails, log the error but still approve the request
+                error_msg = zoho_result.get("message", "Unknown error")
+                logger.error(f"Failed to create customer in Zoho: {error_msg}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to create customer in Zoho Books: {error_msg}"
+                )
+
+        # Prepare update document
+        update_doc = {
+            "status": final_status,
+            "updated_at": datetime.now(),
+            "updated_by": user_id
+        }
+
+        # Add Zoho contact ID if available
+        if zoho_contact_id:
+            update_doc["zoho_contact_id"] = zoho_contact_id
 
         # Update the request
         result = db.customer_creation_requests.update_one(
             {"_id": ObjectId(request_id)},
-            {
-                "$set": {
-                    "status": status,
-                    "updated_at": datetime.now(),
-                    "updated_by": user_id
-                }
-            }
+            {"$set": update_doc}
         )
 
         if result.modified_count == 0:
-            raise HTTPException(status_code=404, detail="Request not found")
+            raise HTTPException(status_code=404, detail="Request not found or no changes made")
 
-        return {"message": "Request status updated successfully"}
+        response_message = "Request status updated successfully"
+        if final_status == "created_on_zoho":
+            response_message = f"Customer created in Zoho Books successfully (Contact ID: {zoho_contact_id})"
 
+        return {
+            "message": response_message,
+            "status": final_status,
+            "zoho_contact_id": zoho_contact_id
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error updating request status: {e}")
+        logger.error(f"Error updating request status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{request_id}/comments")
@@ -445,6 +699,13 @@ async def update_customer_request(
         if not existing_request:
             raise HTTPException(status_code=404, detail="Request not found")
 
+        # Check if already created on Zoho - prevent editing
+        if existing_request.get("status") == "created_on_zoho":
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot edit request that has been created in Zoho Books"
+            )
+
         # Check if user has permission to edit (creator or admin)
         user_role = user_data.get("role", "")
         is_creator = existing_request.get("created_by") == user_id
@@ -466,6 +727,12 @@ async def update_customer_request(
             "tier_category": request_data.tier_category,
             "sales_person": request_data.sales_person,
             "margin_details": request_data.margin_details,
+            "billing_address": request_data.billing_address,
+            "shipping_address": request_data.shipping_address,
+            "place_of_supply": request_data.place_of_supply,
+            "customer_mail_id": request_data.customer_mail_id,
+            "gst_treatment": request_data.gst_treatment,
+            "pincode": request_data.pincode,
             "updated_at": datetime.now(),
             "updated_by": user_id
         }
