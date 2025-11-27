@@ -6,6 +6,7 @@ from bson import ObjectId
 from config.root import get_database, serialize_mongo_document
 from config.auth import get_current_user
 from routes.helpers import notify_sales_admin
+from config.whatsapp import send_whatsapp
 
 router = APIRouter()
 
@@ -249,6 +250,30 @@ async def add_comment(
         if result.modified_count == 0:
             raise HTTPException(status_code=404, detail="Request not found")
 
+        # Send WhatsApp notification to salesperson
+        try:
+            # Get the customer request to find the salesperson
+            customer_request = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+            if customer_request:
+                # Get salesperson details
+                salesperson = db.users.find_one({"_id": customer_request.get("created_by")})
+                if salesperson:
+                    # Get WhatsApp template
+                    template = db.templates.find_one({"name": "admin_comment_customer_creation_request"})
+                    if template and salesperson.get("phone"):
+                        # Prepare parameters for template
+                        params = {
+                            "admin_name": admin_name,
+                            "sales_person_name": f"{salesperson.get('first_name', '')} {salesperson.get('last_name', '')}".strip() or salesperson.get('email') or 'Salesperson',
+                            "button_url": request_id
+                        }
+
+                        # Send WhatsApp message
+                        send_whatsapp(salesperson.get("phone"), template, params)
+                        print(f"WhatsApp notification sent to salesperson: {salesperson.get('email')}")
+        except Exception as e:
+            print(f"Failed to send WhatsApp notification: {e}")
+
         return {"message": "Comment added successfully", "comment": serialize_mongo_document(comment)}
 
     except Exception as e:
@@ -292,6 +317,38 @@ async def add_reply(
 
         if result.modified_count == 0:
             raise HTTPException(status_code=404, detail="Request or comment not found")
+
+        # Send WhatsApp notification to admin
+        try:
+            # Get the customer request to find the comment and admin
+            customer_request = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+            if customer_request and customer_request.get("admin_comments"):
+                # Find the specific comment to get admin details
+                target_comment = None
+                for comment in customer_request.get("admin_comments", []):
+                    if comment.get("_id") == comment_id:
+                        target_comment = comment
+                        break
+
+                if target_comment:
+                    # Get admin details
+                    admin = db.users.find_one({"_id": ObjectId(target_comment.get("admin_id"))})
+                    if admin:
+                        # Get WhatsApp template
+                        template = db.templates.find_one({"name": "sp_reply_comment_customer_creation_request"})
+                        if template and admin.get("phone"):
+                            # Prepare parameters for template
+                            params = {
+                                "sales_person_name": reply_data.user_name,
+                                "admin_name": f"{admin.get('first_name', '')} {admin.get('last_name', '')}".strip() or admin.get('email') or 'Admin',
+                                "button_url": request_id
+                            }
+
+                            # Send WhatsApp message
+                            send_whatsapp(admin.get("phone"), template, params)
+                            print(f"WhatsApp notification sent to admin: {admin.get('email')}")
+        except Exception as e:
+            print(f"Failed to send WhatsApp notification: {e}")
 
         return {"message": "Reply added successfully"}
 
