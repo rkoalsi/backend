@@ -1833,3 +1833,48 @@ async def duplicate_order(order_dict: dict):
         return str(result.inserted_id)
     except Exception as e:
         raise e
+
+
+@router.delete("/clear_sheet/{order_id}")
+async def clear_sheet(order_id: str):
+    """
+    Clear the Google Sheet URL and mark spreadsheet_created as false for an order
+    """
+    try:
+        # Validate order exists
+        order = db.orders.find_one({"_id": ObjectId(order_id)})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # Update the order to remove sheet data
+        update_result = db.orders.update_one(
+            {"_id": ObjectId(order_id)},
+            {
+                "$set": {
+                    "spreadsheet_created": False,
+                    "updated_at": datetime.utcnow()
+                },
+                "$unset": {
+                    "spreadsheet_url": "",
+                    "last_sheet_update": "",
+                    "updated_from_sheet": ""
+                }
+            }
+        )
+
+        if update_result.modified_count == 0:
+            return {
+                "status": "warning",
+                "message": "No changes made - sheet may already be cleared"
+            }
+
+        return {
+            "status": "success",
+            "message": "Sheet cleared successfully. You can now create a new sheet."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error clearing sheet: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear sheet: {str(e)}")
