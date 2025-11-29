@@ -23,7 +23,7 @@ from .external_links import router as external_links
 from .customer_analytics import router as customer_analytics
 from .permissions import router as permissions_router
 from .customer_creation_requests import router as customer_creation_requests
-from config.auth import JWTBearer 
+from ..config.auth import JWTBearer 
 
 router = APIRouter()
 

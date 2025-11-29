@@ -2,8 +2,8 @@ from fastapi import APIRouter, APIRouter, UploadFile, File, Form, HTTPException,
 from fastapi.responses import JSONResponse
 from bson import ObjectId
 import boto3, os, uuid, logging, datetime, json, pytz
-from config.root import get_database, serialize_mongo_document
-from config.whatsapp import send_whatsapp
+from ..config.root import get_database, serialize_mongo_document
+from ..config.whatsapp import send_whatsapp
 
 router = APIRouter()
 

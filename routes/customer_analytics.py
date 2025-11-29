@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 
 import logging
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 
 router = APIRouter()
 

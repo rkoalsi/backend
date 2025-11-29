@@ -4,8 +4,8 @@ from typing import List, Optional
 import jwt
 from pymongo import MongoClient
 from functools import lru_cache
-from config.root import get_database
-from config.auth import JWT_SECRET_KEY
+from ..config.root import get_database
+from ..config.auth import JWT_SECRET_KEY
 from pydantic import BaseModel
 from bson import ObjectId
 

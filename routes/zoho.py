@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from config.root import get_database
+from ..config.root import get_database
 from .helpers import get_access_token
 from dotenv import load_dotenv
 import os, requests

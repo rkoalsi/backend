@@ -3,10 +3,10 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from bson import ObjectId
-from config.root import get_database, serialize_mongo_document
-from config.auth import get_current_user
-from routes.helpers import notify_sales_admin
-from config.whatsapp import send_whatsapp
+from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import get_current_user
+from .helpers import notify_sales_admin
+from ..config.whatsapp import send_whatsapp
 import os
 import requests
 import logging
@@ -22,10 +22,23 @@ BOOKS_REFRESH_TOKEN = os.getenv("BOOKS_REFRESH_TOKEN")
 ORG_ID = os.getenv("ORG_ID")
 BOOKS_URL = os.getenv("BOOKS_URL")
 
+class AddressModel(BaseModel):
+    """Structured address following Zoho Books API format"""
+    attention: Optional[str] = None
+    address: Optional[str] = None  # Street 1
+    street2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    state_code: Optional[str] = None
+    zip: Optional[str] = None
+    country: Optional[str] = "India"
+    phone: Optional[str] = None
+    fax: Optional[str] = None
+
 class CustomerCreationRequest(BaseModel):
     shop_name: str
     customer_name: str
-    address: str
+    address: str  # Keep for backward compatibility
     gst_no: Optional[str] = None
     pan_card_no: Optional[str] = None
     whatsapp_no: str
@@ -34,8 +47,9 @@ class CustomerCreationRequest(BaseModel):
     tier_category: str
     sales_person: str
     margin_details: Optional[str] = None
-    billing_address: Optional[str] = None
-    shipping_address: Optional[str] = None
+    # New structured address fields
+    billing_address: Optional[AddressModel] = None
+    shipping_address: Optional[AddressModel] = None
     place_of_supply: Optional[str] = None
     customer_mail_id: Optional[str] = None
     gst_treatment: Optional[str] = None
@@ -51,6 +65,63 @@ class ReplyCreate(BaseModel):
     user_role: str
 
 # Zoho Helper Functions
+
+# Indian state to state code mapping for Zoho Books (official Zoho codes)
+INDIAN_STATE_CODES = {
+    "andaman and nicobar islands": "AN",
+    "andhra pradesh": "AD",  # Zoho uses AD, not AP
+    "arunachal pradesh": "AR",
+    "assam": "AS",
+    "bihar": "BR",
+    "chandigarh": "CH",
+    "chhattisgarh": "CG",  # Zoho uses CG, not CT
+    "dadra and nagar haveli and daman and diu": "DN",  # Zoho uses DN
+    "daman and diu": "DD",  # Separate entry
+    "delhi": "DL",
+    "goa": "GA",
+    "gujarat": "GJ",
+    "haryana": "HR",
+    "himachal pradesh": "HP",
+    "jammu and kashmir": "JK",
+    "jharkhand": "JH",
+    "karnataka": "KA",
+    "kerala": "KL",
+    "ladakh": "LA",
+    "lakshadweep": "LD",
+    "madhya pradesh": "MP",
+    "maharashtra": "MH",
+    "manipur": "MN",
+    "meghalaya": "ML",
+    "mizoram": "MZ",
+    "nagaland": "NL",
+    "odisha": "OD",  # Zoho uses OD, not OR
+    "puducherry": "PY",
+    "punjab": "PB",
+    "rajasthan": "RJ",
+    "sikkim": "SK",
+    "tamil nadu": "TN",
+    "telangana": "TS",  # Zoho uses TS, not TG
+    "tripura": "TR",
+    "uttar pradesh": "UP",
+    "uttarakhand": "UK",
+    "west bengal": "WB"
+}
+
+def get_state_code(state_name: str) -> str:
+    """
+    Get the state code for a given Indian state name.
+    Returns the state code if found, otherwise returns the original state name.
+    """
+    if not state_name:
+        return ""
+
+    # Try exact match (case-insensitive)
+    state_code = INDIAN_STATE_CODES.get(state_name.lower().strip())
+    if state_code:
+        return state_code
+
+    # If not found, return the original state name
+    return state_name
 
 def get_zoho_books_access_token() -> Optional[str]:
     """
@@ -134,50 +205,85 @@ def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
         contact_payload["contact_persons"] = contact_persons
 
     # Add billing address
-    if customer_data.get("billing_address"):
-        billing_address = {
-            "attention": customer_data.get("customer_name", ""),
-            "address": customer_data.get("billing_address", ""),
-            "city": customer_data.get("place_of_supply", ""),
-            "state": customer_data.get("place_of_supply", ""),
-            "zip": customer_data.get("pincode", ""),
-            "country": "India"
-        }
-        contact_payload["billing_address"] = billing_address
+    billing_addr = customer_data.get("billing_address")
+    if billing_addr:
+        # Handle both dict (structured) and string (legacy) formats
+        if isinstance(billing_addr, dict):
+            # Use structured address with all fields
+            billing_address = {
+                k: v for k, v in billing_addr.items()
+                if v is not None and v != ""
+            }
+            # Ensure country defaults to India if not provided
+            if "country" not in billing_address:
+                billing_address["country"] = "India"
 
-    # Add shipping address
-    if customer_data.get("shipping_address"):
-        shipping_address = {
-            "attention": customer_data.get("customer_name", ""),
-            "address": customer_data.get("shipping_address", ""),
-            "city": customer_data.get("place_of_supply", ""),
-            "state": customer_data.get("place_of_supply", ""),
-            "zip": customer_data.get("pincode", ""),
-            "country": "India"
-        }
-        contact_payload["shipping_address"] = shipping_address
+            # Add state_code if state is provided (keep state as full name)
+            if "state" in billing_address and billing_address["state"]:
+                state_code = get_state_code(billing_address["state"])
+                billing_address["state_code"] = state_code
+                # Keep state as full name, don't change it
 
-    # Add custom fields for Indian tax information
-    custom_fields = []
+            contact_payload["billing_address"] = billing_address
+        else:
+            # Legacy string format - convert to structured
+            state_name = customer_data.get("place_of_supply", "")
+            state_code = get_state_code(state_name)
+            billing_address = {
+                "attention": customer_data.get("customer_name", ""),
+                "address": str(billing_addr),
+                "city": customer_data.get("place_of_supply", ""),
+                "state": state_name,  # Keep full name
+                "state_code": state_code,  # Two-letter code
+                "zip": customer_data.get("pincode", ""),
+                "country": "India"
+            }
+            contact_payload["billing_address"] = billing_address
+
+    # Add shipping address and capture state_code for place_of_supply
+    shipping_addr = customer_data.get("shipping_address")
+    shipping_state_code = None  # Will be used for place_of_supply
+
+    if shipping_addr:
+        # Handle both dict (structured) and string (legacy) formats
+        if isinstance(shipping_addr, dict):
+            # Use structured address with all fields
+            shipping_address = {
+                k: v for k, v in shipping_addr.items()
+                if v is not None and v != ""
+            }
+            # Ensure country defaults to India if not provided
+            if "country" not in shipping_address:
+                shipping_address["country"] = "India"
+
+            # Add state_code if state is provided (keep state as full name)
+            if "state" in shipping_address and shipping_address["state"]:
+                shipping_state_code = get_state_code(shipping_address["state"])
+                shipping_address["state_code"] = shipping_state_code
+                # Keep state as full name, don't change it
+
+            contact_payload["shipping_address"] = shipping_address
+        else:
+            # Legacy string format - convert to structured
+            state_name = customer_data.get("place_of_supply", "")
+            shipping_state_code = get_state_code(state_name)
+            shipping_address = {
+                "attention": customer_data.get("customer_name", ""),
+                "address": str(shipping_addr),
+                "city": customer_data.get("place_of_supply", ""),
+                "state": state_name,  # Keep full name
+                "state_code": shipping_state_code,  # Two-letter code
+                "zip": customer_data.get("pincode", ""),
+                "country": "India"
+            }
+            contact_payload["shipping_address"] = shipping_address
+
+    # Add standard Zoho fields (no custom fields to avoid errors)
 
     if customer_data.get("gst_no"):
-        custom_fields.append({
-            "label": "GST Number",
-            "value": customer_data.get("gst_no")
-        })
         contact_payload["gst_no"] = customer_data.get("gst_no")
 
-    if customer_data.get("pan_card_no"):
-        custom_fields.append({
-            "label": "PAN Number",
-            "value": customer_data.get("pan_card_no")
-        })
-
     if customer_data.get("gst_treatment"):
-        custom_fields.append({
-            "label": "GST Treatment",
-            "value": customer_data.get("gst_treatment")
-        })
         # Map GST treatment to Zoho format
         gst_treatment_map = {
             "Business GST": "business_gst",
@@ -187,18 +293,28 @@ def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
         zoho_gst_treatment = gst_treatment_map.get(customer_data.get("gst_treatment"), "business_gst")
         contact_payload["gst_treatment"] = zoho_gst_treatment
 
-    if customer_data.get("place_of_supply"):
-        contact_payload["place_of_contact"] = customer_data.get("place_of_supply")
+    # Use shipping address state_code for place_of_supply (Zoho expects state code, not full name)
+    if shipping_state_code:
+        contact_payload["place_of_contact"] = shipping_state_code
+    elif customer_data.get("place_of_supply"):
+        # Fallback: convert place_of_supply to state code
+        contact_payload["place_of_contact"] = get_state_code(customer_data.get("place_of_supply"))
 
-    if custom_fields:
-        contact_payload["custom_fields"] = custom_fields
-
-    # Add notes if margin details provided
+    # Add notes with additional details
+    notes_parts = []
+    if customer_data.get("pan_card_no"):
+        notes_parts.append(f"PAN Number: {customer_data.get('pan_card_no')}")
     if customer_data.get("margin_details"):
-        contact_payload["notes"] = f"Margin Details: {customer_data.get('margin_details')}\nSales Person: {customer_data.get('sales_person', 'N/A')}"
+        notes_parts.append(f"Margin Details: {customer_data.get('margin_details')}")
+    if customer_data.get("sales_person"):
+        notes_parts.append(f"Sales Person: {customer_data.get('sales_person')}")
+
+    if notes_parts:
+        contact_payload["notes"] = "\n".join(notes_parts)
 
     try:
         logger.info(f"Creating Zoho contact for: {customer_data.get('shop_name')}")
+        logger.info(f"Zoho Contact Payload: {contact_payload}")
 
         response = requests.post(url, json=contact_payload, headers=headers, timeout=30)
 
@@ -271,8 +387,8 @@ async def create_customer_request(
             "tier_category": request_data.tier_category,
             "sales_person": request_data.sales_person,
             "margin_details": request_data.margin_details,
-            "billing_address": request_data.billing_address,
-            "shipping_address": request_data.shipping_address,
+            "billing_address": request_data.billing_address.model_dump() if request_data.billing_address else None,
+            "shipping_address": request_data.shipping_address.model_dump() if request_data.shipping_address else None,
             "place_of_supply": request_data.place_of_supply,
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
@@ -727,8 +843,8 @@ async def update_customer_request(
             "tier_category": request_data.tier_category,
             "sales_person": request_data.sales_person,
             "margin_details": request_data.margin_details,
-            "billing_address": request_data.billing_address,
-            "shipping_address": request_data.shipping_address,
+            "billing_address": request_data.billing_address.model_dump() if request_data.billing_address else None,
+            "shipping_address": request_data.shipping_address.model_dump() if request_data.shipping_address else None,
             "place_of_supply": request_data.place_of_supply,
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,

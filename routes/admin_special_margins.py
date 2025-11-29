@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Body, Query
-from config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from pymongo import UpdateOne
 from datetime import datetime
