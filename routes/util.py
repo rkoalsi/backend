@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 
 from .helpers import validate_file, process_upload
 import threading, logging
-from config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document  
 
 router = APIRouter()
 

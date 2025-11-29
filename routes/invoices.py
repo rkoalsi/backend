@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Response
-from config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document  
 from typing import Optional, List
 from bson import ObjectId
 import re, uuid, boto3, os, requests, json

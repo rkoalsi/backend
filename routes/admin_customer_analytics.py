@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query, HTTPException, Path
 from fastapi.responses import JSONResponse, StreamingResponse
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import boto3, logging, os, openpyxl

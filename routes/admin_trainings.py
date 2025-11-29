@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, File, UploadFile
 from fastapi.responses import JSONResponse
-from config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
 from dotenv import load_dotenv
