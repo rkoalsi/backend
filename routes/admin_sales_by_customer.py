@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document  
 from dotenv import load_dotenv
 import os
 from typing import List, Dict, Optional

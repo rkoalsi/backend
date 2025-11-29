@@ -4,13 +4,13 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket
 from dotenv import load_dotenv
 from fastapi.responses import Response
-from config.constants import terms, STATE_CODES 
-from config.whatsapp import send_whatsapp 
+from ..config.constants import terms, STATE_CODES 
+from ..config.whatsapp import send_whatsapp 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
-from config.whatsapp import send_whatsapp
+from ..config.whatsapp import send_whatsapp
 from dotenv import load_dotenv
 import math, datetime, io, openpyxl
 

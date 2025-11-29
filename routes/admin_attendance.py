@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from datetime import datetime, timedelta
-from config.root import get_client, get_database, serialize_mongo_document
+from ..config.root import get_client, get_database, serialize_mongo_document
 from bson import ObjectId
 import pandas as pd
 from io import BytesIO

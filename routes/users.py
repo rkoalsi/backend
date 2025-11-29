@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from jose import jwt, JWTError

@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Query, HTTPException, File, UploadFile
-from config.root import get_database, serialize_mongo_document
+from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo import DESCENDING
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
-from config.whatsapp import send_whatsapp
+from ..config.whatsapp import send_whatsapp
 import os
 import boto3
 import io
