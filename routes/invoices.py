@@ -91,18 +91,22 @@ def get_invoices(
         "$and": [
             {
                 "$or": [
+                    {"cf_sales_person": code},
+                    {"cf_sales_person": {"$elemMatch": {"$eq": code}}},
                     {
                         "cf_sales_person": {
-                            "$regex": f"^{escaped_sales_person}$",
+                            "$regex": f"(^\\s*|,\\s*){escaped_sales_person}(\\s*,|\\s*$)",
                             "$options": "i",
                         }
                     },
                     {
                         "salesperson_name": {
-                            "$regex": f"^{escaped_sales_person}$",
+                            "$regex": f"(^\\s*|,\\s*){escaped_sales_person}(\\s*,|\\s*$)",
                             "$options": "i",
                         }
                     },
+                    {"cf_sales_person": "Defaulter"},
+                    {"cf_sales_person": "Company customers"},
                 ]
             },
             # Exclude documents if cf_sales_person or salesperson_name contains any forbidden keywords
