@@ -25,25 +25,26 @@ def home():
     sales_people = serialize_mongo_document(sales_people)
     codes = [sp["code"] for sp in sales_people if sp.get("code")]
 
-    # 2. Build a single regex pattern that includes all codes: \b(CODE1|CODE2)\b
-    if codes:
-        escaped_codes = [re.escape(c) for c in codes]
-        combined_pattern = rf"\b({'|'.join(escaped_codes)})\b"
-    else:
-        combined_pattern = None
-
-    # 3. Single query for all 'active' customers that are either:
-    #    - "Defaulter"
-    #    - "Company customers"
-    #    - or match the combined regex (case-insensitive) in cf_sales_person
+    # 2. Build regex patterns that handle comma-separated lists for all codes
     or_conditions = [
         {"cf_sales_person": "Defaulter"},
         {"cf_sales_person": "Company customers"},
     ]
-    if combined_pattern:
-        or_conditions.append(
-            {"cf_sales_person": {"$regex": combined_pattern, "$options": "i"}}
-        )
+
+    # Add a pattern for each salesperson code
+    if codes:
+        for code in codes:
+            escaped_code = re.escape(code)
+            or_conditions.extend([
+                {"cf_sales_person": code},
+                {"cf_sales_person": {"$elemMatch": {"$eq": code}}},
+                {"cf_sales_person": {"$regex": f"(^\\s*|,\\s*){escaped_code}(\\s*,|\\s*$)", "$options": "i"}},
+            ])
+
+    # 3. Single query for all 'active' customers that are either:
+    #    - "Defaulter"
+    #    - "Company customers"
+    #    - or match any salesperson code (handling comma-separated lists)
 
     customers_cursor = db.customers.find({"status": "active", "$or": or_conditions})
     all_customers = serialize_mongo_document(list(customers_cursor))
@@ -135,9 +136,11 @@ def salesperson(salesperson_id: str):
         customers_cursor = db.customers.find(
             {
                 "$or": [
+                    {"cf_sales_person": sales_person_code},
+                    {"cf_sales_person": {"$elemMatch": {"$eq": sales_person_code}}},
                     {
                         "cf_sales_person": {
-                            "$regex": f"^{escaped_sales_person}$",
+                            "$regex": f"(^\\s*|,\\s*){escaped_sales_person}(\\s*,|\\s*$)",
                             "$options": "i",
                         }
                     },

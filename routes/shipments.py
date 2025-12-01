@@ -3,6 +3,7 @@ from ..config.root import get_database, serialize_mongo_document
 from typing import Optional
 from bson import ObjectId
 from datetime import datetime
+import re
 
 router = APIRouter()
 
@@ -55,11 +56,17 @@ def get_shipments(
         # Get all customer IDs for this salesperson
         customer_ids = []
         try:
+            # Escape special regex characters in sp_code
+            escaped_sp_code = re.escape(sp_code)
             customers = customers_collection.find(
                 {
                     "$or": [
-                        {"cf_sales_person": {"$regex": f"^{sp_code}$", "$options": "i"}},
-                        {"salesperson_name": {"$regex": f"^{sp_code}$", "$options": "i"}},
+                        {"cf_sales_person": sp_code},
+                        {"cf_sales_person": {"$elemMatch": {"$eq": sp_code}}},
+                        {"cf_sales_person": {"$regex": f"(^\\s*|,\\s*){escaped_sp_code}(\\s*,|\\s*$)", "$options": "i"}},
+                        {"salesperson_name": {"$regex": f"(^\\s*|,\\s*){escaped_sp_code}(\\s*,|\\s*$)", "$options": "i"}},
+                        {"cf_sales_person": "Defaulter"},
+                        {"cf_sales_person": "Company customers"},
                     ]
                 },
                 {"contact_id": 1, "customer_id": 1}
