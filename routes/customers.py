@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query
 from fastapi.responses import JSONResponse
-from ..config.root import get_database, serialize_mongo_document 
-from ..config.constants import GST_STATE_CODES, STATE_CODES 
+from ..config.root import get_database, serialize_mongo_document
+from ..config.constants import GST_STATE_CODES, STATE_CODES
 import re, requests, os, json, time
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
@@ -93,13 +93,15 @@ def get_customers(
         query["status"] = "active"
         if user_code:
             or_conditions = []
+            # Escape special regex characters in user_code
+            escaped_user_code = re.escape(user_code)
             or_conditions.extend(
                 [
                     {"cf_sales_person": user_code},
                     {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
                     {
                         "cf_sales_person": {
-                            "$regex": f"\\b{user_code}\\b",
+                            "$regex": f"(^\\s*|,\\s*){escaped_user_code}(\\s*,|\\s*$)",
                             "$options": "i",
                         }
                     },
@@ -108,13 +110,14 @@ def get_customers(
 
             default_values = ["Defaulter", "Company customers"]
             for default_value in default_values:
+                escaped_default = re.escape(default_value)
                 or_conditions.extend(
                     [
                         {"cf_sales_person": default_value},
                         {"cf_sales_person": {"$elemMatch": {"$eq": default_value}}},
                         {
                             "cf_sales_person": {
-                                "$regex": f"\\b{default_value}\\b",
+                                "$regex": f"(^\\s*|,\\s*){escaped_default}(\\s*,|\\s*$)",
                                 "$options": "i",
                             }
                         },
@@ -145,8 +148,10 @@ def get_customers_for_sales_person(
     Returns active customers that do NOT match the given salesperson code,
     with pagination + optional search support.
     """
+    # Escape special regex characters in code
+    escaped_code = re.escape(code) if code else ""
     or_condition = [
-        {"cf_sales_person": {"$not": {"$regex": f"\\b{code}\\b", "$options": "i"}}},
+        {"cf_sales_person": {"$not": {"$regex": f"(^\\s*|,\\s*){escaped_code}(\\s*,|\\s*$)", "$options": "i"}}},
         {"cf_sales_person": {"$not": {"$regex": "Defaulter", "$options": "i"}}},
         {"cf_sales_person": {"$not": {"$regex": "Company customers", "$options": "i"}}},
     ]
