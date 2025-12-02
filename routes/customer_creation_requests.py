@@ -10,6 +10,7 @@ from ..config.whatsapp import send_whatsapp
 import os
 import requests
 import logging
+import datetime as dt
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -122,6 +123,165 @@ def get_state_code(state_name: str) -> str:
 
     # If not found, return the original state name
     return state_name
+
+# List of unwanted keys to remove from Zoho contact data (same as webhooks.py)
+UNWANTED_KEYS = [
+    "is_associated_to_branch",
+    "is_bcy_only_contact",
+    "is_credit_limit_migration_completed",
+    "language_code",
+    "language_code_formatted",
+    "is_client_review_asked",
+    "documents",
+    "is_crm_customer",
+    "is_linked_with_zohocrm",
+    "price_precision",
+    "exchange_rate",
+    "can_show_customer_ob",
+    "opening_balance_amount",
+    "outstanding_ob_receivable_amount",
+    "outstanding_ob_payable_amount",
+    "outstanding_receivable_amount",
+    "outstanding_receivable_amount_bcy",
+    "outstanding_payable_amount",
+    "outstanding_payable_amount_bcy",
+    "unused_credits_receivable_amount",
+    "unused_credits_receivable_amount_bcy",
+    "unused_credits_payable_amount",
+    "unused_credits_payable_amount_bcy",
+    "unused_retainer_payments",
+    "payment_reminder_enabled",
+    "is_sms_enabled",
+    "is_consent_agreed",
+    "is_client_review_settings_enabled",
+    "approvers_list",
+    "integration_references",
+    "allow_parent_for_payment_and_view",
+    "ach_supported",
+    "cards",
+    "checks",
+    "bank_accounts",
+    "vpa_list",
+    "last_modified_time",
+    "default_templates",
+    "custom_field_hash",
+    "source",
+    "portal_status",
+    "owner_id",
+    "msme_type",
+    "consent_date",
+    "source_formatted",
+    "submitted_by_email",
+    "submitted_by",
+    "source",
+    "invited_by",
+    "outstanding_receivable_amount_formatted",
+    "twitter",
+    "unused_credits_receivable_amount_formatted",
+    "zcrm_contact_id",
+    "unused_credits_receivable_amount_bcy_formatted",
+    "outstanding_payable_amount_formatted",
+    "pricebook_id",
+    "approver_id",
+    "submitted_date_formatted",
+    "opening_balance_amount_bcy_formatted",
+    "tags",
+    "unused_credits_payable_amount_formatted",
+    "outstanding_receivable_amount_bcy_formatted",
+    "crm_owner_id",
+    "msme_type_formatted",
+    "facebook",
+    "unused_retainer_payments_formatted",
+    "owner_name",
+    "tax_reg_label",
+    "vat_reg_no",
+    "credit_limit_exceeded_amount_formatted",
+    "pricebook_name",
+    "submitted_by_name",
+    "zohopeople_client_id",
+    "submitted_by",
+    "submitter_id",
+    "udyam_reg_no",
+    "tds_tax_id",
+]
+
+def sort_dict_keys(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively sort dictionary keys alphabetically
+    """
+    if isinstance(data, dict):
+        return {key: sort_dict_keys(value) for key, value in sorted(data.items())}
+    elif isinstance(data, list):
+        return [sort_dict_keys(item) for item in data]
+    else:
+        return data
+
+def clean_data(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove unwanted keys from the document"""
+    for key in UNWANTED_KEYS:
+        document.pop(key, None)
+    return document
+
+def store_customer_in_db(contact_data: Dict[str, Any], db) -> bool:
+    """
+    Store customer data in the customers collection with sorted keys
+    and same fields as handle_customer in webhooks.py
+
+    Args:
+        contact_data: The contact data from Zoho
+        db: Database connection
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        contact_id = contact_data.get("contact_id")
+        if not contact_id:
+            logger.error("No contact_id found in contact data")
+            return False
+
+        # Clean the contact data by removing unwanted keys
+        contact_data = clean_data(dict(contact_data))
+
+        # Sort all keys alphabetically
+        sorted_contact = sort_dict_keys(contact_data)
+
+        # Handle addresses (same logic as handle_customer in webhooks.py)
+        addresses = []
+        existing_ids = set()
+
+        if "billing_address" in sorted_contact and sorted_contact["billing_address"]:
+            addr = sorted_contact["billing_address"]
+            addr_id = addr.get("address_id")
+            if addr_id and addr_id not in existing_ids:
+                addresses.append(addr)
+                existing_ids.add(addr_id)
+
+        if "shipping_address" in sorted_contact and sorted_contact["shipping_address"]:
+            addr = sorted_contact["shipping_address"]
+            addr_id = addr.get("address_id")
+            if addr_id and addr_id not in existing_ids:
+                addresses.append(addr)
+                existing_ids.add(addr_id)
+
+        # Remove billing_address and shipping_address from the main document
+        sorted_contact.pop("billing_address", None)
+        sorted_contact.pop("shipping_address", None)
+
+        # Add addresses array and timestamps (same as handle_customer)
+        sorted_contact["addresses"] = addresses
+        sorted_contact["created_at"] = dt.datetime.now()
+        sorted_contact["updated_at"] = dt.datetime.now()
+
+        # Insert into customers collection
+        db.customers.insert_one(sorted_contact)
+        logger.info(f"Successfully stored customer with contact_id: {contact_id} in customers collection")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Error storing customer in database: {e}")
+        return False
 
 def get_zoho_books_access_token() -> Optional[str]:
     """
@@ -328,6 +488,7 @@ def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "success": True,
                 "contact_id": contact_id,
+                "contact_data": contact,  # Return full contact data
                 "message": "Customer created successfully in Zoho Books"
             }
         else:
@@ -529,8 +690,17 @@ async def update_request_status(
 
             if zoho_result.get("success"):
                 zoho_contact_id = zoho_result.get("contact_id")
+                contact_data = zoho_result.get("contact_data", {})
                 final_status = "created_on_zoho"
                 logger.info(f"Customer created in Zoho with contact_id: {zoho_contact_id}")
+
+                # Store customer data in customers collection with sorted keys
+                if contact_data:
+                    store_success = store_customer_in_db(contact_data, db)
+                    if store_success:
+                        logger.info(f"Customer data stored in customers collection for contact_id: {zoho_contact_id}")
+                    else:
+                        logger.warning(f"Failed to store customer data in customers collection for contact_id: {zoho_contact_id}")
             else:
                 # If Zoho creation fails, log the error but still approve the request
                 error_msg = zoho_result.get("message", "Unknown error")
