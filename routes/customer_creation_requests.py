@@ -458,11 +458,16 @@ def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[st
             "value": customer_data.get("whatsapp_no", "")
         })
 
-    # Agreed Margin
+    # Agreed Margin - extract numeric value only for PERCENT field
     if "Agreed Margin" in field_map:
+        margin_value = customer_data.get("margin_details", "")
+        # If margin_value contains %, strip it and convert to number
+        if margin_value and isinstance(margin_value, str):
+            # Remove % sign and any whitespace, then convert to number
+            margin_value = margin_value.strip().rstrip('%').strip()
         custom_fields.append({
             "index": field_map["Agreed Margin"],
-            "value": customer_data.get("margin_details", "")
+            "value": margin_value
         })
 
     # Tier
