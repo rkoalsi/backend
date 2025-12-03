@@ -318,12 +318,13 @@ def get_zoho_books_access_token() -> Optional[str]:
         return None
 
 
-def map_custom_fields(customer_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Map customer data to Zoho custom fields format.
 
     Args:
         customer_data: Dictionary containing customer information
+        user_data: Optional dictionary containing user information (to check for code or salesperson_id)
 
     Returns:
         list: Array of custom field objects with index, label, and value
@@ -356,6 +357,13 @@ def map_custom_fields(customer_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Get the sales person value
     sales_person_value = customer_data.get("sales_person", "")
     sales_person_for_zoho = sales_person_mapping.get(sales_person_value, sales_person_value)
+
+    # Check if user has code or salesperson_id
+    should_include_salesperson = False
+    if user_data:
+        has_code = user_data.get("code") is not None and user_data.get("code") != ""
+        has_salesperson_id = user_data.get("salesperson_id") is not None and user_data.get("salesperson_id") != ""
+        should_include_salesperson = has_code or has_salesperson_id
 
     custom_fields = [
         {
@@ -417,28 +425,33 @@ def map_custom_fields(customer_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "index": 12,
             "label": "In/ex",
             "value": []  # Empty array for multiselect
-        },
-        {
+        }
+    ]
+
+    # Only add index 13 (Sales person) if user has code or salesperson_id
+    if should_include_salesperson:
+        custom_fields.append({
             "index": 13,
             "label": "Sales person",
             "value": [sales_person_for_zoho] if sales_person_for_zoho else []
-        },
-        {
-            "index": 14,
-            "label": "Multiple branches",
-            "value": customer_data.get("multiple_branches", "")
-        }
-    ]
+        })
+
+    custom_fields.append({
+        "index": 14,
+        "label": "Multiple branches",
+        "value": customer_data.get("multiple_branches", "")
+    })
 
     return custom_fields
 
 
-def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
+def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Create a contact (customer) in Zoho Books.
 
     Args:
         customer_data: Dictionary containing customer information
+        user_data: Optional dictionary containing user information (to check for code or salesperson_id)
 
     Returns:
         dict: Response with 'success' (bool), 'contact_id' (str if success), and 'message' (str)
@@ -470,7 +483,7 @@ def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     # Add custom fields
-    custom_fields = map_custom_fields(customer_data)
+    custom_fields = map_custom_fields(customer_data, user_data)
     contact_payload["custom_fields"] = custom_fields
 
     # Add contact person
@@ -804,8 +817,14 @@ async def update_request_status(
         if status == "approved":
             logger.info(f"Creating customer in Zoho for request: {request_id}")
 
+            # Fetch the user who created the request to check for code or salesperson_id
+            creator_user_data = None
+            created_by = request_doc.get("created_by")
+            if created_by:
+                creator_user_data = db.users.find_one({"_id": ObjectId(created_by)})
+
             # Create customer in Zoho
-            zoho_result = create_zoho_contact(request_doc)
+            zoho_result = create_zoho_contact(request_doc, creator_user_data)
 
             if zoho_result.get("success"):
                 zoho_contact_id = zoho_result.get("contact_id")
