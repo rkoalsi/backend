@@ -318,6 +318,48 @@ def get_zoho_books_access_token() -> Optional[str]:
         return None
 
 
+def get_zoho_custom_fields() -> Optional[List[Dict[str, Any]]]:
+    """
+    Fetch custom field configuration from Zoho Books.
+
+    Returns:
+        list: Array of custom field definitions or None on error
+    """
+    if not ORG_ID:
+        logger.error("Missing ORG_ID in environment variables")
+        return None
+
+    # Get access token
+    access_token = get_zoho_books_access_token()
+    if not access_token:
+        return None
+
+    url = f"https://www.zohoapis.com/books/v3/settings/customfields?organization_id={ORG_ID}"
+
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+
+        if response.status_code == 200:
+            data = response.json()
+            # Find custom fields for contacts
+            custom_fields = data.get("custom_fields", [])
+            contact_fields = [cf for cf in custom_fields if cf.get("entity") == "contact"]
+            logger.info(f"Fetched {len(contact_fields)} custom fields for contacts from Zoho")
+            return contact_fields
+        else:
+            logger.error(f"Failed to fetch custom fields: {response.status_code} - {response.text}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error fetching Zoho custom fields: {e}")
+        return None
+
+
 def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Map customer data to Zoho custom fields format.
@@ -327,7 +369,7 @@ def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[st
         user_data: Optional dictionary containing user information (to check for code or salesperson_id)
 
     Returns:
-        list: Array of custom field objects with index, label, and value
+        list: Array of custom field objects with customfield_id and value
     """
     from datetime import date
 
@@ -365,83 +407,92 @@ def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[st
         has_salesperson_id = user_data.get("salesperson_id") is not None and user_data.get("salesperson_id") != ""
         should_include_salesperson = has_code or has_salesperson_id
 
-    custom_fields = [
-        {
-            "index": 1,
-            "label": "Date of creation",
-            "value": today
-        },
-        {
-            "index": 2,
-            "label": "Business email Id",
-            "value": customer_data.get("customer_mail_id", "")
-        },
-        {
-            "index": 3,
-            "label": "Shop Whatsapp Number",
-            "value": customer_data.get("whatsapp_no", "")
-        },
-        {
-            "index": 4,
-            "label": "Agreed Margin",
-            "value": customer_data.get("margin_details", "")
-        },
-        {
-            "index": 5,
-            "label": "Client ID",
-            "value": ""  # Empty initially, will be set by Zoho or later
-        },
-        {
-            "index": 6,
-            "label": "Type of business",
-            "value": ""  # Can be mapped if you have this field
-        },
-        {
-            "index": 7,
-            "label": "Tier",
-            "value": customer_data.get("tier_category", "")
-        },
-        {
-            "index": 8,
-            "label": "Parent Company",
-            "value": ""  # Can be mapped if you have this field
-        },
-        {
-            "index": 9,
-            "label": "Whatsapp group",
-            "value": "no"  # Default value
-        },
-        {
-            "index": 10,
-            "label": "Billing through",
-            "value": []  # Empty array for multiselect
-        },
-        {
-            "index": 11,
-            "label": "Payment terms",
-            "value": customer_data.get("payment_terms", "")
-        },
-        {
-            "index": 12,
-            "label": "In/ex",
-            "value": []  # Empty array for multiselect
-        }
-    ]
+    # Fetch custom field definitions from Zoho
+    zoho_fields = get_zoho_custom_fields()
 
-    # Only add index 13 (Sales person) if user has code or salesperson_id
-    if should_include_salesperson:
+    if not zoho_fields:
+        logger.warning("Could not fetch Zoho custom fields, skipping custom field mapping")
+        return []
+
+    # Create a mapping of label to index (for contacts, Zoho uses index 1-10, not customfield_id)
+    field_map = {}
+    for field in zoho_fields:
+        label = field.get("label", "")
+        index = field.get("index")  # Use index instead of customfield_id for contacts
+        if label and index is not None:
+            field_map[label] = index
+            logger.info(f"Field mapping: {label} -> index {index}")
+
+    logger.info(f"Available custom fields: {list(field_map.keys())}")
+
+    # Map our data to Zoho custom fields using index (1-10) for contacts
+    custom_fields = []
+
+    # Date of creation
+    if "Date of creation" in field_map:
         custom_fields.append({
-            "index": 13,
-            "label": "Sales person",
+            "index": field_map["Date of creation"],
+            "value": today
+        })
+        logger.info(f"Adding Date of creation: {today}")
+
+    # Business email Id
+    if "Business email Id" in field_map:
+        custom_fields.append({
+            "index": field_map["Business email Id"],
+            "value": customer_data.get("customer_mail_id", "")
+        })
+
+    # Shop Whatsapp Number
+    if "Shop Whatsapp Number" in field_map:
+        custom_fields.append({
+            "index": field_map["Shop Whatsapp Number"],
+            "value": customer_data.get("whatsapp_no", "")
+        })
+
+    # Agreed Margin
+    if "Agreed Margin" in field_map:
+        custom_fields.append({
+            "index": field_map["Agreed Margin"],
+            "value": customer_data.get("margin_details", "")
+        })
+
+    # Tier
+    if "Tier" in field_map:
+        custom_fields.append({
+            "index": field_map["Tier"],
+            "value": customer_data.get("tier_category", "")
+        })
+
+    # Whatsapp group
+    if "Whatsapp group" in field_map:
+        custom_fields.append({
+            "index": field_map["Whatsapp group"],
+            "value": "no"
+        })
+
+    # Payment terms
+    if "Payment terms" in field_map:
+        custom_fields.append({
+            "index": field_map["Payment terms"],
+            "value": customer_data.get("payment_terms", "")
+        })
+
+    # Sales person - only if user has code or salesperson_id
+    if should_include_salesperson and "Sales person" in field_map:
+        custom_fields.append({
+            "index": field_map["Sales person"],
             "value": [sales_person_for_zoho] if sales_person_for_zoho else []
         })
 
-    custom_fields.append({
-        "index": 14,
-        "label": "Multiple branches",
-        "value": customer_data.get("multiple_branches", "")
-    })
+    # Multiple branches
+    if "Multiple branches" in field_map:
+        custom_fields.append({
+            "index": field_map["Multiple branches"],
+            "value": customer_data.get("multiple_branches", "")
+        })
 
+    logger.info(f"Mapped {len(custom_fields)} custom fields")
     return custom_fields
 
 
@@ -607,6 +658,7 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
     try:
         logger.info(f"Creating Zoho contact for: {customer_data.get('shop_name')}")
         logger.info(f"Zoho Contact Payload: {contact_payload}")
+        logger.info(f"Custom Fields Being Sent: {custom_fields}")
 
         response = requests.post(url, json=contact_payload, headers=headers, timeout=30)
 
@@ -616,6 +668,7 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
             contact_id = contact.get("contact_id")
 
             logger.info(f"Successfully created Zoho contact with ID: {contact_id}")
+            logger.info(f"Zoho Response Contact Data Custom Fields: {contact.get('custom_fields', [])}")
 
             return {
                 "success": True,
@@ -626,6 +679,7 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
         else:
             error_message = response.text
             logger.error(f"Failed to create Zoho contact: {response.status_code} - {error_message}")
+            logger.error(f"Full response: {response.json() if response.text else 'No response body'}")
 
             return {
                 "success": False,
