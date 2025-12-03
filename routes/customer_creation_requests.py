@@ -55,6 +55,7 @@ class CustomerCreationRequest(BaseModel):
     customer_mail_id: Optional[str] = None
     gst_treatment: Optional[str] = None
     pincode: Optional[str] = None
+    in_ex: Optional[str] = None
 
 class CommentCreate(BaseModel):
     text: str
@@ -334,7 +335,8 @@ def get_zoho_custom_fields() -> Optional[List[Dict[str, Any]]]:
     if not access_token:
         return None
 
-    url = f"https://www.zohoapis.com/books/v3/settings/customfields?organization_id={ORG_ID}"
+    # Use the entity-specific endpoint for contacts
+    url = f"https://www.zohoapis.com/books/v3/settings/customfields/contact?organization_id={ORG_ID}"
 
     headers = {
         "Authorization": f"Zoho-oauthtoken {access_token}",
@@ -346,9 +348,15 @@ def get_zoho_custom_fields() -> Optional[List[Dict[str, Any]]]:
 
         if response.status_code == 200:
             data = response.json()
-            # Find custom fields for contacts
-            custom_fields = data.get("custom_fields", [])
-            contact_fields = [cf for cf in custom_fields if cf.get("entity") == "contact"]
+            customfields = data.get("customfields", [])
+
+            # If customfields is a dict (from general endpoint), get the contact array
+            if isinstance(customfields, dict):
+                contact_fields = customfields.get("contact", [])
+            # If it's already an array (from entity-specific endpoint), use it directly
+            else:
+                contact_fields = customfields
+
             logger.info(f"Fetched {len(contact_fields)} custom fields for contacts from Zoho")
             return contact_fields
         else:
@@ -490,6 +498,15 @@ def map_custom_fields(customer_data: Dict[str, Any], user_data: Optional[Dict[st
         custom_fields.append({
             "index": field_map["Multiple branches"],
             "value": customer_data.get("multiple_branches", "")
+        })
+
+    # In/ex (Tax Treatment - Inclusive/Exclusive)
+    if "In/ex" in field_map:
+        in_ex_value = customer_data.get("in_ex", "")
+        # Convert to array format for multiselect field
+        custom_fields.append({
+            "index": field_map["In/ex"],
+            "value": [in_ex_value] if in_ex_value else []
         })
 
     logger.info(f"Mapped {len(custom_fields)} custom fields")
@@ -1211,6 +1228,7 @@ async def update_customer_request(
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
             "pincode": request_data.pincode,
+            "in_ex": request_data.in_ex,
             "updated_at": datetime.now(),
             "updated_by": user_id
         }
