@@ -318,6 +318,121 @@ def get_zoho_books_access_token() -> Optional[str]:
         return None
 
 
+def map_custom_fields(customer_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Map customer data to Zoho custom fields format.
+
+    Args:
+        customer_data: Dictionary containing customer information
+
+    Returns:
+        list: Array of custom field objects with index, label, and value
+    """
+    from datetime import date
+
+    # Get today's date in DD-MM-YYYY format for Date of creation
+    today = date.today().strftime("%Y-%m-%d")
+
+    # Map sales_person codes to the proper values
+    sales_person_mapping = {
+        "SP1": "SP1",
+        "SP2": "SP2",
+        "SP3": "SP3",
+        "SP4": "SP4",
+        "SP6": "SP6",
+        "SP7": "SP7",
+        "SP8": "SP8",
+        "SP13": "SP13",
+        "SP14": "SP14",
+        "SP15": "SP15",
+        "SP16": "SP16",
+        "SP17": "SP17",
+        "SP18": "SP18",
+        "SP20": "SP20",
+        "SP21": "SP21",
+        "SP (Indore)": "SP (Indore)",
+    }
+
+    # Get the sales person value
+    sales_person_value = customer_data.get("sales_person", "")
+    sales_person_for_zoho = sales_person_mapping.get(sales_person_value, sales_person_value)
+
+    custom_fields = [
+        {
+            "index": 1,
+            "label": "Date of creation",
+            "value": today
+        },
+        {
+            "index": 2,
+            "label": "Business email Id",
+            "value": customer_data.get("customer_mail_id", "")
+        },
+        {
+            "index": 3,
+            "label": "Shop Whatsapp Number",
+            "value": customer_data.get("whatsapp_no", "")
+        },
+        {
+            "index": 4,
+            "label": "Agreed Margin",
+            "value": customer_data.get("margin_details", "")
+        },
+        {
+            "index": 5,
+            "label": "Client ID",
+            "value": ""  # Empty initially, will be set by Zoho or later
+        },
+        {
+            "index": 6,
+            "label": "Type of business",
+            "value": ""  # Can be mapped if you have this field
+        },
+        {
+            "index": 7,
+            "label": "Tier",
+            "value": customer_data.get("tier_category", "")
+        },
+        {
+            "index": 8,
+            "label": "Parent Company",
+            "value": ""  # Can be mapped if you have this field
+        },
+        {
+            "index": 9,
+            "label": "Whatsapp group",
+            "value": "no"  # Default value
+        },
+        {
+            "index": 10,
+            "label": "Billing through",
+            "value": []  # Empty array for multiselect
+        },
+        {
+            "index": 11,
+            "label": "Payment terms",
+            "value": customer_data.get("payment_terms", "")
+        },
+        {
+            "index": 12,
+            "label": "In/ex",
+            "value": []  # Empty array for multiselect
+        },
+        {
+            "index": 13,
+            "label": "Sales person",
+            "value": [sales_person_for_zoho] if sales_person_for_zoho else []
+        },
+        {
+            "index": 14,
+            "label": "Multiple branches",
+            "value": customer_data.get("multiple_branches", "")
+        }
+    ]
+
+    return custom_fields
+
+
 def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Create a contact (customer) in Zoho Books.
@@ -353,6 +468,10 @@ def create_zoho_contact(customer_data: Dict[str, Any]) -> Dict[str, Any]:
         "customer_sub_type": "business",
         "payment_terms_label": customer_data.get("payment_terms", ""),
     }
+
+    # Add custom fields
+    custom_fields = map_custom_fields(customer_data)
+    contact_payload["custom_fields"] = custom_fields
 
     # Add contact person
     if customer_data.get("customer_name") or customer_data.get("customer_mail_id"):
