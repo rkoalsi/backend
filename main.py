@@ -16,17 +16,20 @@ origins = [
     "https://localhost:3000",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "https://orderform.pupscribe.in",  # Frontend (home route)
+    "http://orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
 ]
 
 # Initialize the app
 app = FastAPI()
 
-# Add CORS Middleware
+# Add CORS Middleware with security improvements
+# Note: If you have production domains, add them to the origins list above
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,  # Use specific origins instead of ["*"] for better security
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Specify allowed methods
     allow_headers=["*"],
 )
 

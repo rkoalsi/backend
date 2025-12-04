@@ -28,7 +28,16 @@ def get_client():
         if not mongo_uri:
             raise ConnectionError("MONGO_URI environment variable not set")
 
-        _mongo_client = MongoClient(mongo_uri)
+        # Optimized connection pool settings for better performance
+        _mongo_client = MongoClient(
+            mongo_uri,
+            maxPoolSize=50,  # Maximum connections in the pool
+            minPoolSize=10,  # Minimum connections to maintain
+            maxIdleTimeMS=50000,  # Max idle time before closing connection
+            socketTimeoutMS=20000,  # Socket timeout
+            connectTimeoutMS=20000,  # Connection timeout
+            serverSelectionTimeoutMS=5000  # Server selection timeout
+        )
         _mongo_db = _mongo_client.get_database(db_name)
 
     return _mongo_client
