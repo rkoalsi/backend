@@ -5,7 +5,6 @@ from datetime import datetime
 from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import get_current_user
-from .helpers import notify_sales_admin
 from ..config.whatsapp import send_whatsapp
 import os
 import requests
@@ -771,18 +770,30 @@ async def create_customer_request(
         # Insert into database
         result = db.customer_creation_requests.insert_one(request_doc)
 
-        # Notify admin
+        # Notify admin via WhatsApp
         try:
-            template = db.templates.find_one({"name": "customer_creation_request"})
-            if template:
-                params = {
-                    "sales_person_name": request_doc["created_by_name"],
-                    "shop_name": request_data.shop_name,
-                    "customer_name": request_data.customer_name,
-                }
-                notify_sales_admin(db, template, params)
+            # Find admin by email
+            admin_user = db.users.find_one({"email": "pupscribeinvoicee@gmail.com"})
+
+            if admin_user:
+                template = db.templates.find_one({"name": "admin_customer_creation_request"})
+
+                if template and admin_user.get("phone"):
+                    # Prepare parameters: admin first_name, sp first_name, customer name
+                    admin_first_name = admin_user.get("first_name", "Admin")
+                    sp_first_name = user_data.get("first_name", "Sales Person")
+
+                    params = {
+                        "admin_name": admin_first_name,
+                        "sp_name": sp_first_name,
+                        "customer_name": request_data.customer_name,
+                        # "button_url": str(result.inserted_id)
+                    }
+
+                    send_whatsapp(admin_user.get("phone"), template, params)
+                    logger.info(f"WhatsApp notification sent to admin: {admin_user.get('email')}")
         except Exception as e:
-            print(f"Failed to send notification: {e}")
+            logger.error(f"Failed to send WhatsApp notification to admin: {e}")
 
         return {
             "message": "Customer creation request submitted successfully",
@@ -943,6 +954,42 @@ async def update_request_status(
 
         if result.modified_count == 0:
             raise HTTPException(status_code=404, detail="Request not found or no changes made")
+
+        # Send WhatsApp notification to sales person when status is approved or rejected
+        try:
+            if status in ["approved", "rejected"] or final_status == "created_on_zoho":
+                # Get the sales person who created the request
+                sp_user_id = request_doc.get("created_by")
+                if sp_user_id:
+                    sp_user = db.users.find_one({"_id": ObjectId(sp_user_id)})
+
+                    if sp_user and sp_user.get("phone"):
+                        template = db.templates.find_one({"name": "sp_customer_creation_request_status"})
+
+                        if template:
+                            # Get customer contact_name from customers collection using zoho_contact_id
+                            customer_contact_name = request_doc.get("customer_name", "")
+                            if zoho_contact_id:
+                                customer_doc = db.customers.find_one({"contact_id": zoho_contact_id})
+                                if customer_doc:
+                                    customer_contact_name = customer_doc.get("contact_name", customer_contact_name)
+
+                            # Prepare parameters
+                            sp_first_name = sp_user.get("first_name", "Sales Person")
+                            submitted_customer_name = request_doc.get("customer_name", "")
+                            status_text = "Approved" if final_status == "created_on_zoho" else status.capitalize()
+
+                            params = {
+                                "sp_name": sp_first_name,
+                                "submitted_customer_name": submitted_customer_name,
+                                "status": status_text,
+                                "customer_contact_name": customer_contact_name
+                            }
+
+                            send_whatsapp(sp_user.get("phone"), template, params)
+                            logger.info(f"WhatsApp notification sent to sales person: {sp_user.get('email')}")
+        except Exception as e:
+            logger.error(f"Failed to send WhatsApp notification to sales person: {e}")
 
         response_message = "Request status updated successfully"
         if final_status == "created_on_zoho":
