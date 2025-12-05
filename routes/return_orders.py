@@ -57,7 +57,7 @@ class ReturnItem(BaseModel):
     product_name: str
     sku: Optional[str] = None
     quantity: int
-    image_url: str
+    image_url: Optional[str] = None
     product_id: str
 
 
