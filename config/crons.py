@@ -930,7 +930,7 @@ async def stock_cron():
     start_time = time.time()
     try:
         db = get_database()
-        zoho_stock_collection = db["zoho_stock"]
+        warehouse_stock_collection = db["zoho_warehouse_stock"]
         products_collection = db["products"]
 
         # Get yesterday's date
@@ -938,7 +938,7 @@ async def stock_cron():
         target_date = datetime.strptime(yesterday, "%Y-%m-%d")
 
         # Check if we already have data for this date
-        existing_count = zoho_stock_collection.count_documents({"date": target_date})
+        existing_count = warehouse_stock_collection.count_documents({"date": target_date})
         if existing_count > 0:
             logger.info(
                 f"Warehouse stock data for {yesterday} already exists ({existing_count} records)"
@@ -969,7 +969,7 @@ async def stock_cron():
             # Fetch remaining pages if there are more than 1 page
             if total_pages > 1:
                 logger.info(f"Fetching {total_pages} pages for {yesterday}")
-                
+
                 for page in range(2, total_pages + 1):
                     page_url = (
                         f"https://inventory.zoho.com/api/v1/reports/warehouse?"
@@ -977,78 +977,99 @@ async def stock_cron():
                         f"response_option=1&filter_by=TransactionDate.CustomDate&"
                         f"show_actual_stock=false&to_date={yesterday}&organization_id={org_id}"
                     )
-                    
+
                     page_data = await api_client.make_request(page_url)
                     if page_data and "warehouse_stock_info" in page_data:
                         warehouse_stock.extend(page_data["warehouse_stock_info"])
 
             logger.info(f"Processing {len(warehouse_stock)} warehouse stock items for {yesterday}")
-            processed_data = []
+
+            # Process warehouse stock - store ALL warehouses
+            processed_items = {}
 
             for item in warehouse_stock:
                 if not isinstance(item, dict):
                     continue
 
-                pupscribe_stock = None
                 item_name = None
-                item_id = None
+                warehouses_data = {}
+
                 # Handle NEW API structure (warehouse_stock array)
                 if "warehouse_stock" in item:
                     for warehouse_entry in item["warehouse_stock"]:
-                        if warehouse_entry.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
-                            pupscribe_stock = int(warehouse_entry.get("quantity_available_for_sale", 0))
-                            item_name = warehouse_entry.get("item_name", "")
-                            item_id = warehouse_entry.get("item_id", "")
-                            break  # Found the warehouse we want, no need to check others
-                
-                # Handle OLD API structure (backwards compatibility)
+                        warehouse_name = warehouse_entry.get("warehouse_name")
+                        if warehouse_name:
+                            item_name = warehouse_entry.get("item_name")
+                            quantity = int(warehouse_entry.get("quantity_available_for_sale", 0))
+                            warehouses_data[warehouse_name] = quantity
+
+                # Handle OLD API structure (warehouses array)
                 elif "warehouses" in item:
-                    item_name = item.get("item_name", "")
+                    item_name = item.get("item_name")
                     for warehouse in item.get("warehouses", []):
-                        if warehouse.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
-                            pupscribe_stock = int(warehouse.get("quantity_available_for_sale", 0))
-                            item_id = warehouse.get("item_id", "")
-                            break
-                
-                # Fallback: Direct warehouse entry (old structure)
-                elif item.get("warehouse_name") == "Pupscribe Enterprises Private Limited":
-                    pupscribe_stock = int(item.get("quantity_available_for_sale", 0))
-                    item_name = item.get("item_name", "")
-                    item_id = item.get("item_id", "")
+                        warehouse_name = warehouse.get("warehouse_name")
+                        if warehouse_name:
+                            quantity = int(warehouse.get("quantity_available_for_sale", 0))
+                            warehouses_data[warehouse_name] = quantity
 
-                # Skip if we couldn't find Pupscribe stock or item name
-                if pupscribe_stock is None or not item_name:
-                    continue
+                # Handle direct warehouse entry
+                elif "warehouse_name" in item:
+                    warehouse_name = item.get("warehouse_name")
+                    item_name = item.get("item_name")
+                    quantity = int(item.get("quantity_available_for_sale", 0))
+                    warehouses_data[warehouse_name] = quantity
 
-                # Find matching product ID
-                product_id = find_product_id_with_mongo(item_name, products_collection)
+                if item_name and warehouses_data:
+                    # Normalize item name
+                    normalized_name = " ".join(item_name.split())
 
-                # Prepare document for MongoDB
-                stock_document = {
+                    if normalized_name not in processed_items:
+                        processed_items[normalized_name] = {}
+
+                    # Merge warehouse data
+                    for warehouse_name, quantity in warehouses_data.items():
+                        processed_items[normalized_name][warehouse_name] = quantity
+
+            # Prepare documents for MongoDB
+            documents = []
+            for item_name, warehouses in processed_items.items():
+                # Look up product in products collection
+                product = products_collection.find_one({"item_name": item_name})
+
+                doc = {
                     "item_name": item_name,
-                    "stock": pupscribe_stock,
+                    "warehouses": warehouses,
                     "date": target_date,
-                    "product_id": product_id,
-                    "created_at": datetime.now(),
-                    "zoho_item_id": item_id,
+                    "created_at": datetime.now()
                 }
 
-                processed_data.append(stock_document)
+                # Add product_id and zoho_item_id if product found
+                if product:
+                    doc["product_id"] = product["_id"]
+                    doc["zoho_item_id"] = product.get("item_id")
 
-            if processed_data:
-                zoho_stock_collection.insert_many(processed_data, ordered=False)
+                documents.append(doc)
+
+            if documents:
+                warehouse_stock_collection.insert_many(documents, ordered=False)
                 logger.info(
-                    f"✅ Inserted {len(processed_data)} warehouse stock records for {yesterday}"
+                    f"✅ Inserted {len(documents)} warehouse stock records for {yesterday}"
                 )
+
+                # Show warehouse summary
+                all_warehouses = set()
+                for warehouses in processed_items.values():
+                    all_warehouses.update(warehouses.keys())
+                logger.info(f"Warehouses tracked: {len(all_warehouses)}")
             else:
-                logger.info(f"No Pupscribe warehouse stock found for {yesterday}")
+                logger.info(f"No warehouse stock data found for {yesterday}")
 
             duration = time.time() - start_time
             send_slack_notification(
                 "Stock Cron",
                 success=True,
                 details={
-                    "processed": len(processed_data),
+                    "processed": len(documents),
                     "duration": duration,
                     "pages_fetched": total_pages,
                     "total_items": len(warehouse_stock),
