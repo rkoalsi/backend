@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form
 from ..config.root import get_database, serialize_mongo_document
-from typing import Optional
+from typing import Optional, List
 from bson import ObjectId
 from datetime import datetime
-import re
+import re, boto3, os, uuid
 
 router = APIRouter()
 
@@ -11,6 +11,15 @@ db = get_database()
 shipments_collection = db["shipments"]
 customers_collection = db["customers"]
 invoices_collection = db["invoices"]
+
+# S3 Configuration
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=os.getenv("S3_ACCESS_KEY"),
+    aws_secret_access_key=os.getenv("S3_SECRET_KEY"),
+    region_name=os.getenv("S3_REGION"),
+)
+bucket_name = os.getenv("S3_BUCKET_NAME")
 
 
 @router.get("")
@@ -187,6 +196,7 @@ def get_shipments(
             "shipping_address": 1,
             "line_items": 1,
             "invoice_number": 1,
+            "images": 1,
         }
     })
 
@@ -223,3 +233,135 @@ def get_shipment(shipment_id: str):
         raise HTTPException(status_code=404, detail="Shipment not found")
 
     return serialize_mongo_document(shipment)
+
+
+@router.post("/{shipment_id}/images")
+async def upload_shipment_images(
+    shipment_id: str,
+    images: List[UploadFile] = File(...),
+    captions: Optional[str] = Form(None),
+    uploaded_by: str = Form(...),
+):
+    """
+    Upload multiple images for a shipment with optional captions.
+    captions should be a JSON string array matching the images array length.
+    """
+    try:
+        # Verify shipment exists
+        shipment = shipments_collection.find_one({"_id": ObjectId(shipment_id)})
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+
+        # Parse captions if provided
+        import json
+        captions_list = []
+        if captions:
+            try:
+                captions_list = json.loads(captions)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid captions format")
+
+        # Ensure captions list matches images length
+        while len(captions_list) < len(images):
+            captions_list.append("")
+
+        uploaded_images = []
+        for idx, image in enumerate(images):
+            # Validate file type
+            if not image.content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail=f"File {image.filename} is not an image")
+
+            # Generate unique filename
+            file_extension = os.path.splitext(image.filename)[1]
+            unique_filename = f"shipment_images/{shipment_id}/{uuid.uuid4()}{file_extension}"
+
+            try:
+                # Upload to S3
+                image.file.seek(0)
+                s3_client.upload_fileobj(
+                    image.file,
+                    bucket_name,
+                    unique_filename,
+                    ExtraArgs={"ContentType": image.content_type},
+                )
+
+                # Construct S3 URL
+                s3_url = f"{os.getenv('S3_URL')}/{unique_filename}"
+
+                # Create image document
+                image_doc = {
+                    "url": s3_url,
+                    "caption": captions_list[idx] if idx < len(captions_list) else "",
+                    "uploaded_at": datetime.now(),
+                    "uploaded_by": ObjectId(uploaded_by),
+                }
+                uploaded_images.append(image_doc)
+
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error uploading image: {str(e)}")
+
+        # Update shipment with new images
+        current_images = shipment.get("images", [])
+        updated_images = current_images + uploaded_images
+
+        shipments_collection.update_one(
+            {"_id": ObjectId(shipment_id)},
+            {"$set": {"images": updated_images}}
+        )
+
+        return {
+            "message": "Images uploaded successfully",
+            "images": [serialize_mongo_document(img) for img in uploaded_images],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@router.get("/{shipment_id}/images")
+def get_shipment_images(shipment_id: str):
+    """
+    Get all images for a shipment.
+    """
+    try:
+        shipment = shipments_collection.find_one({"_id": ObjectId(shipment_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid shipment ID")
+
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    images = shipment.get("images", [])
+    return {"images": [serialize_mongo_document(img) for img in images]}
+
+
+@router.delete("/{shipment_id}/images/{image_index}")
+def delete_shipment_image(shipment_id: str, image_index: int):
+    """
+    Delete a specific image from a shipment by its index.
+    """
+    try:
+        shipment = shipments_collection.find_one({"_id": ObjectId(shipment_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid shipment ID")
+
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    images = shipment.get("images", [])
+
+    if image_index < 0 or image_index >= len(images):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Remove image from array
+    images.pop(image_index)
+
+    # Update shipment
+    shipments_collection.update_one(
+        {"_id": ObjectId(shipment_id)},
+        {"$set": {"images": images}}
+    )
+
+    return {"message": "Image deleted successfully"}
