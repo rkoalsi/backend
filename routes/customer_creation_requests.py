@@ -675,8 +675,9 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
         # Map GST treatment to Zoho format
         gst_treatment_map = {
             "Business GST": "business_gst",
-            "Unregistered Business": "unregistered_business",
-            "Consumer": "consumer"
+            "Unregistered Business": "business_none",
+            "Consumer": "consumer",
+            "Overseas":'overseas'
         }
         zoho_gst_treatment = gst_treatment_map.get(customer_data.get("gst_treatment"), "business_gst")
         contact_payload["gst_treatment"] = zoho_gst_treatment
