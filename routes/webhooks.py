@@ -1319,10 +1319,6 @@ def handle_shipment(data: dict):
         sales_admin_4 = serialize_mongo_document(
             dict(db.users.find_one({"email": "hitesh@barkbutler.in"}))
         )
-        template = serialize_mongo_document(
-            dict(db.templates.find_one({"name": "shipment_notification"}))
-        )
-
         all_salespeople = set()
         print("Custom Field Invoice Sales Person", invoice_sales_person)
         print("Invoice Sales Person", salesperson)
@@ -1341,15 +1337,46 @@ def handle_shipment(data: dict):
 
         print("All Sales People:", all_salespeople)
 
-        params = {
-            "invoice_number": (
-                invoice_number if invoice_number != "" else salesorder_number
-            ),
-            "customer_name": customer_name,
-            "tracking_url": tracking_url,
-            "tracking_number": tracking_number,
-            "button_url": button_url,
-        }
+        # Check shipment status and use appropriate template and parameters
+        if shipment.get('status',"") == 'delivered':
+            template = serialize_mongo_document(
+                dict(db.templates.find_one({"name": "shipment_delivery_notification"}))
+            )
+
+            # Extract and format delivery_date from shipment_delivery_notification field
+            delivery_datetime_str = shipment.get("shipment_delivered_date", "")
+            delivery_date = ""
+            if delivery_datetime_str:
+                try:
+                    # Parse the datetime string "2025-11-19 15:30"
+                    dt = datetime.datetime.strptime(delivery_datetime_str, "%Y-%m-%d %H:%M")
+                    # Format as "19/11/2025"
+                    delivery_date = dt.strftime("%d/%m/%Y")
+                except ValueError:
+                    print(f"Failed to parse delivery date: {delivery_datetime_str}")
+
+            params = {
+                "invoice_number": (
+                    invoice_number if invoice_number != "" else salesorder_number
+                ),
+                "carrier_name": tracking_partner,
+                "delivery_date": delivery_date,
+                "awb_no": shipment.get("tracking_number", ""),
+            }
+        else:
+            template = serialize_mongo_document(
+                dict(db.templates.find_one({"name": "shipment_notification"}))
+            )
+
+            params = {
+                "invoice_number": (
+                    invoice_number if invoice_number != "" else salesorder_number
+                ),
+                "customer_name": customer_name,
+                "tracking_url": tracking_url,
+                "tracking_number": tracking_number,
+                "button_url": button_url,
+            }
         valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
