@@ -289,10 +289,13 @@ def get_zoho_books_access_token() -> Optional[str]:
 
     Returns:
         str: Access token if successful, None otherwise
+
+    Raises:
+        Exception: If there's an error getting the token, raises exception with detailed error message
     """
     if not all([CLIENT_ID, CLIENT_SECRET, GRANT_TYPE, BOOKS_REFRESH_TOKEN, BOOKS_URL]):
         logger.error("Missing Zoho Books configuration in environment variables")
-        return None
+        raise Exception("Missing Zoho Books configuration in environment variables")
 
     try:
         url = BOOKS_URL.format(
@@ -310,12 +313,24 @@ def get_zoho_books_access_token() -> Optional[str]:
             logger.info(f"Got Zoho Books Access Token: ...{access_token[-4:]}")
             return access_token
         else:
-            logger.error(f"Failed to get access token: {response.status_code} - {response.text}")
-            return None
+            # Parse the JSON response to get detailed error information
+            try:
+                error_response = response.json()
+                error_msg = error_response.get("error_description") or error_response.get("message") or response.text
+            except:
+                error_msg = response.text
 
-    except Exception as e:
+            logger.error(f"Failed to get access token: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to get Zoho access token: {error_msg}")
+
+    except requests.exceptions.RequestException as e:
         logger.error(f"Error getting Zoho Books access token: {e}")
-        return None
+        raise Exception(f"Network error while getting Zoho access token: {str(e)}")
+    except Exception as e:
+        if "Failed to get Zoho access token" in str(e):
+            raise
+        logger.error(f"Error getting Zoho Books access token: {e}")
+        raise Exception(f"Error getting Zoho access token: {str(e)}")
 
 
 def get_zoho_custom_fields() -> Optional[List[Dict[str, Any]]]:
@@ -330,8 +345,10 @@ def get_zoho_custom_fields() -> Optional[List[Dict[str, Any]]]:
         return None
 
     # Get access token
-    access_token = get_zoho_books_access_token()
-    if not access_token:
+    try:
+        access_token = get_zoho_books_access_token()
+    except Exception as e:
+        logger.error(f"Failed to get access token for custom fields: {e}")
         return None
 
     # Use the entity-specific endpoint for contacts
@@ -533,9 +550,16 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
         return {"success": False, "message": "Zoho organization ID not configured"}
 
     # Get access token
-    access_token = get_zoho_books_access_token()
-    if not access_token:
-        return {"success": False, "message": "Failed to get Zoho access token"}
+    try:
+        access_token = get_zoho_books_access_token()
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Failed to get Zoho access token: {error_msg}")
+        return {
+            "success": False,
+            "message": error_msg,
+            "error_details": {"error": error_msg}
+        }
 
     # Prepare the request
     url = f"https://www.zohoapis.com/books/v3/contacts?organization_id={ORG_ID}"
@@ -698,13 +722,20 @@ def create_zoho_contact(customer_data: Dict[str, Any], user_data: Optional[Dict[
                 "message": "Customer created successfully in Zoho Books"
             }
         else:
-            error_message = response.text
-            logger.error(f"Failed to create Zoho contact: {response.status_code} - {error_message}")
-            logger.error(f"Full response: {response.json() if response.text else 'No response body'}")
+            # Parse the JSON response to get detailed error information
+            try:
+                error_response = response.json()
+            except:
+                error_response = {"message": response.text}
+
+            logger.error(f"Failed to create Zoho contact: {response.status_code} - {response.text}")
+            logger.error(f"Full response: {error_response}")
 
             return {
                 "success": False,
-                "message": f"Zoho API error: {error_message}"
+                "message": f"Zoho API error: {error_response.get('message', 'Unknown error')}",
+                "error_details": error_response,  # Include full error details
+                "status_code": response.status_code
             }
 
     except Exception as e:
@@ -927,12 +958,26 @@ async def update_request_status(
                     else:
                         logger.warning(f"Failed to store customer data in customers collection for contact_id: {zoho_contact_id}")
             else:
-                # If Zoho creation fails, log the error but still approve the request
+                # If Zoho creation fails, return detailed error to frontend
                 error_msg = zoho_result.get("message", "Unknown error")
+                error_details = zoho_result.get("error_details", {})
+                status_code = zoho_result.get("status_code", 500)
+
                 logger.error(f"Failed to create customer in Zoho: {error_msg}")
+                logger.error(f"Error details: {error_details}")
+
+                # Format detailed error message for frontend
+                detailed_error = f"Failed to create customer in Zoho Books.\n\n"
+                detailed_error += f"Error: {error_msg}\n\n"
+
+                if error_details:
+                    detailed_error += "Details:\n"
+                    for key, value in error_details.items():
+                        detailed_error += f"- {key}: {value}\n"
+
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to create customer in Zoho Books: {error_msg}"
+                    detail=detailed_error.strip()
                 )
 
         # Prepare update document
