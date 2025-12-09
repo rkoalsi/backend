@@ -638,6 +638,38 @@ def get_admin_customer_analytics(
                             },
                         }
                     },
+                    # Combine street + street2 into full normalized street address (remove punctuation, extra spaces)
+                    "normalizedFullStreet": {
+                        "$trim": {
+                            "input": {
+                                "$replaceAll": {
+                                    "input": {
+                                        "$replaceAll": {
+                                            "input": {
+                                                "$replaceAll": {
+                                                    "input": {
+                                                        "$toLower": {
+                                                            "$concat": [
+                                                                {"$ifNull": ["$shipping_address.street", ""]},
+                                                                " ",
+                                                                {"$ifNull": ["$shipping_address.street2", ""]}
+                                                            ]
+                                                        }
+                                                    },
+                                                    "find": ",",
+                                                    "replacement": " "
+                                                }
+                                            },
+                                            "find": ".",
+                                            "replacement": " "
+                                        }
+                                    },
+                                    "find": "  ",
+                                    "replacement": " "
+                                }
+                            }
+                        }
+                    },
                     # Add fields to check for missing shipping address data
                     "hasShippingAddress": {"$ne": ["$shipping_address", None]},
                     "shippingAddressComplete": {
@@ -871,16 +903,18 @@ def get_admin_customer_analytics(
                     },
                 }
             },
-            # Stage 3: Group by customer and normalized address components (updated to use shipping address)
+            # Stage 3: Group by customer name AND address (all fields normalized)
+            # Note: Uses normalizedFullStreet (street + street2 combined) to handle data entry variations
             {
                 "$group": {
                     "_id": {
-                        "customerId": "$customer_id",
+                        "customerNameLower": {"$toLower": {"$trim": {"input": "$customer_name"}}},
                         "city": "$normalizedCity",
-                        "state": "$shipping_address.state",
-                        "zip": "$shipping_address.zip",
-                        "country": "India", #using India as default Country
+                        "state": {"$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}},
+                        "zip": {"$replaceAll": {"input": {"$ifNull": ["$shipping_address.zip", ""]}, "find": " ", "replacement": ""}},
+                        "fullStreet": "$normalizedFullStreet",
                     },
+                    "customerId": {"$first": "$customer_id"},
                     "customerName": {"$first": "$customer_name"},
                     "shippingAddress": {"$first": "$shipping_address"},
                     # Updated logic: Get the salesperson field that matches the sp_code
@@ -1014,7 +1048,7 @@ def get_admin_customer_analytics(
             {
                 "$lookup": {
                     "from": "customers",
-                    "localField": "_id.customerId",
+                    "localField": "customerId",
                     "foreignField": "contact_id",
                     "as": "customerDetails",
                 }
@@ -1871,6 +1905,38 @@ def download_customer_analytics_report(
                             },
                         }
                     },
+                    # Combine street + street2 into full normalized street address (remove punctuation, extra spaces)
+                    "normalizedFullStreet": {
+                        "$trim": {
+                            "input": {
+                                "$replaceAll": {
+                                    "input": {
+                                        "$replaceAll": {
+                                            "input": {
+                                                "$replaceAll": {
+                                                    "input": {
+                                                        "$toLower": {
+                                                            "$concat": [
+                                                                {"$ifNull": ["$shipping_address.street", ""]},
+                                                                " ",
+                                                                {"$ifNull": ["$shipping_address.street2", ""]}
+                                                            ]
+                                                        }
+                                                    },
+                                                    "find": ",",
+                                                    "replacement": " "
+                                                }
+                                            },
+                                            "find": ".",
+                                            "replacement": " "
+                                        }
+                                    },
+                                    "find": "  ",
+                                    "replacement": " "
+                                }
+                            }
+                        }
+                    },
                     # Add fields to check for missing shipping address data
                     "hasShippingAddress": {"$ne": ["$shipping_address", None]},
                     "shippingAddressComplete": {
@@ -2104,16 +2170,18 @@ def download_customer_analytics_report(
                     },
                 }
             },
-            # Stage 3: Group by customer and normalized address components (updated to use shipping address)
+            # Stage 3: Group by customer name AND address (all fields normalized)
+            # Note: Uses normalizedFullStreet (street + street2 combined) to handle data entry variations
             {
                 "$group": {
                     "_id": {
-                        "customerId": "$customer_id",
+                        "customerNameLower": {"$toLower": {"$trim": {"input": "$customer_name"}}},
                         "city": "$normalizedCity",
-                        "state": "$shipping_address.state",
-                        "zip": "$shipping_address.zip",
-                        "country": "$shipping_address.country",
+                        "state": {"$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}},
+                        "zip": {"$replaceAll": {"input": {"$ifNull": ["$shipping_address.zip", ""]}, "find": " ", "replacement": ""}},
+                        "fullStreet": "$normalizedFullStreet",
                     },
+                    "customerId": {"$first": "$customer_id"},
                     "customerName": {"$first": "$customer_name"},
                     "shippingAddress": {"$first": "$shipping_address"},
                     # Updated logic: Get the salesperson field that matches the sp_code
@@ -2247,7 +2315,7 @@ def download_customer_analytics_report(
             {
                 "$lookup": {
                     "from": "customers",
-                    "localField": "_id.customerId",
+                    "localField": "customerId",
                     "foreignField": "contact_id",
                     "as": "customerDetails",
                 }
