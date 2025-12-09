@@ -41,7 +41,6 @@ class AddressModel(BaseModel):
 class CustomerCreationRequest(BaseModel):
     shop_name: str
     customer_name: str
-    address: str  # Keep for backward compatibility
     gst_no: Optional[str] = None
     pan_card_no: Optional[str] = None
     whatsapp_no: str
@@ -50,7 +49,7 @@ class CustomerCreationRequest(BaseModel):
     tier_category: str
     sales_person: str
     margin_details: Optional[str] = None
-    # New structured address fields
+    # Structured address fields
     billing_address: Optional[AddressModel] = None
     shipping_address: Optional[AddressModel] = None
     place_of_supply: Optional[str] = None
@@ -848,7 +847,6 @@ async def create_customer_request(
         request_doc = {
             "shop_name": request_data.shop_name,
             "customer_name": request_data.customer_name,
-            "address": request_data.address,
             "gst_no": request_data.gst_no,
             "pan_card_no": request_data.pan_card_no,
             "whatsapp_no": request_data.whatsapp_no,
@@ -1440,7 +1438,6 @@ async def update_customer_request(
         update_doc = {
             "shop_name": request_data.shop_name,
             "customer_name": request_data.customer_name,
-            "address": request_data.address,
             "gst_no": request_data.gst_no,
             "pan_card_no": request_data.pan_card_no,
             "whatsapp_no": request_data.whatsapp_no,
