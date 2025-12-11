@@ -26,6 +26,7 @@ def get_product(product_id: str, collection: Collection):
 def get_product_counts():
     """
     Returns the number of active products grouped by brand and category.
+    Also includes a count of new products under a special "New Arrivals" brand.
     """
     try:
         base_query = {
@@ -57,6 +58,17 @@ def get_product_counts():
             if brand not in result:
                 result[brand] = {}
             result[brand][category] = item["count"]
+
+        # Add count for "New Arrivals" - products created in last 3 months
+        three_months_ago = datetime.now() - relativedelta(months=3)
+        new_products_count = db.products.count_documents({
+            "stock": {"$gt": 0},
+            "is_deleted": {"$exists": False},
+            "status": "active",
+            "created_at": {"$gte": three_months_ago}
+        })
+
+        result["New Arrivals"] = {"All Products": new_products_count}
 
         return result
 
@@ -235,6 +247,7 @@ def get_products(
         "default", description="Sort order: default, price_asc, price_desc, catalogue"
     ),
     group_by_name: Optional[bool] = Query(False, description="Group products by base name"),
+    new_only: Optional[bool] = Query(False, description="Filter to show only new products (created in last 3 months)"),
 ):
     """
     Retrieves paginated products with optional filters.
@@ -274,6 +287,14 @@ def get_products(
             }
         },
     ]
+
+    # Filter to only new products if new_only is True
+    if new_only:
+        pipeline.append({
+            "$match": {
+                "created_at": {"$gte": three_months_ago}
+            }
+        })
 
     # Adjust query and sort based on sort order
     if sort == "price_asc":
