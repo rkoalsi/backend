@@ -622,17 +622,7 @@ def create_zoho_contact(
 
     # Add contact person
     if customer_data.get("customer_name") or customer_data.get("customer_mail_id"):
-        contact_persons = [
-            {
-                "first_name": customer_data.get("customer_name", ""),
-                "email": customer_data.get("customer_mail_id", ""),
-                "phone": customer_data.get("whatsapp_no", ""),
-                "is_primary_contact": True,
-            }
-        ]
-        contact_payload["contact_persons"] = contact_persons
-        contact_payload["mobile"] = customer_data.get("whatsapp_no", "")
-        contact_payload["phone"] = ""
+        # Split the customer name into first and last name
         full_name = customer_data.get("customer_name", "").strip()
         if full_name:
             parts = full_name.split()
@@ -649,6 +639,19 @@ def create_zoho_contact(
             first_name = ""
             last_name = ""
 
+        # Create contact person with split name
+        contact_persons = [
+            {
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": customer_data.get("customer_mail_id", ""),
+                "mobile": customer_data.get("whatsapp_no", ""),
+                "is_primary_contact": True,
+            }
+        ]
+        contact_payload["contact_persons"] = contact_persons
+        contact_payload["mobile"] = customer_data.get("whatsapp_no", "")
+        contact_payload["phone"] = ""
         contact_payload["first_name"] = first_name
         contact_payload["last_name"] = last_name
 
