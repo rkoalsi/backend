@@ -980,7 +980,17 @@ async def get_customer_requests(
 async def update_request_status(
     request_id: str, status: str, current_user: dict = Depends(get_current_user)
 ):
-    """Update the status of a customer creation request (admin only)"""
+    """
+    Update the status of a customer creation request (admin only).
+
+    Allows changing status to: pending, approved, rejected
+    - pending: Reset request to pending state
+    - approved: Approve and create customer in Zoho Books
+    - rejected: Reject the request
+
+    Status changes are allowed from any status except 'created_on_zoho'.
+    This enables admins to reprocess rejected requests if needed.
+    """
     try:
         db = get_database()
 
@@ -992,19 +1002,17 @@ async def update_request_status(
         if isinstance(user_id, str):
             user_id = ObjectId(user_id)
 
-        # Validate status
-        valid_statuses = [
+        # Validate status - only allow manual changes to these statuses
+        # admin_commented and salesperson_replied are set automatically by comment/reply endpoints
+        allowed_manual_statuses = [
             "pending",
             "approved",
             "rejected",
-            "admin_commented",
-            "salesperson_replied",
-            "created_on_zoho",
         ]
-        if status not in valid_statuses:
+        if status not in allowed_manual_statuses:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid status. Must be one of: {valid_statuses}",
+                detail=f"Invalid status. Must be one of: {allowed_manual_statuses}",
             )
 
         # Get the request details
