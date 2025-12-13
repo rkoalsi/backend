@@ -880,17 +880,38 @@ def handle_estimate(data: dict):
             db.estimates.find_one({"estimate_id": estimate_id})
         )
 
+        # Sort all keys alphabetically
+        sorted_estimate = sort_dict_keys(estimate)
+        current_time = datetime.datetime.now()
+
+        # Parse datetime fields
+        datetime_fields = [
+            'created_time', 'date', 'last_modified_time', 'expiry_date',
+            'created_time_formatted', 'last_modified_time_formatted'
+        ]
+
+        for field in datetime_fields:
+            if field in sorted_estimate and sorted_estimate[field]:
+                parsed_dt = parse_datetime(sorted_estimate[field])
+                if isinstance(parsed_dt, datetime.datetime):
+                    sorted_estimate[field] = parsed_dt
+
         if not exists:
-            db.estimates.insert_one(
-                {
-                    **estimate,
-                    "created_at": datetime.datetime.now(),
-                }
-            )
+            # Create new estimate
+            sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
+            sorted_estimate["updated_at"] = current_time
+            db.estimates.insert_one(sorted_estimate)
         else:
+            # Update existing estimate
+            sorted_estimate["updated_at"] = current_time
+            if "created_at" not in sorted_estimate and "created_at" in exists:
+                sorted_estimate["created_at"] = exists["created_at"]
+            elif "created_at" not in sorted_estimate:
+                sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
+
             db.estimates.update_one(
                 {"estimate_id": estimate_id},
-                {"$set": {**estimate, "updated_at": datetime.datetime.now()}},
+                {"$set": sorted_estimate},
             )
             estimate_number = estimate.get(
                 "estimate_number", exists.get("estimate_number")
