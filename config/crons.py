@@ -1399,8 +1399,8 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
         scheduler_instance.add_job(
             estimates_cron,
             "cron",
-            hour=15,
-            minute=45,
+            hour=16,
+            minute=0,
             id="estimates_cron",
             replace_existing=True,
             misfire_grace_time=300,  # 5 minutes grace period
