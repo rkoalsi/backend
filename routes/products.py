@@ -26,6 +26,7 @@ def get_product(product_id: str, collection: Collection):
 def get_product_counts():
     """
     Returns the number of active products grouped by brand and category.
+    Also includes a count of new products under a special "New Arrivals" brand.
     """
     try:
         base_query = {
@@ -57,6 +58,17 @@ def get_product_counts():
             if brand not in result:
                 result[brand] = {}
             result[brand][category] = item["count"]
+
+        # Add count for "New Arrivals" - products created in last 3 months
+        three_months_ago = datetime.now() - relativedelta(months=3)
+        new_products_count = db.products.count_documents({
+            "stock": {"$gt": 0},
+            "is_deleted": {"$exists": False},
+            "status": "active",
+            "created_at": {"$gte": three_months_ago}
+        })
+
+        result["New Arrivals"] = {"All Products": new_products_count}
 
         return result
 
@@ -235,6 +247,7 @@ def get_products(
         "default", description="Sort order: default, price_asc, price_desc, catalogue"
     ),
     group_by_name: Optional[bool] = Query(False, description="Group products by base name"),
+    new_only: Optional[bool] = Query(False, description="Filter to show only new products (created in last 3 months)"),
 ):
     """
     Retrieves paginated products with optional filters.
@@ -274,6 +287,14 @@ def get_products(
             }
         },
     ]
+
+    # Filter to only new products if new_only is True
+    if new_only:
+        pipeline.append({
+            "$match": {
+                "created_at": {"$gte": three_months_ago}
+            }
+        })
 
     # Adjust query and sort based on sort order
     if sort == "price_asc":
@@ -546,6 +567,234 @@ def get_all_product_categories():
         raise HTTPException(
             status_code=500, detail="Failed to fetch all product categories."
         )
+
+
+@router.get("/catalogue/all_products")
+def get_all_products_catalogue(
+    page: int = Query(1, ge=1, description="Page number, starting from 1"),
+    per_page: int = Query(50, ge=1, le=200, description="Number of items per page"),
+    brand: Optional[str] = Query(None, description="Filter by brand"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    search: Optional[str] = Query(None, description="Search term for name or SKU code"),
+    group_by_name: Optional[bool] = Query(True, description="Group products by base name"),
+    new_only: Optional[bool] = Query(None, description="Filter only new arrivals products"),
+):
+    """
+    PUBLIC ROUTE: Retrieves all active products for the public catalogue.
+    No authentication required. Returns products with basic information for display.
+    Special handling for new_only=true - shows all products created in last 3 months regardless of brand.
+    """
+    query = {
+        "stock": {"$gt": 0},
+        "is_deleted": {"$exists": False},
+        "status": "active",
+    }
+
+    # Don't filter by brand when new_only is true
+    if not new_only and brand:
+        query["brand"] = brand
+
+    if category:
+        query["category"] = category
+
+    if search:
+        regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
+
+    # Calculate three months ago for new products filter
+    three_months_ago = datetime.now() - relativedelta(months=3)
+
+    # Build the aggregation pipeline
+    pipeline = [
+        {"$match": query},
+        # Add "new" field computed from created_at
+        {
+            "$addFields": {
+                "new": {
+                    "$cond": [
+                        {"$gte": ["$created_at", three_months_ago]},
+                        True,
+                        False,
+                    ]
+                }
+            }
+        },
+    ]
+
+    # Filter to only new products if new_only is True
+    if new_only:
+        pipeline.append({
+            "$match": {
+                "created_at": {"$gte": three_months_ago}
+            }
+        })
+
+    # Add default sorting (same as main products route)
+    # Stage 1: Extract color and size
+    pipeline.append({
+        "$addFields": {
+            "extracted_color": {
+                "$arrayElemAt": [
+                    {
+                        "$split": [
+                            {
+                                "$trim": {
+                                    "input": {
+                                        "$arrayElemAt": [
+                                            {"$split": ["$name", "("]},
+                                            0,
+                                        ]
+                                    }
+                                }
+                            },
+                            " ",
+                        ]
+                    },
+                    -1,
+                ]
+            },
+            "extracted_size": {
+                "$regexFind": {
+                    "input": "$name",
+                    "regex": r"\b(XXXXL|XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",
+                }
+            },
+        }
+    })
+
+    # Stage 2: Create size_for_sort from extracted_size
+    pipeline.append({
+        "$addFields": {
+            "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+        }
+    })
+
+    # Stage 3: Create size_order from size_for_sort
+    pipeline.append({
+        "$addFields": {
+            "size_order": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
+                        {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
+                        {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
+                        {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
+                        {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
+                        {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
+                        {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},
+                        {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 8},
+                    ],
+                    "default": 99,
+                }
+            },
+        }
+    })
+
+    # Use exact same sort as main products route (lines 373-383)
+    sort_stage = {
+        "brand": ASCENDING,
+        "category": ASCENDING,
+        "sub_category": ASCENDING,
+        "series": ASCENDING,
+        "extracted_color": ASCENDING,
+        "size_order": ASCENDING,
+        "rate": ASCENDING,
+        "name": ASCENDING,
+    }
+
+    # Add sort stage
+    pipeline.append({"$sort": sort_stage})
+    pipeline.append({"$skip": (page - 1) * per_page})
+    pipeline.append({"$limit": per_page})
+
+    try:
+        fetched_products = list(db.products.aggregate(pipeline))
+    except Exception as e:
+        print(f"Error during aggregation: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    all_products = [serialize_mongo_document(doc) for doc in fetched_products]
+
+    try:
+        total_products = db.products.count_documents(query)
+    except Exception as e:
+        print(f"Error counting documents: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    total_pages = (
+        ((total_products + per_page - 1) // per_page) if total_products > 0 else 1
+    )
+
+    if page > total_pages and total_pages != 0:
+        raise HTTPException(status_code=400, detail="Page number out of range")
+
+    # Get list of distinct brands in new arrivals
+    brands = db.products.distinct("brand", query)
+    brands = [b for b in brands if b]  # Remove empty brands
+
+    # Handle grouping if requested (same logic as main products route)
+    if group_by_name:
+        result_items = []
+        seen_base_names = {}
+
+        for product in all_products:
+            base_name = extract_base_name(product["name"])
+            base_name_key = base_name.lower()
+
+            if base_name_key in seen_base_names:
+                position = seen_base_names[base_name_key]
+                result_items[position]["products"].append(product)
+                result_items[position]["is_group"] = True
+            else:
+                position = len(result_items)
+                seen_base_names[base_name_key] = position
+                result_items.append({
+                    "is_group": False,
+                    "groupId": f"group-{base_name_key.replace(' ', '-')}",
+                    "baseName": base_name,
+                    "products": [product],
+                    "primaryProduct": product,
+                })
+
+        items_in_order = []
+        for item in result_items:
+            if item["is_group"]:
+                items_in_order.append({
+                    "type": "group",
+                    "groupId": item["groupId"],
+                    "baseName": item["baseName"],
+                    "products": item["products"],
+                    "primaryProduct": item["primaryProduct"],
+                })
+            else:
+                items_in_order.append({
+                    "type": "product",
+                    "product": item["products"][0],
+                })
+
+        return {
+            "items": items_in_order,
+            "total": total_products,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "brands": sorted(brands),
+            "brand": brand,
+            "category": category,
+            "search": search,
+        }
+
+    return {
+        "products": all_products,
+        "total": total_products,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "brands": sorted(brands),
+        "brand": brand,
+        "category": category,
+        "search": search,
+    }
 
 
 @router.get("/{product_id}")

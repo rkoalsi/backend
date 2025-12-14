@@ -808,7 +808,8 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 print(f"⚠️ Merged duplicate brand '{brand_name}' into '{existing_key}'")
 
         brand_data = normalized_brand_data
-        sorted_brands = sorted(brand_data.keys())
+        # Exclude "New Arrivals" from spreadsheet generation (it's a virtual brand for frontend display only)
+        sorted_brands = sorted([brand for brand in brand_data.keys() if brand != "New Arrivals"])
 
         # Get existing sheet names to avoid duplicates
         existing_sheets = {sheet["properties"]["title"]: sheet["properties"]["sheetId"]

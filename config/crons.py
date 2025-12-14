@@ -371,9 +371,13 @@ def process_shipment_data(shipment_data):
 
     # Handle all datetime fields - convert to MongoDB date format
     datetime_fields = [
-        "created_time", "date", "last_modified_time",
-        "created_time_formatted", "last_modified_time_formatted",
-        "mail_first_viewed_time", "mail_last_viewed_time"
+        "created_time",
+        "date",
+        "last_modified_time",
+        "created_time_formatted",
+        "last_modified_time_formatted",
+        "mail_first_viewed_time",
+        "mail_last_viewed_time",
     ]
 
     for field in datetime_fields:
@@ -393,9 +397,39 @@ def process_shipment_data(shipment_data):
             shipment_data["created_at"] = shipment_data["date"]
 
     if "created_at" not in shipment_data:
-        logger.warning(f"No created_at field for shipment {shipment_data.get('shipment_id')}")
+        logger.warning(
+            f"No created_at field for shipment {shipment_data.get('shipment_id')}"
+        )
 
     return sort_dict_recursively(shipment_data)
+
+
+def process_estimate_data(estimate_data):
+    """Process estimate data to ensure proper formatting and datetime conversion."""
+    estimate_data["estimate_id"] = str(estimate_data["estimate_id"])
+
+    datetime_fields = ["created_time", "date", "last_modified_time", "expiry_date"]
+
+    for field in datetime_fields:
+        if field in estimate_data:
+            datetime_value = parse_datetime_field(estimate_data[field])
+            if field == "created_time" or field == "date":
+                if field == "date" and "created_time" not in estimate_data:
+                    estimate_data["created_at"] = datetime_value
+                elif field == "created_time":
+                    estimate_data["created_at"] = datetime_value
+                    estimate_data.pop("created_time", None)
+            elif isinstance(datetime_value, datetime):
+                estimate_data[field] = datetime_value
+
+    if "created_at" not in estimate_data:
+        logger.warning(
+            f"No created_at field for estimate {estimate_data.get('estimate_id')}"
+        )
+        if "date" in estimate_data:
+            estimate_data["created_at"] = parse_datetime_field(estimate_data["date"])
+
+    return sort_dict_recursively(estimate_data)
 
 
 def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[str]:
@@ -450,14 +484,17 @@ def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[
 
     return None
 
+
 async def invoices_cron():
     """Cron job for resyncing invoices from previous month till today - delete and reinsert."""
-    logger.info("🚀 Starting invoice resync from previous month till today (delete and reinsert)...")
+    logger.info(
+        "🚀 Starting invoice resync from previous month till today (delete and reinsert)..."
+    )
     start_time = time.time()
-    
+
     # Calculate previous month date range dynamically (from previous month till today)
     today = datetime.now()
-    
+
     # Calculate previous month by subtracting one month
     if today.month == 1:
         # If current month is January, previous month is December of last year
@@ -467,33 +504,41 @@ async def invoices_cron():
         # Otherwise, just subtract 1 from current month
         prev_month = today.month - 1
         prev_year = today.year
-    
+
     # Get first day of previous month
     month_start = datetime(prev_year, prev_month, 1, 0, 0, 0, 0)
-    
+
     # Get end date as today (till current date)
     month_end = today.replace(hour=23, minute=59, second=59, microsecond=999999)
-    
-    period_description = f"{month_start.strftime('%B %Y')} till {today.strftime('%B %d, %Y')}"
-    logger.info(f"📅 Target period: {period_description} ({month_start.date()} to {month_end.date()})")
-    
+
+    period_description = (
+        f"{month_start.strftime('%B %Y')} till {today.strftime('%B %d, %Y')}"
+    )
+    logger.info(
+        f"📅 Target period: {period_description} ({month_start.date()} to {month_end.date()})"
+    )
+
     all_invoices = []
     deleted_count = 0
-    
+
     try:
         db = get_database()
         collection = db["invoices"]
 
         # Step 1: Delete existing invoices for the target period
         logger.info(f"🗑️ Deleting existing invoices from {period_description}...")
-        delete_result = collection.delete_many({
-            "date": {
-                "$gte": month_start.strftime("%Y-%m-%d"),
-                "$lte": month_end.strftime("%Y-%m-%d")
+        delete_result = collection.delete_many(
+            {
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                }
             }
-        })
+        )
         deleted_count = delete_result.deleted_count
-        logger.info(f"✅ Deleted {deleted_count} existing invoices from {period_description}")
+        logger.info(
+            f"✅ Deleted {deleted_count} existing invoices from {period_description}"
+        )
 
         async with ZohoAPIClient("books") as api_client:
             if not api_client.access_token:
@@ -503,14 +548,14 @@ async def invoices_cron():
             # Step 2: Fetch all invoices from the target period
             page = 1
             total_fetched = 0
-            
+
             while True:
                 logger.info(f"Fetching invoices page {page}...")
-                
+
                 # Format dates for API (YYYY-MM-DD)
                 date_from = month_start.strftime("%Y-%m-%d")
                 date_to = month_end.strftime("%Y-%m-%d")
-                
+
                 invoices_url = (
                     f"https://www.zohoapis.com/books/v3/invoices?"
                     f"page={page}&"
@@ -530,8 +575,10 @@ async def invoices_cron():
                 page_invoices = data["invoices"]
                 page_count = len(page_invoices)
                 total_fetched += page_count
-                
-                logger.info(f"Found {page_count} invoices on page {page} (Total: {total_fetched})")
+
+                logger.info(
+                    f"Found {page_count} invoices on page {page} (Total: {total_fetched})"
+                )
 
                 if page_count == 0:
                     break
@@ -540,7 +587,9 @@ async def invoices_cron():
                 invoice_ids = [str(inv["invoice_id"]) for inv in page_invoices]
 
                 # Fetch detailed data for all invoices on this page
-                logger.info(f"Fetching details for {len(invoice_ids)} invoices from page {page}...")
+                logger.info(
+                    f"Fetching details for {len(invoice_ids)} invoices from page {page}..."
+                )
 
                 # Create tasks for fetching invoice details
                 detail_tasks = []
@@ -565,7 +614,9 @@ async def invoices_cron():
                 for i, result in enumerate(detail_results):
                     try:
                         if isinstance(result, Exception):
-                            logger.error(f"Error fetching invoice {invoice_ids[i]}: {result}")
+                            logger.error(
+                                f"Error fetching invoice {invoice_ids[i]}: {result}"
+                            )
                             continue
 
                         if result and "invoice" in result:
@@ -575,28 +626,34 @@ async def invoices_cron():
                     except Exception as e:
                         logger.error(f"Error processing invoice {invoice_ids[i]}: {e}")
 
-                logger.info(f"✅ Processed {page_processed}/{page_count} invoices from page {page}")
+                logger.info(
+                    f"✅ Processed {page_processed}/{page_count} invoices from page {page}"
+                )
 
                 # Check if we have more pages
                 page_info = data.get("page_context", {})
                 has_more_page = page_info.get("has_more_page", False)
-                
-                if not has_more_page or page_count < 200:  # If less than full page, we're done
+
+                if (
+                    not has_more_page or page_count < 200
+                ):  # If less than full page, we're done
                     logger.info("Reached last page or no more data")
                     break
-                
+
                 page += 1
 
             # Step 3: Bulk insert all processed invoices
             if all_invoices:
                 logger.info(f"💾 Inserting {len(all_invoices)} processed invoices...")
                 collection.insert_many(all_invoices, ordered=False)
-                logger.info(f"✅ Successfully inserted {len(all_invoices)} invoices for period: {period_description}")
+                logger.info(
+                    f"✅ Successfully inserted {len(all_invoices)} invoices for period: {period_description}"
+                )
             else:
                 logger.info(f"No invoices to insert for period: {period_description}")
 
             duration = time.time() - start_time
-            
+
             # Send success notification
             send_slack_notification(
                 f"Invoice Resync - {period_description}",
@@ -610,18 +667,228 @@ async def invoices_cron():
                     "duration": duration,
                 },
             )
-            
-            logger.info(f"🎉 Invoice resync from {period_description} completed successfully!")
-            logger.info(f"📊 Summary: Deleted {deleted_count}, Inserted {len(all_invoices)} invoices in {duration:.1f}s")
+
+            logger.info(
+                f"🎉 Invoice resync from {period_description} completed successfully!"
+            )
+            logger.info(
+                f"📊 Summary: Deleted {deleted_count}, Inserted {len(all_invoices)} invoices in {duration:.1f}s"
+            )
 
     except Exception as e:
         error_msg = f"Error in invoice resync from {period_description}: {e}"
         logger.error(error_msg)
         send_slack_notification(
-            f"Invoice Resync Error - {period_description}", 
-            success=False, 
-            error_msg=str(e)
+            f"Invoice Resync Error - {period_description}",
+            success=False,
+            error_msg=str(e),
         )
+
+
+async def estimates_cron():
+    """Cron job for resyncing estimates from previous month till today - delete and reinsert."""
+    logger.info(
+        "🚀 Starting estimate resync from previous month till today (delete and reinsert)..."
+    )
+    start_time = time.time()
+
+    # Calculate previous month date range dynamically (from previous month till today)
+    today = datetime.now()
+
+    # Calculate previous month by subtracting one month
+    if today.month == 1:
+        # If current month is January, previous month is December of last year
+        prev_month = 12
+        prev_year = today.year - 1
+    else:
+        # Otherwise, just subtract 1 from current month
+        prev_month = today.month - 1
+        prev_year = today.year
+
+    # Get first day of previous month
+    month_start = datetime(prev_year, prev_month, 1, 0, 0, 0, 0)
+
+    # Get end date as today (till current date)
+    month_end = today.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    period_description = (
+        f"{month_start.strftime('%B %Y')} till {today.strftime('%B %d, %Y')}"
+    )
+    logger.info(
+        f"📅 Target period: {period_description} ({month_start.date()} to {month_end.date()})"
+    )
+
+    all_estimates = []
+    deleted_count = 0
+
+    try:
+        db = get_database()
+        collection = db["estimates"]
+
+        # Step 1: Delete existing estimates for the target period
+        logger.info(f"🗑️ Deleting existing estimates from {period_description}...")
+        delete_result = collection.delete_many(
+            {
+                "date": {
+                    "$gte": month_start.strftime("%Y-%m-%d"),
+                    "$lte": month_end.strftime("%Y-%m-%d"),
+                }
+            }
+        )
+        deleted_count = delete_result.deleted_count
+        logger.info(
+            f"✅ Deleted {deleted_count} existing estimates from {period_description}"
+        )
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Step 2: Fetch all estimates from the target period
+            page = 1
+            total_fetched = 0
+
+            while True:
+                logger.info(f"Fetching estimates page {page}...")
+
+                # Format dates for API (YYYY-MM-DD)
+                date_from = month_start.strftime("%Y-%m-%d")
+                date_to = month_end.strftime("%Y-%m-%d")
+
+                estimates_url = (
+                    f"https://www.zohoapis.com/books/v3/estimates?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"sort_column=created_time&"
+                    f"sort_order=D&"
+                    f"date_start={date_from}&"
+                    f"date_end={date_to}&"
+                    f"organization_id={org_id}"
+                )
+
+                data = await api_client.make_request(estimates_url)
+                if not data or "estimates" not in data:
+                    logger.info(f"No estimates found on page {page}")
+                    break
+
+                page_estimates = data["estimates"]
+                page_count = len(page_estimates)
+                total_fetched += page_count
+
+                logger.info(
+                    f"Found {page_count} estimates on page {page} (Total: {total_fetched})"
+                )
+
+                if page_count == 0:
+                    break
+
+                # Collect estimate IDs for detailed fetching
+                estimate_ids = [str(est["estimate_id"]) for est in page_estimates]
+
+                # Fetch detailed data for all estimates on this page
+                logger.info(
+                    f"Fetching details for {len(estimate_ids)} estimates from page {page}..."
+                )
+
+                # Create tasks for fetching estimate details
+                detail_tasks = []
+                for est_id in estimate_ids:
+                    detail_url = f"https://www.zohoapis.com/books/v3/estimates/{est_id}?organization_id={org_id}"
+                    detail_tasks.append(api_client.make_request(detail_url))
+
+                # Execute all detail requests with limited concurrency
+                semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
+
+                async def fetch_detail_with_semaphore(task):
+                    async with semaphore:
+                        return await task
+
+                detail_results = await asyncio.gather(
+                    *[fetch_detail_with_semaphore(task) for task in detail_tasks],
+                    return_exceptions=True,
+                )
+
+                # Process results from this page
+                page_processed = 0
+                for i, result in enumerate(detail_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(
+                                f"Error fetching estimate {estimate_ids[i]}: {result}"
+                            )
+                            continue
+
+                        if result and "estimate" in result:
+                            processed_estimate = process_estimate_data(
+                                result["estimate"]
+                            )
+                            all_estimates.append(processed_estimate)
+                            page_processed += 1
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing estimate {estimate_ids[i]}: {e}"
+                        )
+
+                logger.info(
+                    f"✅ Processed {page_processed}/{page_count} estimates from page {page}"
+                )
+
+                # Check if we have more pages
+                page_info = data.get("page_context", {})
+                has_more_page = page_info.get("has_more_page", False)
+
+                if (
+                    not has_more_page or page_count < 200
+                ):  # If less than full page, we're done
+                    logger.info("Reached last page or no more data")
+                    break
+
+                page += 1
+
+            # Step 3: Bulk insert all processed estimates
+            if all_estimates:
+                logger.info(f"💾 Inserting {len(all_estimates)} processed estimates...")
+                collection.insert_many(all_estimates, ordered=False)
+                logger.info(
+                    f"✅ Successfully inserted {len(all_estimates)} estimates for period: {period_description}"
+                )
+            else:
+                logger.info(f"No estimates to insert for period: {period_description}")
+
+            duration = time.time() - start_time
+
+            # Send success notification
+            send_slack_notification(
+                f"Estimate Resync - {period_description}",
+                success=True,
+                details={
+                    "period": period_description,
+                    "deleted": deleted_count,
+                    "inserted": len(all_estimates),
+                    "total_fetched": total_fetched,
+                    "pages": page,
+                    "duration": duration,
+                },
+            )
+
+            logger.info(
+                f"🎉 Estimate resync from {period_description} completed successfully!"
+            )
+            logger.info(
+                f"📊 Summary: Deleted {deleted_count}, Inserted {len(all_estimates)} estimates in {duration:.1f}s"
+            )
+
+    except Exception as e:
+        error_msg = f"Error in estimate resync from {period_description}: {e}"
+        logger.error(error_msg)
+        send_slack_notification(
+            f"Estimate Resync Error - {period_description}",
+            success=False,
+            error_msg=str(e),
+        )
+
+
 async def credit_notes_cron():
     """Cron job for syncing recent credit notes from first 2 pages."""
     logger.info("🚀 Starting incremental credit notes sync (first 2 pages)...")
@@ -789,7 +1056,9 @@ async def shipments_cron():
             total_pages = page_context.get("total_pages", 1)
             total_shipments = page_context.get("total", 0)
 
-            logger.info(f"📊 Found {total_shipments} total shipments across {total_pages} pages")
+            logger.info(
+                f"📊 Found {total_shipments} total shipments across {total_pages} pages"
+            )
             logger.info(f"🚀 Starting reverse processing: Page {total_pages} → Page 1")
 
             # Process pages in reverse order (oldest first)
@@ -809,7 +1078,9 @@ async def shipments_cron():
                     continue
 
                 # Get shipments from response
-                page_shipments = page_data.get("shipmentorders") or page_data.get("shipment_orders")
+                page_shipments = page_data.get("shipmentorders") or page_data.get(
+                    "shipment_orders"
+                )
                 if not page_shipments:
                     logger.warning(f"No shipments found for page {page}")
                     continue
@@ -822,33 +1093,39 @@ async def shipments_cron():
 
                 for shipment in page_shipments:
                     ship_id = str(
-                        shipment.get("shipment_order_id") or
-                        shipment.get("shipmentorder_id") or
-                        shipment.get("shipment_id") or
-                        ""
+                        shipment.get("shipment_order_id")
+                        or shipment.get("shipmentorder_id")
+                        or shipment.get("shipment_id")
+                        or ""
                     )
                     if not ship_id:
                         continue
 
                     total_processed += 1
-                    existing_doc = collection.find_one({"shipment_id": ship_id}, {"_id": 1})
+                    existing_doc = collection.find_one(
+                        {"shipment_id": ship_id}, {"_id": 1}
+                    )
                     if not existing_doc:
                         new_shipment_ids.append(ship_id)
                     else:
                         existing_count += 1
 
-                logger.info(f"Page {page}: {len(new_shipment_ids)} new, {existing_count} existing")
+                logger.info(
+                    f"Page {page}: {len(new_shipment_ids)} new, {existing_count} existing"
+                )
 
                 if new_shipment_ids:
                     # Fetch details for new shipments
-                    logger.info(f"Fetching details for {len(new_shipment_ids)} shipments...")
+                    logger.info(
+                        f"Fetching details for {len(new_shipment_ids)} shipments..."
+                    )
 
                     shipments_to_insert = []
 
                     # Process in batches
                     batch_size = 5
                     for i in range(0, len(new_shipment_ids), batch_size):
-                        batch_ids = new_shipment_ids[i:i + batch_size]
+                        batch_ids = new_shipment_ids[i : i + batch_size]
 
                         detail_tasks = []
                         for ship_id in batch_ids:
@@ -858,18 +1135,24 @@ async def shipments_cron():
                             )
                             detail_tasks.append(api_client.make_request(detail_url))
 
-                        results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+                        results = await asyncio.gather(
+                            *detail_tasks, return_exceptions=True
+                        )
 
                         for j, result in enumerate(results):
                             try:
                                 if isinstance(result, Exception):
-                                    logger.error(f"Error fetching shipment {batch_ids[j]}: {result}")
+                                    logger.error(
+                                        f"Error fetching shipment {batch_ids[j]}: {result}"
+                                    )
                                     total_errors += 1
                                     continue
 
                                 shipment_detail = None
                                 if result:
-                                    shipment_detail = result.get("shipment_order") or result.get("shipmentorder")
+                                    shipment_detail = result.get(
+                                        "shipment_order"
+                                    ) or result.get("shipmentorder")
 
                                 if shipment_detail:
                                     processed = process_shipment_data(shipment_detail)
@@ -883,12 +1166,18 @@ async def shipments_cron():
                     # Bulk insert
                     if shipments_to_insert:
                         try:
-                            result = collection.insert_many(shipments_to_insert, ordered=False)
+                            result = collection.insert_many(
+                                shipments_to_insert, ordered=False
+                            )
                             inserted = len(result.inserted_ids)
                             total_inserted += inserted
-                            logger.info(f"✅ Inserted {inserted} shipments from page {page}")
+                            logger.info(
+                                f"✅ Inserted {inserted} shipments from page {page}"
+                            )
                         except Exception as e:
-                            logger.error(f"Error during bulk insert for page {page}: {e}")
+                            logger.error(
+                                f"Error during bulk insert for page {page}: {e}"
+                            )
                             # Fallback to individual inserts
                             for doc in shipments_to_insert:
                                 try:
@@ -905,7 +1194,9 @@ async def shipments_cron():
             duration = time.time() - start_time
 
             logger.info(f"🎉 Shipments sync completed!")
-            logger.info(f"📊 Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}")
+            logger.info(
+                f"📊 Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+            )
 
             send_slack_notification(
                 "Shipments Cron",
@@ -938,7 +1229,9 @@ async def stock_cron():
         target_date = datetime.strptime(yesterday, "%Y-%m-%d")
 
         # Check if we already have data for this date
-        existing_count = warehouse_stock_collection.count_documents({"date": target_date})
+        existing_count = warehouse_stock_collection.count_documents(
+            {"date": target_date}
+        )
         if existing_count > 0:
             logger.info(
                 f"Warehouse stock data for {yesterday} already exists ({existing_count} records)"
@@ -982,7 +1275,9 @@ async def stock_cron():
                     if page_data and "warehouse_stock_info" in page_data:
                         warehouse_stock.extend(page_data["warehouse_stock_info"])
 
-            logger.info(f"Processing {len(warehouse_stock)} warehouse stock items for {yesterday}")
+            logger.info(
+                f"Processing {len(warehouse_stock)} warehouse stock items for {yesterday}"
+            )
 
             # Process warehouse stock - store ALL warehouses
             processed_items = {}
@@ -1000,7 +1295,9 @@ async def stock_cron():
                         warehouse_name = warehouse_entry.get("warehouse_name")
                         if warehouse_name:
                             item_name = warehouse_entry.get("item_name")
-                            quantity = int(warehouse_entry.get("quantity_available_for_sale", 0))
+                            quantity = int(
+                                warehouse_entry.get("quantity_available_for_sale", 0)
+                            )
                             warehouses_data[warehouse_name] = quantity
 
                 # Handle OLD API structure (warehouses array)
@@ -1009,7 +1306,9 @@ async def stock_cron():
                     for warehouse in item.get("warehouses", []):
                         warehouse_name = warehouse.get("warehouse_name")
                         if warehouse_name:
-                            quantity = int(warehouse.get("quantity_available_for_sale", 0))
+                            quantity = int(
+                                warehouse.get("quantity_available_for_sale", 0)
+                            )
                             warehouses_data[warehouse_name] = quantity
 
                 # Handle direct warehouse entry
@@ -1040,7 +1339,7 @@ async def stock_cron():
                     "item_name": item_name,
                     "warehouses": warehouses,
                     "date": target_date,
-                    "created_at": datetime.now()
+                    "created_at": datetime.now(),
                 }
 
                 # Add product_id and zoho_item_id if product found
@@ -1079,22 +1378,40 @@ async def stock_cron():
         logger.error(f"Error in warehouse stock sync: {e}")
         send_slack_notification("Stock Cron Error", success=False, error_msg=str(e))
 
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
         # Clear existing jobs to avoid duplicates
         scheduler_instance.remove_all_jobs()
-        
+        logger.info("Removed all existing jobs to avoid duplicates")
+
         # Add jobs with timezone awareness
         scheduler_instance.add_job(
             invoices_cron,
             "cron",
             hour=15,
-            minute=40,
+            minute=30,
             id="invoices_cron",
             replace_existing=True,
-            misfire_grace_time=300  # 5 minutes grace period
+            misfire_grace_time=600,  # 10 minutes grace period
+            coalesce=True,  # Combine multiple missed runs into one
+            max_instances=1,  # Only one instance of the job can run at a time
         )
+        logger.info("Added invoices_cron job")
+
+        scheduler_instance.add_job(
+            estimates_cron,
+            "cron",
+            hour=16,
+            minute=0,
+            id="estimates_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added estimates_cron job")
 
         scheduler_instance.add_job(
             credit_notes_cron,
@@ -1103,9 +1420,12 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=0,
             id="credit_notes_cron",
             replace_existing=True,
-            misfire_grace_time=300
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
-        
+        logger.info("Added credit_notes_cron job")
+
         scheduler_instance.add_job(
             shipments_cron,
             "cron",
@@ -1113,60 +1433,159 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=15,
             id="shipments_cron",
             replace_existing=True,
-            misfire_grace_time=300
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
+        logger.info("Added shipments_cron job")
 
         scheduler_instance.add_job(
             stock_cron,
             "cron",
             hour=15,
-            minute=30,
+            minute=20,
             id="stock_cron",
             replace_existing=True,
-            misfire_grace_time=300
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added stock_cron job")
+
+        logger.info(
+            f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
         )
 
-        logger.info(f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully")
-        
         # Log next run times for debugging
         for job in scheduler_instance.get_jobs():
             logger.info(f"📅 Job '{job.id}' next run: {job.next_run_time}")
-            
+
     except Exception as e:
-        logger.error(f"❌ Error setting up cron jobs: {e}")
+        logger.error(f"❌ Error setting up cron jobs: {e}", exc_info=True)
         raise
 
-jobstores = {
-    "default": {
-        "type": "mongodb",
-        "host": os.getenv("MONGO_URI"),
-        "port": 27017,
-        "database": os.getenv("DB_NAME"),
-        "collection": "cron_jobs",
-    }
-}
 
-scheduler = AsyncIOScheduler(jobstores=jobstores)
+# Use MemoryJobStore for better reliability - MongoDB jobstore can cause silent failures
+# Jobs will be reconfigured on each server restart (which is acceptable for daily cron jobs)
+scheduler = AsyncIOScheduler()
+
+# Store last execution times for monitoring
+last_execution_times = {}
+job_execution_count = {}
 
 
 def _job_event_listener(event):
+    """Enhanced job event listener with detailed logging and tracking."""
+    job_id = event.job_id
+
     if event.exception:
-        logging.error(f"Job {event.job_id} raised an exception!")
+        logger.error(f"❌ Job '{job_id}' FAILED with exception: {event.exception}", exc_info=True)
+        logger.error(f"❌ Exception type: {type(event.exception).__name__}")
+        logger.error(f"❌ Exception details: {str(event.exception)}")
+
+        # Send Slack notification for job failures
+        try:
+            send_slack_notification(
+                f"Cron Job Failed: {job_id}",
+                success=False,
+                error_msg=f"{type(event.exception).__name__}: {str(event.exception)}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send Slack notification for job failure: {e}")
     else:
-        logging.info(f"Job {event.job_id} completed successfully!")
+        logger.info(f"✅ Job '{job_id}' completed successfully!")
+        last_execution_times[job_id] = datetime.now()
+        job_execution_count[job_id] = job_execution_count.get(job_id, 0) + 1
+        logger.info(f"📊 Job '{job_id}' has run {job_execution_count[job_id]} times total")
+
+
+def get_scheduler_status():
+    """Get current scheduler status for monitoring."""
+    status = {
+        "scheduler_running": scheduler.running,
+        "jobs": [],
+        "last_executions": {},
+        "execution_counts": job_execution_count.copy()
+    }
+
+    for job in scheduler.get_jobs():
+        status["jobs"].append({
+            "id": job.id,
+            "name": job.name,
+            "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+            "misfire_grace_time": job.misfire_grace_time,
+        })
+
+    for job_id, last_time in last_execution_times.items():
+        status["last_executions"][job_id] = str(last_time)
+
+    return status
 
 
 def cron_startup():
-    logging.info("Starting Cron Scheduler...")
-    scheduler.start()
-    setup_cron_jobs(scheduler)
-    scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
-    logging.info("Scheduler started.")
+    """Start the cron scheduler with enhanced error handling and logging."""
+    try:
+        logger.info("=" * 80)
+        logger.info("🚀 Starting Cron Scheduler...")
+        logger.info("=" * 80)
+
+        # Check if scheduler is already running
+        if scheduler.running:
+            logger.warning("⚠️  Scheduler is already running, skipping startup")
+            return
+
+        # Start the scheduler
+        scheduler.start()
+        logger.info("✅ Scheduler engine started successfully")
+
+        # Setup all cron jobs
+        setup_cron_jobs(scheduler)
+
+        # Add event listener for job execution tracking
+        scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+        logger.info("✅ Event listener added for job tracking")
+
+        logger.info("=" * 80)
+        logger.info("🎉 Scheduler started successfully!")
+        logger.info(f"📊 Total jobs configured: {len(scheduler.get_jobs())}")
+        logger.info("=" * 80)
+
+        # Log initial status
+        status = get_scheduler_status()
+        logger.info(f"Scheduler Status: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ CRITICAL ERROR during cron startup: {e}", exc_info=True)
+        # Try to send Slack notification about startup failure
+        try:
+            send_slack_notification(
+                "Cron Scheduler Startup Failed",
+                success=False,
+                error_msg=f"Failed to start scheduler: {str(e)}"
+            )
+        except:
+            pass
+        raise
 
 
 def cron_shutdown():
-    logging.info("Shutting down Cron Scheduler...")
-    scheduler.shutdown()
+    """Shutdown the cron scheduler gracefully."""
+    try:
+        logger.info("=" * 80)
+        logger.info("🛑 Shutting down Cron Scheduler...")
+        logger.info("=" * 80)
 
+        if scheduler.running:
+            # Log final execution counts before shutdown
+            for job_id, count in job_execution_count.items():
+                logger.info(f"📊 Job '{job_id}' executed {count} times this session")
 
+            scheduler.shutdown(wait=True)
+            logger.info("✅ Scheduler shutdown complete")
+        else:
+            logger.warning("⚠️  Scheduler was not running")
 
+        logger.info("=" * 80)
+
+    except Exception as e:
+        logger.error(f"❌ Error during cron shutdown: {e}", exc_info=True)
