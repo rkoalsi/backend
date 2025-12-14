@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from .helpers import validate_file, process_upload
 import threading, logging
 from ..config.root import get_database, serialize_mongo_document
+from ..config.crons import get_scheduler_status
 import httpx
 
 router = APIRouter()
@@ -202,3 +203,25 @@ async def get_indian_cities():
         # If external API fails for any reason, use the hardcoded list
         logger.warning(f"Could not fetch from external API ({str(e)}), using hardcoded list")
         return {"cities": sorted(INDIAN_CITIES)}
+
+
+@router.get("/cron-status")
+def get_cron_status():
+    """
+    Health check endpoint for monitoring cron jobs.
+
+    Returns:
+        - scheduler_running: Whether the scheduler is active
+        - jobs: List of configured jobs with their next run times
+        - last_executions: When each job last executed
+        - execution_counts: How many times each job has run
+    """
+    try:
+        status = get_scheduler_status()
+        return JSONResponse(content=status, status_code=200)
+    except Exception as e:
+        logger.error(f"Error getting cron status: {e}")
+        return JSONResponse(
+            content={"error": str(e), "scheduler_running": False},
+            status_code=500
+        )
