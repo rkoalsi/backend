@@ -1391,7 +1391,7 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             invoices_cron,
             "cron",
             hour=15,
-            minute=40,
+            minute=30,
             id="invoices_cron",
             replace_existing=True,
             misfire_grace_time=600,  # 10 minutes grace period
@@ -1443,7 +1443,7 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             stock_cron,
             "cron",
             hour=15,
-            minute=30,
+            minute=20,
             id="stock_cron",
             replace_existing=True,
             misfire_grace_time=600,
