@@ -1384,6 +1384,7 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     try:
         # Clear existing jobs to avoid duplicates
         scheduler_instance.remove_all_jobs()
+        logger.info("Removed all existing jobs to avoid duplicates")
 
         # Add jobs with timezone awareness
         scheduler_instance.add_job(
@@ -1393,8 +1394,11 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=40,
             id="invoices_cron",
             replace_existing=True,
-            misfire_grace_time=300,  # 5 minutes grace period
+            misfire_grace_time=600,  # 10 minutes grace period
+            coalesce=True,  # Combine multiple missed runs into one
+            max_instances=1,  # Only one instance of the job can run at a time
         )
+        logger.info("Added invoices_cron job")
 
         scheduler_instance.add_job(
             estimates_cron,
@@ -1403,8 +1407,11 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=0,
             id="estimates_cron",
             replace_existing=True,
-            misfire_grace_time=300,  # 5 minutes grace period
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
+        logger.info("Added estimates_cron job")
 
         scheduler_instance.add_job(
             credit_notes_cron,
@@ -1413,8 +1420,11 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=0,
             id="credit_notes_cron",
             replace_existing=True,
-            misfire_grace_time=300,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
+        logger.info("Added credit_notes_cron job")
 
         scheduler_instance.add_job(
             shipments_cron,
@@ -1423,8 +1433,11 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=15,
             id="shipments_cron",
             replace_existing=True,
-            misfire_grace_time=300,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
+        logger.info("Added shipments_cron job")
 
         scheduler_instance.add_job(
             stock_cron,
@@ -1433,8 +1446,11 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             minute=30,
             id="stock_cron",
             replace_existing=True,
-            misfire_grace_time=300,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
         )
+        logger.info("Added stock_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
@@ -1445,38 +1461,131 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             logger.info(f"📅 Job '{job.id}' next run: {job.next_run_time}")
 
     except Exception as e:
-        logger.error(f"❌ Error setting up cron jobs: {e}")
+        logger.error(f"❌ Error setting up cron jobs: {e}", exc_info=True)
         raise
 
 
-jobstores = {
-    "default": {
-        "type": "mongodb",
-        "host": os.getenv("MONGO_URI"),
-        "port": 27017,
-        "database": os.getenv("DB_NAME"),
-        "collection": "cron_jobs",
-    }
-}
+# Use MemoryJobStore for better reliability - MongoDB jobstore can cause silent failures
+# Jobs will be reconfigured on each server restart (which is acceptable for daily cron jobs)
+scheduler = AsyncIOScheduler()
 
-scheduler = AsyncIOScheduler(jobstores=jobstores)
+# Store last execution times for monitoring
+last_execution_times = {}
+job_execution_count = {}
 
 
 def _job_event_listener(event):
+    """Enhanced job event listener with detailed logging and tracking."""
+    job_id = event.job_id
+
     if event.exception:
-        logging.error(f"Job {event.job_id} raised an exception!")
+        logger.error(f"❌ Job '{job_id}' FAILED with exception: {event.exception}", exc_info=True)
+        logger.error(f"❌ Exception type: {type(event.exception).__name__}")
+        logger.error(f"❌ Exception details: {str(event.exception)}")
+
+        # Send Slack notification for job failures
+        try:
+            send_slack_notification(
+                f"Cron Job Failed: {job_id}",
+                success=False,
+                error_msg=f"{type(event.exception).__name__}: {str(event.exception)}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send Slack notification for job failure: {e}")
     else:
-        logging.info(f"Job {event.job_id} completed successfully!")
+        logger.info(f"✅ Job '{job_id}' completed successfully!")
+        last_execution_times[job_id] = datetime.now()
+        job_execution_count[job_id] = job_execution_count.get(job_id, 0) + 1
+        logger.info(f"📊 Job '{job_id}' has run {job_execution_count[job_id]} times total")
+
+
+def get_scheduler_status():
+    """Get current scheduler status for monitoring."""
+    status = {
+        "scheduler_running": scheduler.running,
+        "jobs": [],
+        "last_executions": {},
+        "execution_counts": job_execution_count.copy()
+    }
+
+    for job in scheduler.get_jobs():
+        status["jobs"].append({
+            "id": job.id,
+            "name": job.name,
+            "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+            "misfire_grace_time": job.misfire_grace_time,
+        })
+
+    for job_id, last_time in last_execution_times.items():
+        status["last_executions"][job_id] = str(last_time)
+
+    return status
 
 
 def cron_startup():
-    logging.info("Starting Cron Scheduler...")
-    scheduler.start()
-    setup_cron_jobs(scheduler)
-    scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
-    logging.info("Scheduler started.")
+    """Start the cron scheduler with enhanced error handling and logging."""
+    try:
+        logger.info("=" * 80)
+        logger.info("🚀 Starting Cron Scheduler...")
+        logger.info("=" * 80)
+
+        # Check if scheduler is already running
+        if scheduler.running:
+            logger.warning("⚠️  Scheduler is already running, skipping startup")
+            return
+
+        # Start the scheduler
+        scheduler.start()
+        logger.info("✅ Scheduler engine started successfully")
+
+        # Setup all cron jobs
+        setup_cron_jobs(scheduler)
+
+        # Add event listener for job execution tracking
+        scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+        logger.info("✅ Event listener added for job tracking")
+
+        logger.info("=" * 80)
+        logger.info("🎉 Scheduler started successfully!")
+        logger.info(f"📊 Total jobs configured: {len(scheduler.get_jobs())}")
+        logger.info("=" * 80)
+
+        # Log initial status
+        status = get_scheduler_status()
+        logger.info(f"Scheduler Status: {status}")
+
+    except Exception as e:
+        logger.error(f"❌ CRITICAL ERROR during cron startup: {e}", exc_info=True)
+        # Try to send Slack notification about startup failure
+        try:
+            send_slack_notification(
+                "Cron Scheduler Startup Failed",
+                success=False,
+                error_msg=f"Failed to start scheduler: {str(e)}"
+            )
+        except:
+            pass
+        raise
 
 
 def cron_shutdown():
-    logging.info("Shutting down Cron Scheduler...")
-    scheduler.shutdown()
+    """Shutdown the cron scheduler gracefully."""
+    try:
+        logger.info("=" * 80)
+        logger.info("🛑 Shutting down Cron Scheduler...")
+        logger.info("=" * 80)
+
+        if scheduler.running:
+            # Log final execution counts before shutdown
+            for job_id, count in job_execution_count.items():
+                logger.info(f"📊 Job '{job_id}' executed {count} times this session")
+
+            scheduler.shutdown(wait=True)
+            logger.info("✅ Scheduler shutdown complete")
+        else:
+            logger.warning("⚠️  Scheduler was not running")
+
+        logger.info("=" * 80)
+
+    except Exception as e:
+        logger.error(f"❌ Error during cron shutdown: {e}", exc_info=True)
