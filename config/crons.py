@@ -433,50 +433,62 @@ def process_estimate_data(estimate_data):
 
 
 def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[str]:
-    """Find product ID by querying MongoDB with various matching strategies."""
+    """
+    Find product ID by querying MongoDB with dual matching strategy.
+    Strategy 1: Match by products.name (exact match)
+    Strategy 2: Match by products.item_name (fallback)
+    Strategy 3: Case-insensitive regex match
+    """
     if not item_name:
         return None
 
     item_name_clean = item_name.strip()
 
-    # Strategy 1: Exact match (case-insensitive)
+    # Strategy 1: Exact match on products.name field (primary)
     product = products_collection.find_one(
-        {"$or": [{"item_name": item_name_clean}, {"name": item_name_clean}]}, {"_id": 1}
+        {"name": item_name_clean}, {"_id": 1}
     )
-
     if product:
         return product["_id"]
 
-    # Strategy 2: Case-insensitive exact match
+    # Strategy 2: Exact match on products.item_name field (fallback)
+    product = products_collection.find_one(
+        {"item_name": item_name_clean}, {"_id": 1}
+    )
+    if product:
+        return product["_id"]
+
+    # Strategy 3: Case-insensitive exact match on products.name
     product = products_collection.find_one(
         {
-            "$or": [
-                {
-                    "item_name": {
-                        "$regex": f"^{re.escape(item_name_clean)}$",
-                        "$options": "i",
-                    }
-                },
-                {
-                    "name": {
-                        "$regex": f"^{re.escape(item_name_clean)}$",
-                        "$options": "i",
-                    }
-                },
-            ]
+            "name": {
+                "$regex": f"^{re.escape(item_name_clean)}$",
+                "$options": "i",
+            }
         },
         {"_id": 1},
     )
-
     if product:
         return product["_id"]
 
-    # Strategy 3: Simple text search using MongoDB text search (if text index exists)
+    # Strategy 4: Case-insensitive exact match on products.item_name
+    product = products_collection.find_one(
+        {
+            "item_name": {
+                "$regex": f"^{re.escape(item_name_clean)}$",
+                "$options": "i",
+            }
+        },
+        {"_id": 1},
+    )
+    if product:
+        return product["_id"]
+
+    # Strategy 5: Simple text search using MongoDB text search (if text index exists)
     try:
         product = products_collection.find_one(
             {"$text": {"$search": item_name_clean}}, {"_id": 1}
         )
-
         if product:
             return product["_id"]
     except Exception:
@@ -1333,7 +1345,9 @@ async def stock_cron():
             documents = []
             for item_name, warehouses in processed_items.items():
                 # Look up product in products collection
-                product = products_collection.find_one({"item_name": item_name})
+                product = products_collection.find_one(
+                    {"name": item_name}
+                ) or products_collection.find_one({"item_name": item_name})
 
                 doc = {
                     "item_name": item_name,
@@ -1479,7 +1493,9 @@ def _job_event_listener(event):
     job_id = event.job_id
 
     if event.exception:
-        logger.error(f"❌ Job '{job_id}' FAILED with exception: {event.exception}", exc_info=True)
+        logger.error(
+            f"❌ Job '{job_id}' FAILED with exception: {event.exception}", exc_info=True
+        )
         logger.error(f"❌ Exception type: {type(event.exception).__name__}")
         logger.error(f"❌ Exception details: {str(event.exception)}")
 
@@ -1488,7 +1504,7 @@ def _job_event_listener(event):
             send_slack_notification(
                 f"Cron Job Failed: {job_id}",
                 success=False,
-                error_msg=f"{type(event.exception).__name__}: {str(event.exception)}"
+                error_msg=f"{type(event.exception).__name__}: {str(event.exception)}",
             )
         except Exception as e:
             logger.error(f"Failed to send Slack notification for job failure: {e}")
@@ -1496,7 +1512,9 @@ def _job_event_listener(event):
         logger.info(f"✅ Job '{job_id}' completed successfully!")
         last_execution_times[job_id] = datetime.now()
         job_execution_count[job_id] = job_execution_count.get(job_id, 0) + 1
-        logger.info(f"📊 Job '{job_id}' has run {job_execution_count[job_id]} times total")
+        logger.info(
+            f"📊 Job '{job_id}' has run {job_execution_count[job_id]} times total"
+        )
 
 
 def get_scheduler_status():
@@ -1505,16 +1523,18 @@ def get_scheduler_status():
         "scheduler_running": scheduler.running,
         "jobs": [],
         "last_executions": {},
-        "execution_counts": job_execution_count.copy()
+        "execution_counts": job_execution_count.copy(),
     }
 
     for job in scheduler.get_jobs():
-        status["jobs"].append({
-            "id": job.id,
-            "name": job.name,
-            "next_run_time": str(job.next_run_time) if job.next_run_time else None,
-            "misfire_grace_time": job.misfire_grace_time,
-        })
+        status["jobs"].append(
+            {
+                "id": job.id,
+                "name": job.name,
+                "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+                "misfire_grace_time": job.misfire_grace_time,
+            }
+        )
 
     for job_id, last_time in last_execution_times.items():
         status["last_executions"][job_id] = str(last_time)
@@ -1542,7 +1562,9 @@ def cron_startup():
         setup_cron_jobs(scheduler)
 
         # Add event listener for job execution tracking
-        scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+        scheduler.add_listener(
+            _job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR
+        )
         logger.info("✅ Event listener added for job tracking")
 
         logger.info("=" * 80)
@@ -1561,7 +1583,7 @@ def cron_startup():
             send_slack_notification(
                 "Cron Scheduler Startup Failed",
                 success=False,
-                error_msg=f"Failed to start scheduler: {str(e)}"
+                error_msg=f"Failed to start scheduler: {str(e)}",
             )
         except:
             pass
