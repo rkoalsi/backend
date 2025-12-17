@@ -18,6 +18,10 @@ origins = [
     "http://127.0.0.1:8080",
     "https://orderform.pupscribe.in",  # Frontend (home route)
     "http://orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://pupscribe.in",  # Main domain
+    "http://pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://www.pupscribe.in",  # WWW subdomain
+    "http://www.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
 ]
 
 # Initialize the app
