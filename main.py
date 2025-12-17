@@ -8,7 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes.api import router
 from .config.root import get_database, disconnect_on_exit
 from .config.crons import cron_shutdown, cron_startup
-from .config.scheduler import notification_scheduler_startup, notification_scheduler_shutdown, scheduler
+from .config.scheduler import (
+    notification_scheduler_startup,
+    notification_scheduler_shutdown,
+    scheduler,
+)
 import uvicorn
 
 origins = [
@@ -17,7 +21,9 @@ origins = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     "https://orderform.pupscribe.in",  # Frontend (home route)
-    "http://orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "http://orderform.pupscribe.in",  # HTTP fallback (will redirect to HTTPS)
+    "https://pupscribe.in",
+    "http://pupscribe.in",
 ]
 
 # Initialize the app
@@ -29,7 +35,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # Use specific origins instead of ["*"] for better security
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Specify allowed methods
+    allow_methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "OPTIONS",
+    ],  # Specify allowed methods
     allow_headers=["*"],
 )
 
