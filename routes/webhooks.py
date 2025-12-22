@@ -416,7 +416,7 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
     print(f"Fetching stock for {now_date.strftime('%b')}-{year} with date {to_date}")
 
     warehouse_stock = []
-    access_token = get_cached_access_token()
+    access_token = get_access_token('inventory')
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
     # Define target warehouse names (both formats for compatibility)
