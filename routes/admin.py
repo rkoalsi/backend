@@ -33,6 +33,7 @@ from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
+from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_attendance import router as admin_attendance_router
 from ..config.auth import JWTBearer
 import pandas as pd
@@ -2911,5 +2912,11 @@ router.include_router(
     admin_attendance_router,
     prefix="/attendance",
     tags=["Employee Attendance"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_catalogue_leads_router,
+    prefix="/catalogue_leads",
+    tags=["Catalogue Leads"],
     dependencies=[Depends(JWTBearer())],
 )
