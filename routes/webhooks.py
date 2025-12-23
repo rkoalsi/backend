@@ -305,6 +305,8 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 update_data["manufacturer"] = item.get("manufacturer", "")
             if "status" in item:
                 update_data["status"] = item.get("status", "")
+            if "upc" in item:
+                update_data["upc_code"] = item.get("upc", "")
             # Iterate over other fields to detect changes
             for field, value in item.items():
                 # Exclude 'status', 'created_time', 'last_modified_time', and 'created_at' from updates
