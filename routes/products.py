@@ -174,7 +174,7 @@ def extract_base_name(product_name: str) -> str:
 
     # Define size patterns (both abbreviated and full words)
     # IMPORTANT: Longer sizes must come first to avoid partial matches (XXXXL before XXXL before XXL before XL before L)
-    size_pattern_abbrev = '(XXXXL|XXXL|XXL|XL|XXS|XS|S|M|L)'
+    size_pattern_abbrev = '(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)'
     size_pattern_full = '(X-Large|X-Small|XX-Large|XXX-Large|Extra Large|Extra Small|Large|Medium|Small)'
 
     # NEW: Remove (SIZE/measurement) pattern first - e.g., (XXL/62CM), (M/32CM), （XL/48CM）
@@ -336,7 +336,7 @@ def get_products(
                 "extracted_size": {
                     "$regexFind": {
                         "input": "$name",
-                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
+                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
                     }
                 },
             }
@@ -355,14 +355,17 @@ def get_products(
                 "size_order": {
                     "$switch": {
                         "branches": [
-                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
-                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
-                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
-                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
-                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
-                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
-                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},
-                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 8},
+                            {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
+                            {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
+                            {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
+                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
+                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
+                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
+                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
+                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
+                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
+                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
+                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
                         ],
                         "default": 99,
                     }
@@ -656,7 +659,7 @@ def get_all_products_catalogue(
             "extracted_size": {
                 "$regexFind": {
                     "input": "$name",
-                    "regex": r"\b(XXXXL|XXXL|XXL|XL|XXS|XXXS|XS|S|M|L)\b",
+                    "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",
                 }
             },
         }
@@ -675,14 +678,17 @@ def get_all_products_catalogue(
             "size_order": {
                 "$switch": {
                     "branches": [
-                        {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 1},
-                        {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 2},
-                        {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 3},
-                        {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 4},
-                        {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 5},
-                        {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 6},
-                        {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 7},
-                        {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 8},
+                        {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
+                        {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
+                        {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
+                        {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
+                        {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
+                        {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
+                        {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
+                        {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
+                        {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
+                        {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
+                        {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
                     ],
                     "default": 99,
                 }
