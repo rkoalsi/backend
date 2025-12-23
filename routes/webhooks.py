@@ -192,6 +192,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "track_batch_number": item.get("track_batch_number", False),
                     "hsn_or_sac": item.get("hsn_or_sac", ""),
                     "sku": item.get("sku", ""),
+                    "upc_code": item.get("upc", ""),
                     "manufacturer": item.get("manufacturer", ""),
                     "cf_item_code": item.get("custom_field_hash", {}).get(
                         "cf_item_code", ""
