@@ -268,7 +268,7 @@ def update_order(
 
 
 # Delete an order
-def delete_order(order_id: str, collection: Collection):
+def delete_order(order_id: str, deleted_by: str, collection: Collection):
     order = collection.find_one({"_id": ObjectId(order_id)})
     if not order.get("estimate_created", False):
         collection.update_one(
@@ -278,6 +278,7 @@ def delete_order(order_id: str, collection: Collection):
                     "status": "deleted",
                     "is_deleted": True,
                     "deleted_at": datetime.now(),
+                    "deleted_by": ObjectId(deleted_by),
                 }
             },
         )
@@ -1464,12 +1465,12 @@ def clear_existing_order(user_id: str):
 
 
 @router.delete("/{order_id}")
-def delete_existing_order(order_id: str):
+def delete_existing_order(order_id: str, deleted_by: str):
     """
     Deletes all orders by a given user who has created it if there is no customer information
     """
     try:
-        delete_order(order_id, orders_collection)
+        delete_order(order_id, deleted_by, orders_collection)
         return {"detail": "Orders deleted successfully"}
     except Exception as e:
         raise e
