@@ -251,6 +251,13 @@ def group_attendance_by_date(attendance_records: List[Dict]) -> List[Dict]:
                 check_in_record.get("device_name"), device_cache
             )
             
+            # Get GPS location data
+            latitude = check_in_record.get("latitude")
+            longitude = check_in_record.get("longitude")
+            location_url = None
+            if latitude is not None and longitude is not None:
+                location_url = f"https://www.google.com/maps?q={latitude},{longitude}"
+
             processed_record = {
                 "_id": check_in_record.get("_id"),
                 "employee_id": check_in_record.get("employee_id"),
@@ -260,6 +267,10 @@ def group_attendance_by_date(attendance_records: List[Dict]) -> List[Dict]:
                 "check_in_time": check_in_record["parsed_swipe_time"],
                 "check_out_time": check_out_record["parsed_swipe_time"] if check_out_record else None,
                 "location": device_name,
+                "latitude": latitude,
+                "longitude": longitude,
+                "location_url": location_url,
+                "location_accuracy": check_in_record.get("location_accuracy"),
                 "status": "Present" if check_in_record else "Absent",
                 "total_records_for_day": len(day_records),
                 "created_at": check_in_record.get("created_at")
@@ -392,6 +403,10 @@ async def download_attendance_report(
                     "Check Out Time": check_out_time,
                     "Status": record.get("status", ""),
                     "Location": record.get("location", "Unknown Location"),
+                    "Latitude": record.get("latitude", ""),
+                    "Longitude": record.get("longitude", ""),
+                    "GPS Accuracy (m)": record.get("location_accuracy", ""),
+                    "Maps Link": record.get("location_url", ""),
                     "Total Records for Day": record.get("total_records_for_day", 0)
                 })
         

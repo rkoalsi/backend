@@ -250,6 +250,9 @@ async def check_in(data: dict):
             "device_name": "Pupscribe Order Form",
             "created_at": datetime.now(),
             "is_check_in": is_check_in,
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "location_accuracy": data.get("accuracy"),
         }
         attendance_collection.insert_one(attendance_record)
 
@@ -274,6 +277,7 @@ async def check_in(data: dict):
             "greythr_success": success,
             "greythr_message": message,
             "is_check_in": is_check_in,
+            "location_recorded": data.get("latitude") is not None and data.get("longitude") is not None,
         }
 
     except Exception as e:
