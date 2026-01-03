@@ -2489,6 +2489,238 @@ async def upload_multiple_images(
                 file.file.close()
 
 
+# ===== VIDEO MANAGEMENT ENDPOINTS =====
+
+@router.post("/upload-video")
+async def upload_video(file: UploadFile = File(...), product_id: str = Form(...)):
+    """
+    Upload a video to S3 and add it to the product's videos array.
+    """
+    # Validate file type
+    if not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="Invalid file type. Must be a video.")
+
+    # Validate file size (50MB max for videos)
+    MAX_VIDEO_SIZE_MB = 50
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > MAX_VIDEO_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File is too large. Maximum allowed size is {MAX_VIDEO_SIZE_MB} MB.",
+        )
+
+    try:
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Generate a unique filename with timestamp
+        file_extension = os.path.splitext(file.filename)[1]
+        timestamp = int(time.time() * 1000)
+        unique_filename = (
+            f"product_videos/{product.get('item_id')}_{timestamp}{file_extension}"
+        )
+
+        # Upload the file to S3
+        s3_client.upload_fileobj(
+            file.file,
+            AWS_S3_BUCKET_NAME,
+            unique_filename,
+            ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+        )
+
+        # Construct the S3 URL
+        s3_url = f"{AWS_S3_URL}/{unique_filename}"
+
+        if s3_url:
+            # Get current videos array or initialize empty array
+            current_videos = product.get("videos", [])
+
+            # Add new video to the end of the array
+            updated_videos = current_videos + [s3_url]
+
+            # Update the product with the new videos array
+            products_collection.update_one(
+                {"_id": ObjectId(product_id)}, {"$set": {"videos": updated_videos}}
+            )
+
+            return {
+                "video_url": s3_url,
+                "videos": updated_videos,
+                "message": "Video uploaded successfully",
+            }
+
+    except NoCredentialsError:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured.")
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail="Error uploading file to S3.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    finally:
+        file.file.close()
+
+
+@router.post("/reorder-videos")
+async def reorder_videos(product_id: str = Form(...), videos: str = Form(...)):
+    """
+    Reorder videos for a product.
+    videos should be a JSON string array of video URLs in the desired order.
+    """
+    try:
+        import json
+
+        videos_list = json.loads(videos)
+
+        if not isinstance(videos_list, list):
+            raise HTTPException(status_code=400, detail="Videos must be an array.")
+
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        # Update the product with reordered videos
+        result = products_collection.update_one(
+            {"_id": ObjectId(product_id)}, {"$set": {"videos": videos_list}}
+        )
+
+        if result.modified_count > 0:
+            return {"videos": videos_list, "message": "Videos reordered successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to reorder videos.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@router.delete("/delete-video")
+async def delete_video(product_id: str = Form(...), video_url: str = Form(...)):
+    """
+    Delete a specific video from a product and remove it from S3.
+    """
+    try:
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        current_videos = product.get("videos", [])
+
+        if video_url not in current_videos:
+            raise HTTPException(status_code=404, detail="Video not found in product.")
+
+        # Remove video from array
+        updated_videos = [vid for vid in current_videos if vid != video_url]
+
+        # Update the product
+        result = products_collection.update_one(
+            {"_id": ObjectId(product_id)}, {"$set": {"videos": updated_videos}}
+        )
+
+        if result.modified_count > 0:
+            # Try to delete from S3
+            try:
+                s3_key = video_url.replace(f"{AWS_S3_URL}/", "")
+                s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=s3_key)
+            except Exception as s3_error:
+                print(f"Warning: Could not delete file from S3: {s3_error}")
+
+            return {"videos": updated_videos, "message": "Video deleted successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to delete video.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+@router.post("/upload-multiple-videos")
+async def upload_multiple_videos(
+    files: List[UploadFile] = File(...), product_id: str = Form(...)
+):
+    """
+    Upload multiple videos at once to a product.
+    """
+    MAX_VIDEO_SIZE_MB = 50
+
+    try:
+        # Validate that product exists
+        product = products_collection.find_one({"_id": ObjectId(product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+
+        uploaded_urls = []
+        current_videos = product.get("videos", [])
+
+        for file in files:
+            # Validate file type
+            if not file.content_type.startswith("video/"):
+                continue  # Skip non-video files
+
+            # Validate file size
+            file.file.seek(0, 2)
+            file_size = file.file.tell()
+            file.file.seek(0)
+
+            if file_size > MAX_VIDEO_SIZE_MB * 1024 * 1024:
+                continue  # Skip files that are too large
+
+            # Generate unique filename
+            file_extension = os.path.splitext(file.filename)[1]
+            timestamp = int(time.time() * 1000)
+            unique_filename = (
+                f"product_videos/{product.get('item_id')}_{timestamp}{file_extension}"
+            )
+
+            try:
+                # Upload to S3
+                s3_client.upload_fileobj(
+                    file.file,
+                    AWS_S3_BUCKET_NAME,
+                    unique_filename,
+                    ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+                )
+
+                s3_url = f"{AWS_S3_URL}/{unique_filename}"
+                uploaded_urls.append(s3_url)
+
+            except Exception as upload_error:
+                print(f"Error uploading {file.filename}: {upload_error}")
+                continue
+
+        if uploaded_urls:
+            # Add all new videos to the existing array
+            updated_videos = current_videos + uploaded_urls
+
+            # Update the product
+            products_collection.update_one(
+                {"_id": ObjectId(product_id)}, {"$set": {"videos": updated_videos}}
+            )
+
+            return {
+                "total_videos": len(updated_videos),
+                "videos": updated_videos,
+                "message": f"Successfully uploaded {len(uploaded_urls)} videos",
+            }
+        else:
+            raise HTTPException(
+                status_code=400, detail="No valid videos were uploaded."
+            )
+
+    except NoCredentialsError:
+        raise HTTPException(status_code=500, detail="AWS credentials not configured.")
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail="Error uploading files to S3.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    finally:
+        for file in files:
+            if hasattr(file, "file") and not file.file.closed:
+                file.file.close()
+
+
 def slugify(brand: str):
     return brand.lower().replace(" ", "_") if len(brand.split()) >= 2 else brand.lower()
 
