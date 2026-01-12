@@ -527,6 +527,9 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
                             }
                         )
                         print(f"Added stock for '{item_name}': {stock_quantity}")
+                        # Debug: Log products with brackets
+                        if "(" in item_name or ")" in item_name:
+                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
                         break  # Found the warehouse we want
                     except ValueError:
                         print(
@@ -554,6 +557,9 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
                             }
                         )
                         print(f"Added stock for '{item_name}': {stock_quantity}")
+                        # Debug: Log products with brackets
+                        if "(" in item_name or ")" in item_name:
+                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
                         break  # Found the warehouse we want
                     except ValueError:
                         print(
@@ -572,6 +578,9 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
                     }
                 )
                 print(f"Added stock for '{item_name}': {stock_quantity}")
+                # Debug: Log products with brackets
+                if "(" in item_name or ")" in item_name:
+                    print(f"  DEBUG: Product with brackets detected: '{item_name}'")
             except ValueError:
                 print(
                     f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}"
@@ -604,6 +613,7 @@ def update_stock():
 
     # Prepare bulk updates
     updates = []
+    not_found_products = []
     for product in active_products:
         product_name = product.get("name", "").strip().lower()
         stock = stock_dict.get(product_name)
@@ -615,7 +625,21 @@ def update_stock():
                 )
             )
         else:
+            # Track products not found for better debugging
+            not_found_products.append(product_name)
             print(f"No stock data for product '{product_name}'")
+
+    # Debug: Show potential matches for products not found
+    if not_found_products:
+        print(f"\n=== DEBUG: {len(not_found_products)} products not found in stock data ===")
+        for product_name in not_found_products[:10]:  # Show first 10
+            # Find similar names in stock_dict (for debugging)
+            similar = [k for k in stock_dict.keys() if product_name[:20] in k or k[:20] in product_name]
+            if similar:
+                print(f"Product: '{product_name}'")
+                print(f"  Similar in stock: {similar[:3]}")
+            else:
+                print(f"Product: '{product_name}' - No similar matches")
 
     # Execute bulk updates
     if updates:
