@@ -1084,6 +1084,13 @@ def get_admin_customer_analytics(
                             "unknown",
                         ]
                     },
+                    # Get sales person from customer record (overrides invoice sales person)
+                    "salesPerson": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
+                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
+                        ]
+                    },
                     # Boolean flags for billing periods (true = HAS billed)
                     "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
                     "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
@@ -2349,6 +2356,13 @@ def download_customer_analytics_report(
                         "$ifNull": [
                             {"$arrayElemAt": ["$customerDetails.cf_tier", 0]},
                             "unknown",
+                        ]
+                    },
+                    # Get sales person from customer record (overrides invoice sales person)
+                    "salesPerson": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
+                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
                         ]
                     },
                     # Boolean flags for billing periods (true = HAS billed)
