@@ -2632,7 +2632,10 @@ def download_customer_analytics_report(
             )  # Updated from billingAddress
             worksheet.cell(row=row, column=3, value=customer.get("status", ""))
             worksheet.cell(row=row, column=4, value=customer.get("tier", ""))
-            worksheet.cell(row=row, column=5, value=customer.get("salesPerson", ""))
+            sales_person = customer.get("salesPerson", "")
+            if isinstance(sales_person, list):
+                sales_person = ", ".join(sales_person) if sales_person else ""
+            worksheet.cell(row=row, column=5, value=sales_person)
             worksheet.cell(
                 row=row, column=6, value=customer.get("totalSalesCurrentMonth", 0)
             )
