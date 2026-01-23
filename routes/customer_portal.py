@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Response
 from ..config.root import get_database, serialize_mongo_document
 from typing import Optional
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, date
+import os, requests
+from .helpers import get_access_token
 
 router = APIRouter()
 db = get_database()
+
+org_id = os.getenv("ORG_ID")
+CUSTOMER_STATEMENT_URL = os.getenv("CUSTOMER_STATEMENT_URL")
 
 
 @router.get("/invoices")
@@ -151,3 +156,76 @@ def get_customer_dashboard_summary(
         "invoice_stats": invoice_stats,
         "credit_note_stats": credit_note_stats,
     }
+
+
+def get_financial_year_dates():
+    """
+    Get the start and end dates for the current Indian financial year.
+    Indian FY runs from April 1st to March 31st.
+    """
+    today = date.today()
+    current_year = today.year
+
+    # If we're in Jan-Mar, FY started in April of previous year
+    # If we're in Apr-Dec, FY started in April of current year
+    if today.month < 4:
+        fy_start_year = current_year - 1
+    else:
+        fy_start_year = current_year
+
+    from_date = date(fy_start_year, 4, 1)  # April 1st
+    to_date = today  # Current date
+
+    return from_date.isoformat(), to_date.isoformat()
+
+
+@router.get("/statement/download")
+async def download_customer_statement(
+    customer_id: str = Query(..., description="Customer ID from Zoho"),
+):
+    """
+    Download the customer statement PDF for the current financial year.
+    Financial year in India: April 1st to March 31st.
+    """
+    try:
+        # Get financial year date range
+        from_date, to_date = get_financial_year_dates()
+
+        # Make request to Zoho Books API
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        response = requests.get(
+            url=CUSTOMER_STATEMENT_URL.format(
+                customer_id=customer_id,
+                from_date=from_date,
+                to_date=to_date,
+                org_id=org_id
+            ),
+            headers=headers,
+            allow_redirects=False,
+        )
+
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=statement_{customer_id}_{from_date}_to_{to_date}.pdf"
+                },
+            )
+        elif response.status_code == 307:
+            raise HTTPException(
+                status_code=307,
+                detail="Redirect encountered. Check Zoho endpoint or token.",
+            )
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch statement PDF: {response.text}",
+            )
+
+    except HTTPException as e:
+        print(f"HTTP Exception: {e.detail}")
+        raise e
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
