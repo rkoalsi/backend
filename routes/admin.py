@@ -35,6 +35,7 @@ from .admin_external_links import router as admin_external_links_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_attendance import router as admin_attendance_router
+from .admin_users import router as admin_users_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -3150,5 +3151,11 @@ router.include_router(
     admin_catalogue_leads_router,
     prefix="/catalogue_leads",
     tags=["Catalogue Leads"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_users_router,
+    prefix="/users",
+    tags=["Customer Management"],
     dependencies=[Depends(JWTBearer())],
 )

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Body
 from fastapi.responses import HTMLResponse
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
@@ -7,12 +7,20 @@ from pymongo import ASCENDING, DESCENDING
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import Optional
+from pydantic import BaseModel
 import os, json
 
 router = APIRouter()
 
 db = get_database()
 products_collection = db["products"]
+notify_requests_collection = db["product_notify_requests"]
+customers_collection = db["customers"]
+
+class NotifyMeRequest(BaseModel):
+    product_id: str
+    order_id: str
+    customer_id: Optional[str] = None
 
 
 def get_product(product_id: str, collection: Collection):
@@ -801,6 +809,141 @@ def get_all_products_catalogue(
         "category": category,
         "search": search,
     }
+
+
+@router.get("/out-of-stock")
+def get_out_of_stock_products(
+    brand: Optional[str] = Query(None, description="Filter by brand"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+):
+    """
+    Retrieves products that are out of stock (stock <= 0).
+    Optional filters for brand and category.
+    """
+    try:
+        # Define base query for out of stock products
+        query = {
+            "$or": [
+                {"stock": {"$lte": 0}},
+                {"stock": {"$exists": False}}
+            ],
+            "is_deleted": {"$exists": False},
+            "status": "active",
+        }
+
+        if brand:
+            query["brand"] = brand
+
+        if category:
+            query["category"] = category
+
+        # Fetch out of stock products
+        out_of_stock_products = list(products_collection.find(query).sort("name", ASCENDING))
+
+        # Serialize the products
+        serialized_products = [serialize_mongo_document(doc) for doc in out_of_stock_products]
+
+        return {"products": serialized_products}
+
+    except Exception as e:
+        print(f"Error fetching out of stock products: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch out of stock products")
+
+
+@router.post("/notify-me")
+async def notify_me_when_available(request: NotifyMeRequest):
+    """
+    Registers a customer's request to be notified when a product is back in stock.
+    Creates a document in the product_notify_requests collection.
+    """
+    try:
+        # Verify the product exists
+        product = products_collection.find_one({"_id": ObjectId(request.product_id)})
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        # Check if a similar request already exists
+        existing_request = notify_requests_collection.find_one({
+            "product_id": request.product_id,
+            "customer_id": request.customer_id,
+            "notified": {"$ne": True}
+        })
+        customer = customers_collection.find_one({"_id": ObjectId(request.customer_id)})
+
+        if existing_request:
+            # Request already exists
+            return {
+                "message": "You are already registered for notification",
+                "request_id": str(existing_request["_id"])
+            }
+
+        # Create the notify request document
+        notify_document = {
+            "product_id": ObjectId(request.product_id),
+            "customer_id": ObjectId(request.customer_id),
+            "customer_name": customer.get('contact_name'),
+            "order_id":ObjectId(request.order_id),
+            "product_name": product.get("name"),
+            "product_brand": product.get("brand"),
+            "created_at": datetime.now(),
+            "notified": False,
+        }
+
+        result = notify_requests_collection.insert_one(notify_document)
+
+        return {
+            "message": "Successfully registered for notification",
+            "request_id": str(result.inserted_id)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating notify request: {e}")
+        raise HTTPException(status_code=500, detail="Failed to register for notification")
+
+
+@router.get("/notify-requests")
+def get_notify_requests(
+    notified: Optional[bool] = Query(None, description="Filter by notified status"),
+    product_id: Optional[str] = Query(None, description="Filter by product ID"),
+):
+    """
+    Admin endpoint to retrieve notification requests.
+    Can filter by notified status and product ID.
+    """
+    try:
+        query = {}
+
+        if notified is not None:
+            query["notified"] = notified
+
+        if product_id:
+            query["product_id"] = product_id
+
+        # Fetch notification requests
+        requests = list(notify_requests_collection.find(query).sort("created_at", DESCENDING))
+
+        # Serialize the requests
+        serialized_requests = [serialize_mongo_document(doc) for doc in requests]
+
+        # Enrich with customer information if customer_id exists
+        for req in serialized_requests:
+            if req.get("customer_id"):
+                customer = db.customers.find_one({"_id": ObjectId(req["customer_id"])})
+                if customer:
+                    req["customer_name"] = customer.get("customer_name")
+                    req["customer_email"] = customer.get("email")
+                    req["customer_phone"] = customer.get("cf_phone")
+
+        return {
+            "requests": serialized_requests,
+            "total": len(serialized_requests)
+        }
+
+    except Exception as e:
+        print(f"Error fetching notify requests: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch notification requests")
 
 
 @router.get("/{product_id}")

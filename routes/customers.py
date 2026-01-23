@@ -477,6 +477,50 @@ async def update_customer(customer_id: str, product: dict):
     return {"message": "Customer updated"}
 
 
+@router.get("/by_contact_id/{contact_id}")
+def get_customer_by_contact_id(contact_id: str):
+    """
+    Retrieve a customer by their Zoho contact_id.
+    This is used to pre-select a customer for users who have a linked contact_id.
+    """
+    customer = db.customers.find_one({"contact_id": contact_id})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return {"customer": serialize_mongo_document(customer)}
+
+
+@router.get("/by_user_email/{email}")
+def get_customer_by_user_email(email: str):
+    """
+    Find a customer that matches the given email address.
+    Searches in multiple email fields and contact name.
+    Used to auto-match customer users to their customer record.
+    """
+    # Try to find customer by various email fields
+    customer = db.customers.find_one({
+        "$or": [
+            {"email": email},
+            {"contact_email": email},
+            {"cf_email": email},
+        ],
+        "status": "active"
+    })
+
+    # If not found by email, try to find by name matching email prefix
+    if not customer:
+        email_prefix = email.split("@")[0].lower() if "@" in email else email.lower()
+        # Search for contact_name containing the email prefix
+        customer = db.customers.find_one({
+            "contact_name": {"$regex": email_prefix, "$options": "i"},
+            "status": "active"
+        })
+
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found for this email")
+
+    return {"customer": serialize_mongo_document(customer)}
+
+
 @router.get("/special_margins/{customer_id}")
 def get_customer_special_margins(customer_id: str):
     """

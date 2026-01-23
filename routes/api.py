@@ -24,6 +24,8 @@ from .customer_analytics import router as customer_analytics
 from .permissions import router as permissions_router
 from .customer_creation_requests import router as customer_creation_requests
 from .catalogue_leads import router as catalogue_leads
+from .customer_portal import router as customer_portal
+from .credit_notes import router as credit_notes
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -67,6 +69,10 @@ router.include_router(permissions_router, prefix="/permissions", tags=["Permissi
 router.include_router(customer_creation_requests, prefix="/customer_creation_requests", tags=["Customer Creation Requests"])
 
 router.include_router(catalogue_leads, prefix="/catalogue_leads", tags=["Catalogue Leads"])
+
+router.include_router(customer_portal, prefix="/customer_portal", tags=["Customer Portal"])
+
+router.include_router(credit_notes, prefix="/credit-notes", tags=["Credit Notes"])
 
 
 @router.get("/")
