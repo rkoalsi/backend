@@ -387,9 +387,9 @@ def get_products(
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": DESCENDING,
-            "extracted_color": ASCENDING,   # COLOR FIRST - groups colors together
-            "size_order": ASCENDING,        # SIZE SECOND - sorts sizes within each color
-            "rate": ASCENDING,
+            "rate": ASCENDING,              # PRICE FIRST within series
+            "extracted_color": ASCENDING,   # COLOR SECOND - groups colors together
+            "size_order": ASCENDING,        # SIZE THIRD - sorts sizes within each color
             "name": ASCENDING,
         }
 
