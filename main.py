@@ -53,8 +53,8 @@ async def shutdown_db():
 
 # Add shutdown handler for MongoDB
 # app.add_event_handler("startup", notification_scheduler_startup)
-app.add_event_handler("startup", cron_startup)
-app.add_event_handler("shutdown", cron_shutdown)
+# app.add_event_handler("startup", cron_startup)
+# app.add_event_handler("shutdown", cron_shutdown)
 # app.add_event_handler("shutdown", notification_scheduler_shutdown)
 
 
