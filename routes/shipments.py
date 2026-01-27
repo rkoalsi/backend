@@ -43,11 +43,12 @@ def get_shipments(
 
     # Check if user is admin
     is_admin = "admin" in role.lower() or "admin" in str(user.get("role", "")).lower()
+    is_customer = "customer" in role.lower() or "customer" in str(user.get("role", "")).lower()
 
     sp_code = ""
     if not is_admin:
         sp_code = user.get("code", "")
-        if not sp_code:
+        if not sp_code and not is_customer:
             # Return empty results if user has no SP code
             return {
                 "shipments": [],
@@ -61,7 +62,7 @@ def get_shipments(
     pipeline = []
 
     # For salesperson, first get their customer IDs, then filter shipments
-    if not is_admin:
+    if not is_admin and not is_customer:
         # Get all customer IDs for this salesperson
         customer_ids = []
         try:
@@ -106,7 +107,26 @@ def get_shipments(
                 }
             }
         })
+    # For customer, first get their customer IDs, then filter shipments
+    if is_customer:
+        customer_id = user.get('customer_id')
+        if not customer_id:
+            return {
+                "shipments": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0,
+            }
 
+        # Filter shipments by customer IDs
+        pipeline.append({
+            "$match": {
+                "$expr": {
+                    "$eq": [{"$toString": "$customer_id"}, customer_id]
+                }
+            }
+        })
     # Add search filter if provided
     if search:
         pipeline.append({

@@ -83,15 +83,25 @@ def generate_whatsapp_template(template_doc: dict, dynamic_params: dict) -> Temp
 
 def send_whatsapp(to: str, template_doc: dict, params: dict):
     try:
-        cleaned_phone = ''.join(char for char in str(to) if char.isdigit())
-        
-        if not cleaned_phone:
-            raise ValueError(f"Invalid phone number after cleaning: {to}")
-        
+        # Check if phone number already has country code (starts with +)
+        phone_str = str(to).strip()
+
+        if phone_str.startswith('+'):
+            # Phone number already has country code, use as is
+            dst_phone = phone_str
+        else:
+            # No country code found, add +91 as default
+            cleaned_phone = ''.join(char for char in phone_str if char.isdigit())
+
+            if not cleaned_phone:
+                raise ValueError(f"Invalid phone number after cleaning: {to}")
+
+            dst_phone = f"+91{cleaned_phone}"
+
         response = client.messages.create(
             type_="whatsapp",
             src=FROM_NUMBER,
-            dst=f"+91{cleaned_phone}",
+            dst=dst_phone,
             template=generate_whatsapp_template(template_doc, params),
         )
         return response

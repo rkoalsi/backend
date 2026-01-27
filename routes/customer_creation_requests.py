@@ -981,7 +981,7 @@ async def get_customer_requests(
 
 @router.put("/{request_id}/status")
 async def update_request_status(
-    request_id: str, status: str, current_user: dict = Depends(get_current_user)
+    request_id: str, status: str, force_create: bool = False, current_user: dict = Depends(get_current_user)
 ):
     """
     Update the status of a customer creation request (admin only).
@@ -993,6 +993,9 @@ async def update_request_status(
 
     Status changes are allowed from any status except 'created_on_zoho'.
     This enables admins to reprocess rejected requests if needed.
+
+    Args:
+        force_create: If True, bypass duplicate customer check and force creation
     """
     try:
         db = get_database()
@@ -1037,6 +1040,26 @@ async def update_request_status(
         final_status = status
 
         if status == "approved":
+            # Check for duplicate customer by contact_name (shop_name) unless force_create is True
+            if not force_create:
+                shop_name = request_doc.get("shop_name", "")
+                existing_customer = db.customers.find_one({"contact_name": shop_name})
+
+                if existing_customer:
+                    logger.warning(
+                        f"Duplicate customer found with contact_name: {shop_name}, contact_id: {existing_customer.get('contact_id')}"
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "duplicate_customer",
+                            "message": f"A customer with the name '{shop_name}' already exists.",
+                            "existing_customer": {
+                                "contact_id": existing_customer.get("contact_id"),
+                                "contact_name": existing_customer.get("contact_name"),
+                            }
+                        }
+                    )
             logger.info(f"Creating customer in Zoho for request: {request_id}")
 
             # Fetch the user who created the request to check for code or salesperson_id

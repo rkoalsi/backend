@@ -1084,6 +1084,13 @@ def get_admin_customer_analytics(
                             "unknown",
                         ]
                     },
+                    # Get sales person from customer record (overrides invoice sales person)
+                    "salesPerson": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
+                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
+                        ]
+                    },
                     # Boolean flags for billing periods (true = HAS billed)
                     "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
                     "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
@@ -2351,6 +2358,13 @@ def download_customer_analytics_report(
                             "unknown",
                         ]
                     },
+                    # Get sales person from customer record (overrides invoice sales person)
+                    "salesPerson": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
+                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
+                        ]
+                    },
                     # Boolean flags for billing periods (true = HAS billed)
                     "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
                     "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
@@ -2618,7 +2632,10 @@ def download_customer_analytics_report(
             )  # Updated from billingAddress
             worksheet.cell(row=row, column=3, value=customer.get("status", ""))
             worksheet.cell(row=row, column=4, value=customer.get("tier", ""))
-            worksheet.cell(row=row, column=5, value=customer.get("salesPerson", ""))
+            sales_person = customer.get("salesPerson", "")
+            if isinstance(sales_person, list):
+                sales_person = ", ".join(sales_person) if sales_person else ""
+            worksheet.cell(row=row, column=5, value=sales_person)
             worksheet.cell(
                 row=row, column=6, value=customer.get("totalSalesCurrentMonth", 0)
             )

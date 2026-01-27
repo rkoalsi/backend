@@ -268,7 +268,7 @@ def update_order(
 
 
 # Delete an order
-def delete_order(order_id: str, collection: Collection):
+def delete_order(order_id: str, deleted_by: str, collection: Collection):
     order = collection.find_one({"_id": ObjectId(order_id)})
     if not order.get("estimate_created", False):
         collection.update_one(
@@ -278,6 +278,7 @@ def delete_order(order_id: str, collection: Collection):
                     "status": "deleted",
                     "is_deleted": True,
                     "deleted_at": datetime.now(),
+                    "deleted_by": ObjectId(deleted_by),
                 }
             },
         )
@@ -510,29 +511,38 @@ async def safe_execute(operation_name: str, func, critical: bool = True):
             raise HTTPException(status_code=500, detail=error_msg)
         return None, error_msg
 
-def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> Dict[str, List]:
-    """Prepare all data upfront"""
+def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict, cart_products: List[Dict] = None) -> Dict[str, List]:
+    """Prepare all data upfront with cart quantities pre-filled"""
     brand_data = {}
-    
+
+    # Create a mapping of product_id to quantity from cart
+    cart_quantities = {}
+    if cart_products:
+        for cart_item in cart_products:
+            product_id = str(cart_item.get("product_id", ""))
+            quantity = cart_item.get("quantity", 0)
+            if product_id and quantity:
+                cart_quantities[product_id] = quantity
+
     for brand_name, products in brands.items():
         rows = [[
-            "Image", "Name", "Sub Category", "Series", "SKU", 
-            "Stock", "UPC/EAN Code", "Price", "Margin", "Selling Price", 
+            "Image", "Name", "Sub Category", "Series", "SKU",
+            "Stock", "UPC/EAN Code", "Price", "Margin", "Selling Price",
             "Quantity", "Total"
         ]]
-        
+
         for idx, product in enumerate(products, start=2):
             margin = special_margins.get(
-                str(product.get("_id")), 
+                str(product.get("_id")),
                 customer.get("cf_margin", "40%")
             )
             try:
                 margin_value = int(margin.replace("%", "")) / 100
             except:
                 margin_value = 0.4
-                
+
             rate = product.get("rate", 0)
-            
+
             # Get image URL - check image_url first, then images array
             image_url = product.get("image_url", "")
             if not image_url:
@@ -541,7 +551,11 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> D
                 if images and len(images) > 0:
                     # Use the first image from the images array
                     image_url = images[0] if isinstance(images[0], str) else images[0].get("url", "")
-            
+
+            # Get quantity from cart if product exists in cart
+            product_id = str(product.get("_id", ""))
+            quantity = cart_quantities.get(product_id, "")
+
             rows.append([
                 f'=IMAGE("{image_url}", 1)',
                 product.get("name", ""),
@@ -553,12 +567,12 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict) -> D
                 rate,
                 margin,
                 rate * margin_value,
-                "",
+                quantity,
                 f"=K{idx}*H{idx}"
             ])
-        
+
         brand_data[brand_name] = rows
-    
+
     return brand_data
 def create_format_requests(sheet_id: int, rows_count: int) -> List[Dict]:
     """Create formatting requests for a sheet"""
@@ -752,40 +766,44 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
             raise HTTPException(status_code=404, detail="No active products found")
 
         operations_status["data_fetch"] = f"✓ Loaded {len(products)} products in {len(brands)} brands"
-        
+
+        # Get cart products to pre-fill quantities
+        cart_products = order.get("products", [])
+        cart_product_count = len(cart_products)
+
         # Step 2: Create spreadsheet (CRITICAL)
         print("📝 Creating spreadsheet...")
-        
+
         sheets_service = get_sheets_service()
         drive_service = get_drive_service()
-        
+
         spreadsheet_body = {
             "properties": {
                 "title": f"Order Form - {customer.get('display_name', 'Customer')} - {order_id[:8]}"
             }
         }
-        
+
         spreadsheet, error = await safe_execute(
             "Creating spreadsheet",
             lambda: sheets_service.spreadsheets().create(body=spreadsheet_body).execute(),
             critical=True
         )
-        
+
         spreadsheet_id = spreadsheet["spreadsheetId"]
         sheet_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
         operations_status["spreadsheet_creation"] = "✓ Spreadsheet created successfully"
-        
+
         # Update DB immediately after successful creation
         db.orders.update_one(
             {"_id": ObjectId(order_id)},
             {"$set": {"spreadsheet_created": True, "spreadsheet_url": sheet_url}},
         )
         operations_status["database_update"] = "✓ Order updated in database"
-        
+
         # Step 3: Create sheets and add data (SEMI-CRITICAL)
         print("📋 Adding sheets and data...")
 
-        brand_data = prepare_brand_data(brands, customer, special_margins)
+        brand_data = prepare_brand_data(brands, customer, special_margins, cart_products)
 
         # Normalize brand names to avoid case-sensitive duplicates
         # Google Sheets treats sheet names as case-insensitive
@@ -938,13 +956,20 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
         # Determine if we have any working access method
         has_access = any(status.startswith("success") for status in permission_status.values())
         
+        # Build message based on whether cart had products
+        if cart_product_count > 0:
+            message = f"Order form created with {len(sorted_brands)} brand sheets. {cart_product_count} product quantities pre-filled from cart."
+        else:
+            message = f"Order form created with {len(sorted_brands)} brand sheets"
+
         response_data = {
             "google_sheet_url": sheet_url,
             "spreadsheet_id": spreadsheet_id,
             "status": "success",
             "operations": operations_status,
             "access_methods": permission_status,
-            "message": f"Order form created with {len(sorted_brands)} brand sheets"
+            "message": message,
+            "cart_products_added": cart_product_count
         }
         
         if not has_access:
@@ -1440,12 +1465,12 @@ def clear_existing_order(user_id: str):
 
 
 @router.delete("/{order_id}")
-def delete_existing_order(order_id: str):
+def delete_existing_order(order_id: str, deleted_by: str):
     """
     Deletes all orders by a given user who has created it if there is no customer information
     """
     try:
-        delete_order(order_id, orders_collection)
+        delete_order(order_id, deleted_by, orders_collection)
         return {"detail": "Orders deleted successfully"}
     except Exception as e:
         raise e
