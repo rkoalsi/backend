@@ -95,6 +95,7 @@ class ReturnOrderCreate(BaseModel):
 
 class ReturnOrderUpdate(BaseModel):
     customer_name: Optional[str] = None
+    customer_id: Optional[str] = None
     return_reason: Optional[str] = None
     return_amount: Optional[float] = None
     return_date: Optional[datetime] = None
@@ -363,6 +364,16 @@ async def update_return_order(return_order_id: str, update_data: ReturnOrderUpda
         if not update_dict:
             raise HTTPException(status_code=400, detail="No valid update data provided")
 
+        # Convert customer_id to ObjectId if provided
+        if "customer_id" in update_dict:
+            try:
+                update_dict["customer_id"] = ObjectId(update_dict["customer_id"])
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid customer_id: {update_dict.get('customer_id')} - {str(e)}",
+                )
+
         # Add updated timestamp
         update_dict["updated_at"] = datetime.now()
 
@@ -392,13 +403,25 @@ async def update_return_order(return_order_id: str, update_data: ReturnOrderUpda
         # Calculate total quantity of items
         total_quantity = sum(item.get("quantity", 0) for item in data.get("items", []))
 
+        # Handle created_at - it could be a datetime object or a string
+        created_at = data.get("created_at")
+        if isinstance(created_at, datetime):
+            date_str = created_at.strftime("%d/%m/%Y")
+        elif isinstance(created_at, str):
+            try:
+                date_str = datetime.fromisoformat(created_at.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+            except:
+                date_str = datetime.now().strftime("%d/%m/%Y")
+        else:
+            date_str = datetime.now().strftime("%d/%m/%Y")
+
         params = {
             "customer_name": data.get("customer_name"),
             "items": total_quantity,
-            "status": str(data.get("status", [])).capitalize(),
-            "reason": str(data.get("return_reason", [])).capitalize(),
-            "address": format_address(data.get("pickup_address", [])),
-            "date": datetime.strptime(data.get("created_at"), "%d/%m/%Y"),
+            "status": str(data.get("status", "")).capitalize(),
+            "reason": str(data.get("return_reason", "")).capitalize(),
+            "address": format_address(data.get("pickup_address", {})),
+            "date": date_str,
         }
         return_order_notification(
             params,
