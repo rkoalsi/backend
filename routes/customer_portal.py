@@ -158,6 +158,51 @@ def get_customer_dashboard_summary(
     }
 
 
+@router.get("/payments")
+def get_customer_payments(
+    customer_id: str = Query(..., description="Customer ID from Zoho"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=50),
+    payment_mode: Optional[str] = Query(None, description="Filter by payment mode"),
+):
+    """
+    Get all payments for a specific customer by their customer_id.
+    Returns paginated results with payment details.
+    """
+    query = {"customer_id": customer_id}
+
+    if payment_mode:
+        query["payment_mode"] = payment_mode
+
+    # Get total count
+    total = db.customer_payments.count_documents(query)
+
+    # Calculate skip
+    skip = (page - 1) * per_page
+
+    # Fetch payments sorted by date descending
+    payments_cursor = db.customer_payments.find(query).sort("date", -1).skip(skip).limit(per_page)
+    payments = [serialize_mongo_document(doc) for doc in payments_cursor]
+
+    # Calculate summary stats
+    all_payments = list(db.customer_payments.find({"customer_id": customer_id}))
+    total_amount = sum(p.get("amount", 0) or 0 for p in all_payments)
+    total_unused = sum(p.get("unused_amount", 0) or 0 for p in all_payments)
+
+    return {
+        "payments": payments,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if total > 0 else 0,
+        "summary": {
+            "total_payments": len(all_payments),
+            "total_amount": total_amount,
+            "total_unused": total_unused,
+        }
+    }
+
+
 def get_financial_year_dates():
     """
     Get the start and end dates for the current Indian financial year.

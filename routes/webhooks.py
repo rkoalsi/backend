@@ -651,6 +651,79 @@ def update_stock():
     else:
         print("No updates required.")
 
+    # Check for in-stock notification requests
+    try:
+        # Build a map of product_id -> stock for products that are now in stock
+        in_stock_product_ids = set()
+        for product in active_products:
+            product_name = product.get("name", "").strip().lower()
+            stock = stock_dict.get(product_name)
+            if stock is not None and stock > 0:
+                in_stock_product_ids.add(product["_id"])
+
+        if not in_stock_product_ids:
+            print("No products currently in stock, skipping notification check.")
+            return
+
+        # Find pending notify requests for products that are now in stock
+        pending_requests = list(db["product_notify_requests"].find({
+            "product_id": {"$in": list(in_stock_product_ids)},
+            "notified": False,
+        }))
+
+        if not pending_requests:
+            print("No pending stock notification requests.")
+            return
+
+        print(f"Found {len(pending_requests)} pending stock notification requests.")
+
+        template_doc = db.templates.find_one({"name": "in_stock_notification"})
+        if not template_doc:
+            print("WhatsApp template 'in_stock_notification' not found. Skipping notifications.")
+            return
+
+        notified_ids = []
+        for req in pending_requests:
+            try:
+                order = db.orders.find_one({"_id": req.get("order_id")})
+                if not order:
+                    print(f"Order not found for notify request {req['_id']}")
+                    continue
+
+                salesperson = db.users.find_one({"_id": ObjectId(order.get("created_by", ""))})
+                if not salesperson or not salesperson.get("phone"):
+                    print(f"Salesperson or phone not found for order {order['_id']}")
+                    continue
+
+                params = {
+                    "salesperson_name": salesperson.get("name", ""),
+                    "customer_name": req.get("customer_name", ""),
+                    "product_name": req.get("product_name", ""),
+                    "product_brand": req.get("product_brand", ""),
+                }
+
+                send_whatsapp(
+                    to=salesperson["phone"],
+                    template_doc=serialize_mongo_document(dict(template_doc)),
+                    params=params,
+                )
+                notified_ids.append(req["_id"])
+                print(f"Sent in-stock notification to {salesperson.get('name')} for {req.get('product_name')}")
+
+            except Exception as e:
+                print(f"Error sending notification for request {req['_id']}: {e}")
+
+        # Mark notified requests
+        if notified_ids:
+            db["product_notify_requests"].update_many(
+                {"_id": {"$in": notified_ids}},
+                {"$set": {"notified": True, "notified_at": datetime.datetime.now()}},
+            )
+            print(f"Marked {len(notified_ids)} notification requests as notified.")
+
+    except Exception as e:
+        print(f"Error processing stock notifications: {e}")
+
 
 def run_update_stock():
     """
@@ -1468,6 +1541,104 @@ def handle_shipment(data: dict):
         print("Invoice Not Found for Given Shipment")
 
 
+def handle_sales_return(data: dict):
+    salesreturn = data.get("salesreturn")
+    if not salesreturn:
+        print("No sales return data found in webhook")
+        return
+
+    salesreturn_id = str(salesreturn.get("salesreturn_id", ""))
+
+    if salesreturn_id:
+        existing = db.sales_returns.find_one({"salesreturn_id": salesreturn_id})
+
+        # Sort all keys alphabetically
+        sorted_data = sort_dict_keys(salesreturn)
+        current_time = datetime.datetime.now()
+
+        # Parse datetime fields
+        datetime_fields = [
+            'created_time', 'date', 'last_modified_time',
+            'created_time_formatted', 'last_modified_time_formatted'
+        ]
+
+        for field in datetime_fields:
+            if field in sorted_data and sorted_data[field]:
+                parsed_dt = parse_datetime(sorted_data[field])
+                if isinstance(parsed_dt, datetime.datetime):
+                    sorted_data[field] = parsed_dt
+
+        if existing:
+            # Update existing sales return
+            sorted_data["updated_at"] = current_time
+            if "created_at" not in sorted_data and "created_at" in existing:
+                sorted_data["created_at"] = existing["created_at"]
+            elif "created_at" not in sorted_data:
+                sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+
+            db.sales_returns.update_one(
+                {"salesreturn_id": salesreturn_id}, {"$set": sorted_data}
+            )
+            print(f"Updated sales return with salesreturn_id {salesreturn_id}")
+        else:
+            # Create new sales return
+            sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+            sorted_data["updated_at"] = current_time
+            db.sales_returns.insert_one(sorted_data)
+            print(f"Created new sales return with salesreturn_id {salesreturn_id}")
+    else:
+        print("Sales Return ID not found. Webhook Received")
+
+
+def handle_customer_payment(data: dict):
+    payment = data.get("payment")
+    if not payment:
+        print("No customer payment data found in webhook")
+        return
+
+    payment_id = str(payment.get("payment_id", ""))
+
+    if payment_id:
+        existing = db.customer_payments.find_one({"payment_id": payment_id})
+
+        # Sort all keys alphabetically
+        sorted_data = sort_dict_keys(payment)
+        current_time = datetime.datetime.now()
+
+        # Parse datetime fields
+        datetime_fields = [
+            'created_time', 'date', 'last_modified_time',
+            'created_time_formatted', 'last_modified_time_formatted'
+        ]
+
+        for field in datetime_fields:
+            if field in sorted_data and sorted_data[field]:
+                parsed_dt = parse_datetime(sorted_data[field])
+                if isinstance(parsed_dt, datetime.datetime):
+                    sorted_data[field] = parsed_dt
+
+        if existing:
+            # Update existing customer payment
+            sorted_data["updated_at"] = current_time
+            if "created_at" not in sorted_data and "created_at" in existing:
+                sorted_data["created_at"] = existing["created_at"]
+            elif "created_at" not in sorted_data:
+                sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+
+            db.customer_payments.update_one(
+                {"payment_id": payment_id}, {"$set": sorted_data}
+            )
+            print(f"Updated customer payment with payment_id {payment_id}")
+        else:
+            # Create new customer payment
+            sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+            sorted_data["updated_at"] = current_time
+            db.customer_payments.insert_one(sorted_data)
+            print(f"Created new customer payment with payment_id {payment_id}")
+    else:
+        print("Payment ID not found. Webhook Received")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -1522,6 +1693,18 @@ def shipment(
 ):
     handle_shipment(data)
     return "Shipment Webhook Received Successfully"
+
+
+@router.post("/sales_return")
+def sales_return(data: dict):
+    handle_sales_return(data)
+    return "Sales Return Webhook Received Successfully"
+
+
+@router.post("/customer_payment")
+def customer_payment(data: dict):
+    handle_customer_payment(data)
+    return "Customer Payment Webhook Received Successfully"
 
 
 def sort_dict_keys(data: Dict[str, Any]) -> Dict[str, Any]:
