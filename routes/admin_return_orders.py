@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Form, UploadFile, File
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople, get_access_token
@@ -15,6 +15,8 @@ load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
 ZOHO_INVENTORY_BASE_URL = "https://www.zohoapis.com/inventory/v1"
+ZOHO_BOOKS_BASE_URL = "https://www.zohoapis.com/books/v3"
+CREDITNOTE_PDF_URL = os.getenv("CREDITNOTE_PDF_URL")
 db = get_database()
 products_collection = db["products"]
 customers_collection = db["customers"]
@@ -201,152 +203,119 @@ def find_salesorder_for_return(
         return {"error": str(e), "salesorder_id": None}
 
 
-def create_zoho_sales_return(return_order: dict) -> dict:
+def _build_credit_note_payload(return_order: dict) -> dict:
     """
-    Create a sales return in Zoho Inventory.
+    Build the credit note payload by looking up each product's Zoho item_id
+    directly from the products collection.
+    """
+    return_items = return_order.get("items", [])
+    if not return_items:
+        return {"success": False, "error": "No items found in return order"}
+
+    # Look up customer's Zoho customer_id
+    customer_id = str(return_order.get("customer_id", ""))
+    customer = customers_collection.find_one({"_id": ObjectId(customer_id)})
+    if not customer:
+        return {"success": False, "error": "Customer not found in database"}
+
+    contact_id = customer.get("customer_id") or customer.get("contact_id")
+    if not contact_id:
+        return {"success": False, "error": "Customer has no Zoho customer_id or contact_id"}
+
+    # Build line_items by looking up each product's Zoho item_id
+    zoho_line_items = []
+    missing_items = []
+
+    for item in return_items:
+        quantity = item.get("quantity", 0)
+        if quantity <= 0:
+            continue
+
+        product_id = item.get("product_id")
+        zoho_item_id = None
+
+        # Look up product in products collection by product_id
+        if product_id:
+            pid = ObjectId(product_id) if isinstance(product_id, str) and ObjectId.is_valid(product_id) else product_id
+            product = products_collection.find_one({"_id": pid})
+            if product:
+                zoho_item_id = product.get("item_id")
+
+        # Fallback: search by SKU if product_id lookup didn't yield item_id
+        if not zoho_item_id and item.get("sku"):
+            product = products_collection.find_one({"sku": item["sku"]})
+            if product:
+                zoho_item_id = product.get("item_id")
+
+        if zoho_item_id:
+            zoho_line_items.append({
+                "item_id": zoho_item_id,
+                "quantity": quantity,
+            })
+        else:
+            missing_items.append(item.get("product_name") or item.get("sku", "unknown"))
+
+    if not zoho_line_items:
+        return {
+            "success": False,
+            "error": f"Could not find Zoho item_id for any products. Missing: {', '.join(missing_items)}",
+        }
+
+    if missing_items:
+        print(f"Warning: Could not find Zoho item_id for: {', '.join(missing_items)}")
+
+    # Build credit note payload
+    payload = {
+        "customer_id": contact_id,
+        "reference_invoice_type": "registered",
+        "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "reference_number": str(return_order.get("_id", "")),
+        "line_items": zoho_line_items,
+        "notes": return_order.get("return_reason", "Customer return"),
+    }
+
+    return {
+        "success": True,
+        "payload": payload,
+    }
+
+
+def create_zoho_credit_note(return_order: dict) -> dict:
+    """
+    Create a credit note in Zoho Books.
     Returns the Zoho response or error details.
     """
     try:
-        # Get access token for Zoho Inventory
-        access_token = get_access_token("inventory")
+        access_token = get_access_token("books")
         if not access_token:
-            return {"success": False, "error": "Failed to get Zoho access token"}
+            return {"success": False, "error": "Failed to get Zoho Books access token"}
 
         headers = {
             "Authorization": f"Zoho-oauthtoken {access_token}",
             "Content-Type": "application/json",
         }
 
-        # Extract product SKUs and names from return order items
-        return_items = return_order.get("items", [])
-        product_skus = []
-        product_names = []
-        sku_to_quantity = {}
-        name_to_quantity = {}
+        build_result = _build_credit_note_payload(return_order)
+        if not build_result.get("success"):
+            return build_result
 
-        for item in return_items:
-            sku = item.get("sku", "")
-            name = item.get("product_name", "")
-            quantity = item.get("quantity", 0)
+        payload = build_result["payload"]
+        url = f"{ZOHO_BOOKS_BASE_URL}/creditnotes"
+        params = {"organization_id": org_id}
 
-            if sku:
-                product_skus.append(sku)
-                sku_to_quantity[sku.lower().strip()] = quantity
-            if name:
-                product_names.append(name)
-                name_to_quantity[name.lower().strip()] = quantity
+        print(f"Creating Zoho credit note with payload: {payload}")
 
-        if not product_skus and not product_names:
-            return {
-                "success": False,
-                "error": "No product SKUs or names found in return order",
-            }
-
-        # Find the salesorder_id from shipments/invoices
-        customer_id = str(return_order.get("customer_id", ""))
-        salesorder_info = find_salesorder_for_return(
-            customer_id, product_skus, product_names
-        )
-
-        if not salesorder_info.get("salesorder_id"):
-            return {
-                "success": False,
-                "error": salesorder_info.get(
-                    "error", "Could not find associated sales order"
-                ),
-            }
-
-        salesorder_id = salesorder_info["salesorder_id"]
-
-        # Fetch the sales order from Zoho to get accurate salesorder_item_ids
-        so_line_items_map = {}
-        try:
-            so_url = f"{ZOHO_INVENTORY_BASE_URL}/salesorders/{salesorder_id}"
-            so_params = {"organization_id": org_id}
-            so_response = requests.get(so_url, headers=headers, params=so_params)
-            so_data = so_response.json()
-            if so_response.status_code == 200 and so_data.get("code") == 0:
-                so_line_items = so_data.get("salesorder", {}).get("line_items", [])
-                for so_item in so_line_items:
-                    item_id = str(so_item.get("item_id", ""))
-                    if item_id:
-                        so_line_items_map[item_id] = so_item.get("line_item_id")
-            else:
-                print(f"Warning: Could not fetch sales order {salesorder_id} from Zoho: {so_data.get('message')}")
-        except Exception as e:
-            print(f"Warning: Error fetching sales order from Zoho: {e}")
-
-        # Build line_items for Zoho API
-        zoho_line_items = []
-        for matched_item in salesorder_info.get("line_items", []):
-            matched_by = matched_item.get("matched_by", "").lower().strip()
-
-            # Try to find quantity by SKU first, then by name
-            quantity = sku_to_quantity.get(matched_by, 0)
-            if quantity == 0:
-                quantity = name_to_quantity.get(matched_by, 0)
-            # Also try the original values
-            if quantity == 0:
-                sku = matched_item.get("sku", "").lower().strip()
-                quantity = sku_to_quantity.get(sku, 0)
-            if quantity == 0:
-                name = matched_item.get("name", "").lower().strip()
-                quantity = name_to_quantity.get(name, 0)
-
-            if quantity > 0 and matched_item.get("item_id"):
-                item_id_str = str(matched_item["item_id"])
-                line_item = {
-                    "item_id": matched_item["item_id"],
-                    "quantity": quantity,
-                }
-                # Get salesorder_item_id from Zoho sales order, fall back to local data
-                so_item_id = so_line_items_map.get(item_id_str)
-                if so_item_id:
-                    line_item["salesorder_item_id"] = so_item_id
-                elif matched_item.get("salesorder_item_id"):
-                    line_item["salesorder_item_id"] = matched_item["salesorder_item_id"]
-
-                zoho_line_items.append(line_item)
-
-        if not zoho_line_items:
-            return {
-                "success": False,
-                "error": "No matching line items found for Zoho sales return",
-            }
-
-        # Prepare the sales return payload
-        sales_return_payload = {
-            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "reason": return_order.get("return_reason", "Customer return"),
-            "line_items": zoho_line_items,
-        }
-
-        # Make the API request to create sales return
-        url = f"{ZOHO_INVENTORY_BASE_URL}/salesreturns"
-        params = {
-            "organization_id": org_id,
-            "salesorder_id": salesorder_id,
-        }
-
-        print(f"Creating Zoho sales return with payload: {sales_return_payload}")
-        print(f"URL params: {params}")
-
-        response = requests.post(
-            url, headers=headers, json=sales_return_payload, params=params
-        )
-
+        response = requests.post(url, headers=headers, json=payload, params=params)
         response_data = response.json()
-        print(f"Zoho sales return response: {response_data}")
+        print(f"Zoho credit note response: {response_data}")
 
         if response.status_code == 201 and response_data.get("code") == 0:
-            sales_return = response_data.get("salesreturn", {})
+            credit_note = response_data.get("creditnote", {})
             return {
                 "success": True,
-                "salesreturn_id": sales_return.get("salesreturn_id"),
-                "salesreturn_number": sales_return.get("salesreturn_number"),
-                "salesorder_id": salesorder_id,
-                "salesorder_number": salesorder_info.get("salesorder_number"),
-                "status": sales_return.get("salesreturn_status"),
+                "creditnote_id": credit_note.get("creditnote_id"),
+                "creditnote_number": credit_note.get("creditnote_number"),
+                "status": credit_note.get("status"),
             }
         else:
             return {
@@ -356,7 +325,56 @@ def create_zoho_sales_return(return_order: dict) -> dict:
             }
 
     except Exception as e:
-        print(f"Error creating Zoho sales return: {e}")
+        print(f"Error creating Zoho credit note: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def update_zoho_credit_note(return_order: dict, creditnote_id: str) -> dict:
+    """
+    Update an existing credit note in Zoho Books.
+    Returns the Zoho response or error details.
+    """
+    try:
+        access_token = get_access_token("books")
+        if not access_token:
+            return {"success": False, "error": "Failed to get Zoho Books access token"}
+
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        build_result = _build_credit_note_payload(return_order)
+        if not build_result.get("success"):
+            return build_result
+
+        payload = build_result["payload"]
+        url = f"{ZOHO_BOOKS_BASE_URL}/creditnotes/{creditnote_id}"
+        params = {"organization_id": org_id}
+
+        print(f"Updating Zoho credit note {creditnote_id} with payload: {payload}")
+
+        response = requests.put(url, headers=headers, json=payload, params=params)
+        response_data = response.json()
+        print(f"Zoho credit note update response: {response_data}")
+
+        if response.status_code == 200 and response_data.get("code") == 0:
+            credit_note = response_data.get("creditnote", {})
+            return {
+                "success": True,
+                "creditnote_id": credit_note.get("creditnote_id"),
+                "creditnote_number": credit_note.get("creditnote_number"),
+                "status": credit_note.get("status"),
+            }
+        else:
+            return {
+                "success": False,
+                "error": response_data.get("message", "Unknown Zoho API error"),
+                "code": response_data.get("code"),
+            }
+
+    except Exception as e:
+        print(f"Error updating Zoho credit note: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -388,20 +406,6 @@ def get_return_orders(
             {
                 "$unwind": {
                     "path": "$created_by_user",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            },
-            {
-                "$lookup": {
-                    "from": "sales_returns",
-                    "localField": "zoho_salesreturn_id",
-                    "foreignField": "salesreturn_id",
-                    "as": "zoho_salesreturn_doc",
-                }
-            },
-            {
-                "$unwind": {
-                    "path": "$zoho_salesreturn_doc",
                     "preserveNullAndEmptyArrays": True,
                 }
             },
@@ -501,19 +505,21 @@ def download_return_orders_report():
                     "Return Reason": order.get("return_reason", ""),
                     "Total Items": total_items,
                     "Items Details": items_string,
-                    "Debit Note Document": order.get("debit_note_document", ""),
+                    "Debit Note Documents": " | ".join(
+                        order.get("debit_note_documents", [])
+                        or ([order["debit_note_document"]] if order.get("debit_note_document") else [])
+                    ),
                     "Created By": order.get(
                         "created_by_user", [{"name": "Unknown User"}]
                     )[0].get("name"),
                     "Pickup Address": full_address,
                     "Pickup Phone": pickup_address.get("phone", ""),
-                    "Zoho Sales Return ID": order.get("zoho_salesreturn_id", ""),
-                    "Zoho Sales Return Number": order.get(
-                        "zoho_salesreturn_number", ""
+                    "Zoho Credit Note ID": order.get("zoho_creditnote_id", ""),
+                    "Zoho Credit Note Number": order.get(
+                        "zoho_creditnote_number", ""
                     ),
-                    "Zoho Sales Order Number": order.get("zoho_salesorder_number", ""),
-                    "Zoho Sales Return Status": order.get(
-                        "zoho_salesreturn_status", ""
+                    "Zoho Credit Note Status": order.get(
+                        "zoho_creditnote_status", ""
                     ),
                     "Created At": order.get("created_at", ""),
                     "Updated At": order.get("updated_at", ""),
@@ -562,12 +568,11 @@ def download_return_orders_report():
             worksheet.set_column("M:M", 15)  # Created By
             worksheet.set_column("N:N", 40)  # Pickup Address
             worksheet.set_column("O:O", 15)  # Pickup Phone
-            worksheet.set_column("P:P", 20)  # Zoho Sales Return ID
-            worksheet.set_column("Q:Q", 20)  # Zoho Sales Return Number
-            worksheet.set_column("R:R", 20)  # Zoho Sales Order Number
-            worksheet.set_column("S:S", 18)  # Zoho Sales Return Status
-            worksheet.set_column("T:T", 15)  # Created At
-            worksheet.set_column("U:U", 15)  # Updated At
+            worksheet.set_column("P:P", 20)  # Zoho Credit Note ID
+            worksheet.set_column("Q:Q", 20)  # Zoho Credit Note Number
+            worksheet.set_column("R:R", 18)  # Zoho Credit Note Status
+            worksheet.set_column("S:S", 15)  # Created At
+            worksheet.set_column("T:T", 15)  # Updated At
 
         output.seek(0)
 
@@ -677,26 +682,22 @@ def update_return_order_status(
             "updated_at": datetime.datetime.now(datetime.timezone.utc),
         }
 
-        # If status is being changed to "approved" and Zoho sales return hasn't been created yet
+        # If status is being changed to "approved" and Zoho credit note hasn't been created yet
         zoho_result = None
-        if new_status == "approved" and not existing_order.get("zoho_salesreturn_id"):
-            print(f"Creating Zoho sales return for return order {return_order_id}")
-            zoho_result = create_zoho_sales_return(existing_order)
+        if new_status == "approved" and not existing_order.get("zoho_creditnote_id"):
+            print(f"Creating Zoho credit note for return order {return_order_id}")
+            zoho_result = create_zoho_credit_note(existing_order)
 
             if zoho_result.get("success"):
-                update_data["zoho_salesreturn_id"] = zoho_result.get("salesreturn_id")
-                update_data["zoho_salesreturn_number"] = zoho_result.get(
-                    "salesreturn_number"
+                update_data["zoho_creditnote_id"] = zoho_result.get("creditnote_id")
+                update_data["zoho_creditnote_number"] = zoho_result.get(
+                    "creditnote_number"
                 )
-                update_data["zoho_salesorder_id"] = zoho_result.get("salesorder_id")
-                update_data["zoho_salesorder_number"] = zoho_result.get(
-                    "salesorder_number"
-                )
-                update_data["zoho_salesreturn_status"] = zoho_result.get("status")
-                update_data["zoho_salesreturn_created_at"] = datetime.datetime.now(datetime.timezone.utc)
-                print(f"Zoho sales return created successfully: {zoho_result}")
+                update_data["zoho_creditnote_status"] = zoho_result.get("status")
+                update_data["zoho_creditnote_created_at"] = datetime.datetime.now(datetime.timezone.utc)
+                print(f"Zoho credit note created successfully: {zoho_result}")
             else:
-                print(f"Failed to create Zoho sales return: {zoho_result.get('error')}")
+                print(f"Failed to create Zoho credit note: {zoho_result.get('error')}")
                 # Don't block status update, but include warning in response
 
         # Update the status
@@ -727,20 +728,6 @@ def update_return_order_status(
                     "preserveNullAndEmptyArrays": True,
                 }
             },
-            {
-                "$lookup": {
-                    "from": "sales_returns",
-                    "localField": "zoho_salesreturn_id",
-                    "foreignField": "salesreturn_id",
-                    "as": "zoho_salesreturn_doc",
-                }
-            },
-            {
-                "$unwind": {
-                    "path": "$zoho_salesreturn_doc",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            },
         ]
 
         cursor = return_orders_collection.aggregate(pipeline)
@@ -751,16 +738,16 @@ def update_return_order_status(
             "return_order": serialize_mongo_document(updated_order),
         }
 
-        # Add Zoho sales return info to response if attempted
+        # Add Zoho credit note info to response if attempted
         if zoho_result:
             if zoho_result.get("success"):
-                response["zoho_salesreturn"] = {
+                response["zoho_creditnote"] = {
                     "created": True,
-                    "salesreturn_id": zoho_result.get("salesreturn_id"),
-                    "salesreturn_number": zoho_result.get("salesreturn_number"),
+                    "creditnote_id": zoho_result.get("creditnote_id"),
+                    "creditnote_number": zoho_result.get("creditnote_number"),
                 }
             else:
-                response["zoho_salesreturn"] = {
+                response["zoho_creditnote"] = {
                     "created": False,
                     "error": zoho_result.get("error"),
                 }
@@ -821,20 +808,6 @@ def update_return_order(return_order_id: str, update_data: dict):
                     "preserveNullAndEmptyArrays": True,
                 }
             },
-            {
-                "$lookup": {
-                    "from": "sales_returns",
-                    "localField": "zoho_salesreturn_id",
-                    "foreignField": "salesreturn_id",
-                    "as": "zoho_salesreturn_doc",
-                }
-            },
-            {
-                "$unwind": {
-                    "path": "$zoho_salesreturn_doc",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            },
         ]
 
         cursor = return_orders_collection.aggregate(pipeline)
@@ -851,73 +824,61 @@ def update_return_order(return_order_id: str, update_data: dict):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@router.post("/{return_order_id}/create-zoho-salesreturn")
-def create_zoho_salesreturn_for_return_order(return_order_id: str):
+@router.post("/{return_order_id}/create-zoho-creditnote")
+def create_zoho_creditnote_for_return_order(return_order_id: str):
     """
-    Manually create a Zoho sales return for a return order.
-    Useful for retrying if auto-creation failed or for creating sales return
+    Manually create a Zoho credit note for a return order.
+    Useful for retrying if auto-creation failed or for creating credit note
     for orders that were approved before this feature was implemented.
     """
     try:
-        # Validate ObjectId
         if not ObjectId.is_valid(return_order_id):
             raise HTTPException(status_code=400, detail="Invalid return order ID")
 
-        # Check if return order exists
         return_order = return_orders_collection.find_one(
             {"_id": ObjectId(return_order_id)}
         )
         if not return_order:
             raise HTTPException(status_code=404, detail="Return order not found")
 
-        # Check if Zoho sales return already exists
-        if return_order.get("zoho_salesreturn_id"):
+        # Check if Zoho credit note already exists
+        if return_order.get("zoho_creditnote_id"):
             return {
-                "message": "Zoho sales return already exists for this return order",
-                "zoho_salesreturn": {
-                    "salesreturn_id": return_order.get("zoho_salesreturn_id"),
-                    "salesreturn_number": return_order.get("zoho_salesreturn_number"),
-                    "salesorder_id": return_order.get("zoho_salesorder_id"),
-                    "status": return_order.get("zoho_salesreturn_status"),
+                "message": "Zoho credit note already exists for this return order",
+                "zoho_creditnote": {
+                    "creditnote_id": return_order.get("zoho_creditnote_id"),
+                    "creditnote_number": return_order.get("zoho_creditnote_number"),
+                    "status": return_order.get("zoho_creditnote_status"),
                 },
             }
 
-        # Create Zoho sales return
-        zoho_result = create_zoho_sales_return(return_order)
+        zoho_result = create_zoho_credit_note(return_order)
 
         if zoho_result.get("success"):
-            # Update the return order with Zoho info
             return_orders_collection.update_one(
                 {"_id": ObjectId(return_order_id)},
                 {
                     "$set": {
-                        "zoho_salesreturn_id": zoho_result.get("salesreturn_id"),
-                        "zoho_salesreturn_number": zoho_result.get(
-                            "salesreturn_number"
-                        ),
-                        "zoho_salesorder_id": zoho_result.get("salesorder_id"),
-                        "zoho_salesorder_number": zoho_result.get("salesorder_number"),
-                        "zoho_salesreturn_status": zoho_result.get("status"),
-                        "zoho_salesreturn_created_at": datetime.datetime.now(datetime.timezone.utc),
+                        "zoho_creditnote_id": zoho_result.get("creditnote_id"),
+                        "zoho_creditnote_number": zoho_result.get("creditnote_number"),
+                        "zoho_creditnote_status": zoho_result.get("status"),
+                        "zoho_creditnote_created_at": datetime.datetime.now(datetime.timezone.utc),
                         "updated_at": datetime.datetime.now(datetime.timezone.utc),
                     }
                 },
             )
 
             return {
-                "message": "Zoho sales return created successfully",
-                "zoho_salesreturn": {
-                    "salesreturn_id": zoho_result.get("salesreturn_id"),
-                    "salesreturn_number": zoho_result.get("salesreturn_number"),
-                    "salesorder_id": zoho_result.get("salesorder_id"),
-                    "salesorder_number": zoho_result.get("salesorder_number"),
+                "message": "Zoho credit note created successfully",
+                "zoho_creditnote": {
+                    "creditnote_id": zoho_result.get("creditnote_id"),
+                    "creditnote_number": zoho_result.get("creditnote_number"),
                     "status": zoho_result.get("status"),
                 },
             }
         else:
-            # Return more detailed error info
             error_detail = {
-                "message": f"Failed to create Zoho sales return: {zoho_result.get('error')}",
+                "message": f"Failed to create Zoho credit note: {zoho_result.get('error')}",
                 "details": {
                     "customer_id": str(return_order.get("customer_id", "")),
                     "customer_name": return_order.get("customer_name", ""),
@@ -940,81 +901,186 @@ def create_zoho_salesreturn_for_return_order(return_order_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@router.get("/{return_order_id}/zoho-salesreturn")
-def get_zoho_salesreturn_status(return_order_id: str):
+@router.put("/{return_order_id}/update-zoho-creditnote")
+def update_zoho_creditnote_for_return_order(return_order_id: str):
     """
-    Get the Zoho sales return details for a return order.
-    If a salesreturn exists, also fetches the latest status from Zoho.
+    Update an existing Zoho credit note for a return order (redo).
     """
     try:
-        # Validate ObjectId
         if not ObjectId.is_valid(return_order_id):
             raise HTTPException(status_code=400, detail="Invalid return order ID")
 
-        # Check if return order exists
         return_order = return_orders_collection.find_one(
             {"_id": ObjectId(return_order_id)}
         )
         if not return_order:
             raise HTTPException(status_code=404, detail="Return order not found")
 
-        zoho_salesreturn_id = return_order.get("zoho_salesreturn_id")
+        creditnote_id = return_order.get("zoho_creditnote_id")
+        if not creditnote_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No Zoho credit note exists for this return order. Create one first.",
+            )
 
-        if not zoho_salesreturn_id:
+        zoho_result = update_zoho_credit_note(return_order, creditnote_id)
+
+        if zoho_result.get("success"):
+            return_orders_collection.update_one(
+                {"_id": ObjectId(return_order_id)},
+                {
+                    "$set": {
+                        "zoho_creditnote_id": zoho_result.get("creditnote_id"),
+                        "zoho_creditnote_number": zoho_result.get("creditnote_number"),
+                        "zoho_creditnote_status": zoho_result.get("status"),
+                        "updated_at": datetime.datetime.now(datetime.timezone.utc),
+                    }
+                },
+            )
+
             return {
-                "has_zoho_salesreturn": False,
-                "message": "No Zoho sales return associated with this return order",
+                "message": "Zoho credit note updated successfully",
+                "zoho_creditnote": {
+                    "creditnote_id": zoho_result.get("creditnote_id"),
+                    "creditnote_number": zoho_result.get("creditnote_number"),
+                    "status": zoho_result.get("status"),
+                },
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to update Zoho credit note: {zoho_result.get('error')}",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/{return_order_id}/download-creditnote-pdf")
+def download_creditnote_pdf(return_order_id: str):
+    """
+    Download the credit note PDF from Zoho Books for a return order.
+    """
+    try:
+        if not ObjectId.is_valid(return_order_id):
+            raise HTTPException(status_code=400, detail="Invalid return order ID")
+
+        return_order = return_orders_collection.find_one(
+            {"_id": ObjectId(return_order_id)}
+        )
+        if not return_order:
+            raise HTTPException(status_code=404, detail="Return order not found")
+
+        creditnote_id = return_order.get("zoho_creditnote_id")
+        if not creditnote_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No Zoho credit note exists for this return order",
+            )
+
+        access_token = get_access_token("books")
+        if not access_token:
+            raise HTTPException(status_code=500, detail="Failed to get Zoho Books access token")
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        response = requests.get(
+            url=CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=creditnote_id),
+            headers=headers,
+            allow_redirects=False,
+        )
+
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=credit_note_{creditnote_id}.pdf"
+                },
+            )
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch PDF: {response.text}",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error downloading credit note PDF: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/{return_order_id}/zoho-creditnote")
+def get_zoho_creditnote_status(return_order_id: str):
+    """
+    Get the Zoho credit note details for a return order.
+    If a credit note exists, also fetches the latest status from Zoho Books.
+    """
+    try:
+        if not ObjectId.is_valid(return_order_id):
+            raise HTTPException(status_code=400, detail="Invalid return order ID")
+
+        return_order = return_orders_collection.find_one(
+            {"_id": ObjectId(return_order_id)}
+        )
+        if not return_order:
+            raise HTTPException(status_code=404, detail="Return order not found")
+
+        zoho_creditnote_id = return_order.get("zoho_creditnote_id")
+
+        if not zoho_creditnote_id:
+            return {
+                "has_zoho_creditnote": False,
+                "message": "No Zoho credit note associated with this return order",
             }
 
-        # Try to fetch latest status from Zoho
+        # Try to fetch latest status from Zoho Books
         try:
-            access_token = get_access_token("inventory")
+            access_token = get_access_token("books")
             headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-            url = f"{ZOHO_INVENTORY_BASE_URL}/salesreturns/{zoho_salesreturn_id}"
+            url = f"{ZOHO_BOOKS_BASE_URL}/creditnotes/{zoho_creditnote_id}"
             params = {"organization_id": org_id}
 
             response = requests.get(url, headers=headers, params=params)
             response_data = response.json()
 
             if response.status_code == 200 and response_data.get("code") == 0:
-                sales_return = response_data.get("salesreturn", {})
+                credit_note = response_data.get("creditnote", {})
 
                 # Update status in database if changed
-                new_status = sales_return.get("salesreturn_status")
+                new_status = credit_note.get("status")
                 if new_status and new_status != return_order.get(
-                    "zoho_salesreturn_status"
+                    "zoho_creditnote_status"
                 ):
                     return_orders_collection.update_one(
                         {"_id": ObjectId(return_order_id)},
-                        {"$set": {"zoho_salesreturn_status": new_status}},
+                        {"$set": {"zoho_creditnote_status": new_status}},
                     )
 
                 return {
-                    "has_zoho_salesreturn": True,
-                    "zoho_salesreturn": {
-                        "salesreturn_id": sales_return.get("salesreturn_id"),
-                        "salesreturn_number": sales_return.get("salesreturn_number"),
-                        "status": sales_return.get("salesreturn_status"),
-                        "date": sales_return.get("date"),
-                        "reason": sales_return.get("reason"),
-                        "salesorder_id": sales_return.get("salesorder_id"),
-                        "salesorder_number": sales_return.get("salesorder_number"),
+                    "has_zoho_creditnote": True,
+                    "zoho_creditnote": {
+                        "creditnote_id": credit_note.get("creditnote_id"),
+                        "creditnote_number": credit_note.get("creditnote_number"),
+                        "status": credit_note.get("status"),
+                        "date": credit_note.get("date"),
+                        "reference_number": credit_note.get("reference_number"),
                     },
                 }
         except Exception as e:
-            print(f"Error fetching Zoho sales return status: {e}")
+            print(f"Error fetching Zoho credit note status: {e}")
 
         # Return stored data if Zoho fetch fails
         return {
-            "has_zoho_salesreturn": True,
-            "zoho_salesreturn": {
-                "salesreturn_id": return_order.get("zoho_salesreturn_id"),
-                "salesreturn_number": return_order.get("zoho_salesreturn_number"),
-                "status": return_order.get("zoho_salesreturn_status"),
-                "salesorder_id": return_order.get("zoho_salesorder_id"),
-                "salesorder_number": return_order.get("zoho_salesorder_number"),
-                "created_at": return_order.get("zoho_salesreturn_created_at"),
+            "has_zoho_creditnote": True,
+            "zoho_creditnote": {
+                "creditnote_id": return_order.get("zoho_creditnote_id"),
+                "creditnote_number": return_order.get("zoho_creditnote_number"),
+                "status": return_order.get("zoho_creditnote_status"),
+                "created_at": return_order.get("zoho_creditnote_created_at"),
             },
             "note": "Could not fetch latest status from Zoho, showing stored data",
         }
