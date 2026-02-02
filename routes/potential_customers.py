@@ -21,6 +21,9 @@ async def create_potential_customer(data: dict):
     data["created_by"] = ObjectId(data["created_by"])
     sales_person = db.users.find_one({"_id": ObjectId(data["created_by"])})
     data["created_at"] = datetime.now()
+    # Auto-set onboard_date when status is Onboard
+    if data.get("status") == "Onboard" and not data.get("onboard_date"):
+        data["onboard_date"] = datetime.now().strftime("%Y-%m-%d")
     result = potential_customers_collection.insert_one(data)
     template = db.templates.find_one({"name": "potential_customer"})
     params = {
@@ -86,6 +89,9 @@ async def update_potential_customer(potential_customer_id: str, data: dict = Bod
     # Convert customer and created_by fields to ObjectId.
     # Set an updated timestamp (or update created_at if desired).
     data["updated_at"] = datetime.now()
+    # Auto-set onboard_date when status is changed to Onboard
+    if data.get("status") == "Onboard" and not data.get("onboard_date"):
+        data["onboard_date"] = datetime.now().strftime("%Y-%m-%d")
     # Convert each hook's category_id to category_id as ObjectId.
     data.pop("_id")
     result = potential_customers_collection.update_one(

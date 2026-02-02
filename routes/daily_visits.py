@@ -131,16 +131,22 @@ async def create_daily_visit(
                 potential_customer_id = str(doc["_id"])
                 shop["potential_customer_id"] = ObjectId(potential_customer_id)
             else:
-                result = db.potential_customers.insert_one(
-                    {
-                        "name": shop["potential_customer_name"],
-                        "address": shop["potential_customer_address"],
-                        "tier": shop["potential_customer_tier"],
-                        "mobile": shop.get("potential_customer_mobile", ""),
-                        "created_by": ObjectId(created_by),
-                        "created_at": datetime.datetime.now(),
-                    }
-                )
+                pc_data = {
+                    "name": shop["potential_customer_name"],
+                    "address": shop["potential_customer_address"],
+                    "tier": shop["potential_customer_tier"],
+                    "mobile": shop.get("potential_customer_mobile", ""),
+                    "state_city": shop.get("potential_customer_state_city", ""),
+                    "customer_name": shop.get("potential_customer_customer_name", ""),
+                    "follow_up_date": shop.get("potential_customer_follow_up_date", ""),
+                    "comments": shop.get("potential_customer_comments", ""),
+                    "status": shop.get("potential_customer_status", ""),
+                    "created_by": ObjectId(created_by),
+                    "created_at": datetime.datetime.now(),
+                }
+                if pc_data.get("status") == "Onboard":
+                    pc_data["onboard_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+                result = db.potential_customers.insert_one(pc_data)
                 potential_customer_id = str(result.inserted_id)
                 shop["potential_customer_id"] = ObjectId(potential_customer_id)
     # Create the daily visit record with the shops data
@@ -256,6 +262,11 @@ async def update_daily_visit_update(
                     mobile = shop.get(
                         "potential_customer_mobile", potential_customer_mobile
                     )
+                    state_city = shop.get("potential_customer_state_city", "")
+                    customer_name_val = shop.get("potential_customer_customer_name", "")
+                    follow_up_date = shop.get("potential_customer_follow_up_date", "")
+                    comments = shop.get("potential_customer_comments", "")
+                    pc_status = shop.get("potential_customer_status", "")
                     # Store these values to update in updates array later
                     updated_potential_customer = True
                     updated_pc_id = pc_id
@@ -264,6 +275,11 @@ async def update_daily_visit_update(
                         "potential_customer_address": address,
                         "potential_customer_tier": tier,
                         "potential_customer_mobile": mobile,
+                        "potential_customer_state_city": state_city,
+                        "potential_customer_customer_name": customer_name_val,
+                        "potential_customer_follow_up_date": follow_up_date,
+                        "potential_customer_comments": comments,
+                        "potential_customer_status": pc_status,
                     }
 
                     shop.pop("address", None)
@@ -274,9 +290,16 @@ async def update_daily_visit_update(
                         "address": address,
                         "tier": tier,
                         "mobile": mobile,
+                        "state_city": state_city,
+                        "customer_name": customer_name_val,
+                        "follow_up_date": follow_up_date,
+                        "comments": comments,
+                        "status": pc_status,
                         "created_by": ObjectId(uploaded_by),
                         "created_at": datetime.datetime.now(),
                     }
+                    if pc_status == "Onboard":
+                        potential_customer_data["onboard_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
 
                     doc = db.potential_customers.find_one(
                         {
