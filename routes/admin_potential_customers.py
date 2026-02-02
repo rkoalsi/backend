@@ -262,13 +262,19 @@ def get_potential_customers_report(
         ws.title = "Potential Customers Report"
 
         headers = [
-            "Name",
+            "Store Name",
             "Address",
+            "State/City",
             "Tier",
+            "Customer Name",
             "Mobile",
             "Created At",
-            "Created By",
-        ]  # Added Created At
+            "Created By/SP",
+            "Follow Up Date",
+            "Comments",
+            "Status",
+            "Onboard Date",
+        ]
         ws.append(headers)
 
         for cust in customers:
@@ -281,12 +287,16 @@ def get_potential_customers_report(
             row = [
                 cust.get("name", ""),
                 cust.get("address", ""),
+                cust.get("state_city", ""),
                 cust.get("tier", ""),
+                cust.get("customer_name", ""),
                 cust.get("mobile", ""),
-                created_at_str,  # Display created_at
-                cust.get("created_by_info", {}).get(
-                    "name", "N/A"
-                ),  # Handle if created_by_info is missing
+                created_at_str,
+                cust.get("created_by_info", {}).get("name", "N/A"),
+                cust.get("follow_up_date", ""),
+                cust.get("comments", ""),
+                cust.get("status", ""),
+                cust.get("onboard_date", ""),
             ]
             ws.append(row)
 
@@ -331,6 +341,9 @@ def update_potential_customer(
         update_data.pop("_id")
         update_data.pop("created_by")
         update_data.pop("created_by_info", "")
+        # Auto-set onboard_date when status is changed to Onboard
+        if update_data.get("status") == "Onboard" and not update_data.get("onboard_date"):
+            update_data["onboard_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         potential_customers_collection.update_one(
             {"_id": customer_obj_id}, {"$set": update_data}
         )

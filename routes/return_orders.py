@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Query, HTTPException, File, UploadFile
+from fastapi.responses import JSONResponse, Response
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo import DESCENDING
@@ -6,9 +7,11 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
 from ..config.whatsapp import send_whatsapp
+from .helpers import get_access_token
 import os
 import boto3
 import io
+import requests
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 
@@ -17,6 +20,8 @@ router = APIRouter()
 
 db = get_database()
 return_orders_collection = db["return_orders"]
+org_id = os.getenv("ORG_ID")
+CREDITNOTE_PDF_URL = os.getenv("CREDITNOTE_PDF_URL")
 
 # S3 Configuration
 AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
@@ -453,12 +458,13 @@ async def delete_return_order(return_order_id: str):
         if not return_order:
             raise HTTPException(status_code=404, detail="Return order not found")
 
-        # Delete S3 file if it exists
-        if return_order.get("debit_note_document"):
+        # Delete S3 files if they exist
+        docs_to_delete = return_order.get("debit_note_documents", [])
+        if not docs_to_delete and return_order.get("debit_note_document"):
+            docs_to_delete = [return_order["debit_note_document"]]
+        for doc_url in docs_to_delete:
             try:
-                old_key = return_order["debit_note_document"].replace(
-                    f"{AWS_S3_URL}/", ""
-                )
+                old_key = doc_url.replace(f"{AWS_S3_URL}/", "")
                 s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=old_key)
             except ClientError as e:
                 print(f"Warning: Could not delete file from S3: {e}")
@@ -478,12 +484,12 @@ async def delete_return_order(return_order_id: str):
         )
 
 
-@router.post("/{return_order_id}/upload-document")
-async def upload_debit_note_document(
-    return_order_id: str, file: UploadFile = File(...)
+@router.post("/{return_order_id}/upload-documents")
+async def upload_debit_note_documents(
+    return_order_id: str, files: List[UploadFile] = File(...)
 ):
     """
-    Upload a debit note document (xlsx, csv, or image) for a return order.
+    Upload one or more debit note documents (xlsx, csv, pdf, or images) for a return order.
     Files are stored in S3 under return_orders/{return_order_id}/
     """
     try:
@@ -494,73 +500,139 @@ async def upload_debit_note_document(
         if not return_order:
             raise HTTPException(status_code=404, detail="Return order not found")
 
-        # Validate file type (allow images, xlsx, csv)
         allowed_extensions = {".xlsx", ".xls", ".csv", ".jpg", ".jpeg", ".png", ".pdf"}
-        file_extension = os.path.splitext(file.filename)[1].lower()
 
-        if file_extension not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}",
-            )
+        uploaded_urls = []
 
-        # Delete old file from S3 if it exists
-        if return_order.get("debit_note_document"):
-            try:
-                old_key = return_order["debit_note_document"].replace(
-                    f"{AWS_S3_URL}/", ""
-                )
-                s3_client.delete_object(Bucket=AWS_S3_BUCKET_NAME, Key=old_key)
-            except ClientError as e:
-                print(f"Warning: Could not delete old file from S3: {e}")
-
-        # Read file content
-        file_content = await file.read()
-
-        # Generate filename with structure: return_orders/{return_order_id}/{filename}
-        s3_key = f"return_orders/{return_order_id}/{file.filename}"
-
-        # Upload to S3
-        try:
-            s3_client.upload_fileobj(
-                io.BytesIO(file_content),
-                AWS_S3_BUCKET_NAME,
-                s3_key,
-                ExtraArgs={
-                    "ContentType": file.content_type or "application/octet-stream",
-                    "ACL": "public-read",
-                },
-            )
-
-            # Store the S3 URL in the database
-            document_url = f"{AWS_S3_URL}/{s3_key}"
-            result = return_orders_collection.update_one(
-                {"_id": object_id},
-                {
-                    "$set": {
-                        "debit_note_document": document_url,
-                        "updated_at": datetime.now(),
-                    }
-                },
-            )
-
-            if result.modified_count == 0 and result.matched_count == 0:
+        for file in files:
+            # Validate file type
+            file_extension = os.path.splitext(file.filename)[1].lower()
+            if file_extension not in allowed_extensions:
                 raise HTTPException(
-                    status_code=404, detail="Return order not found during update"
+                    status_code=400,
+                    detail=f"Invalid file type '{file.filename}'. Allowed: {', '.join(allowed_extensions)}",
                 )
 
-            return {
-                "message": "Document uploaded successfully",
-                "document_url": document_url,
-            }
+            # Read file content
+            file_content = await file.read()
 
-        except ClientError as e:
-            print(f"Error uploading to S3: {e}")
-            raise HTTPException(status_code=500, detail="Failed to upload document")
+            # Generate filename with structure: return_orders/{return_order_id}/{filename}
+            s3_key = f"return_orders/{return_order_id}/{file.filename}"
+
+            # Upload to S3
+            try:
+                s3_client.upload_fileobj(
+                    io.BytesIO(file_content),
+                    AWS_S3_BUCKET_NAME,
+                    s3_key,
+                    ExtraArgs={
+                        "ContentType": file.content_type or "application/octet-stream",
+                        "ACL": "public-read",
+                    },
+                )
+                document_url = f"{AWS_S3_URL}/{s3_key}"
+                uploaded_urls.append(document_url)
+            except ClientError as e:
+                print(f"Error uploading {file.filename} to S3: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload document: {file.filename}",
+                )
+
+        # Get existing documents array (support legacy single-document field)
+        existing_docs = return_order.get("debit_note_documents", [])
+        if not existing_docs and return_order.get("debit_note_document"):
+            existing_docs = [return_order["debit_note_document"]]
+
+        all_docs = existing_docs + uploaded_urls
+
+        # Store all document URLs in the database
+        result = return_orders_collection.update_one(
+            {"_id": object_id},
+            {
+                "$set": {
+                    "debit_note_documents": all_docs,
+                    "debit_note_document": all_docs[0] if all_docs else None,
+                    "updated_at": datetime.now(),
+                }
+            },
+        )
+
+        if result.modified_count == 0 and result.matched_count == 0:
+            raise HTTPException(
+                status_code=404, detail="Return order not found during update"
+            )
+
+        return {
+            "message": f"{len(uploaded_urls)} document(s) uploaded successfully",
+            "document_urls": uploaded_urls,
+            "all_documents": all_docs,
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error uploading document: {str(e)}"
+            status_code=500, detail=f"Error uploading documents: {str(e)}"
+        )
+
+
+@router.get("/{return_order_id}/download-creditnote-pdf")
+async def download_creditnote_pdf(
+    return_order_id: str,
+    created_by: str = Query(..., description="User ID to verify ownership"),
+):
+    """
+    Download the credit note PDF from Zoho Books for a return order.
+    Verifies the return order belongs to the requesting user.
+    """
+    try:
+        object_id = validate_object_id(return_order_id)
+        created_by_id = validate_object_id(created_by)
+
+        return_order = return_orders_collection.find_one({"_id": object_id})
+        if not return_order:
+            raise HTTPException(status_code=404, detail="Return order not found")
+
+        # Verify ownership
+        if return_order.get("created_by") != created_by_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this return order")
+
+        creditnote_id = return_order.get("zoho_creditnote_id")
+        if not creditnote_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No credit note exists for this return order",
+            )
+
+        access_token = get_access_token("books")
+        if not access_token:
+            raise HTTPException(status_code=500, detail="Failed to get Zoho Books access token")
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        response = requests.get(
+            url=CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=creditnote_id),
+            headers=headers,
+            allow_redirects=False,
+        )
+
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=credit_note_{creditnote_id}.pdf"
+                },
+            )
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to fetch PDF: {response.text}",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error downloading credit note PDF: {str(e)}"
         )

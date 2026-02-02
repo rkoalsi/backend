@@ -1541,19 +1541,19 @@ def handle_shipment(data: dict):
         print("Invoice Not Found for Given Shipment")
 
 
-def handle_sales_return(data: dict):
-    salesreturn = data.get("salesreturn")
-    if not salesreturn:
-        print("No sales return data found in webhook")
+def handle_credit_note(data: dict):
+    creditnote = data.get("creditnote")
+    if not creditnote:
+        print("No credit note data found in webhook")
         return
 
-    salesreturn_id = str(salesreturn.get("salesreturn_id", ""))
+    creditnote_id = str(creditnote.get("creditnote_id", ""))
 
-    if salesreturn_id:
-        existing = db.sales_returns.find_one({"salesreturn_id": salesreturn_id})
+    if creditnote_id:
+        existing = db.credit_notes.find_one({"creditnote_id": creditnote_id})
 
         # Sort all keys alphabetically
-        sorted_data = sort_dict_keys(salesreturn)
+        sorted_data = sort_dict_keys(creditnote)
         current_time = datetime.datetime.now()
 
         # Parse datetime fields
@@ -1569,25 +1569,26 @@ def handle_sales_return(data: dict):
                     sorted_data[field] = parsed_dt
 
         if existing:
-            # Update existing sales return
+            # Update existing credit note
             sorted_data["updated_at"] = current_time
             if "created_at" not in sorted_data and "created_at" in existing:
                 sorted_data["created_at"] = existing["created_at"]
             elif "created_at" not in sorted_data:
                 sorted_data["created_at"] = sorted_data.get("created_time", current_time)
 
-            db.sales_returns.update_one(
-                {"salesreturn_id": salesreturn_id}, {"$set": sorted_data}
+            db.credit_notes.update_one(
+                {"creditnote_id": creditnote_id}, {"$set": sorted_data}
             )
-            print(f"Updated sales return with salesreturn_id {salesreturn_id}")
+            print(f"Updated credit note with creditnote_id {creditnote_id}")
         else:
-            # Create new sales return
+            # Create new credit note
             sorted_data["created_at"] = sorted_data.get("created_time", current_time)
             sorted_data["updated_at"] = current_time
-            db.sales_returns.insert_one(sorted_data)
-            print(f"Created new sales return with salesreturn_id {salesreturn_id}")
+            db.credit_notes.insert_one(sorted_data)
+            print(f"Created new credit note with creditnote_id {creditnote_id}")
     else:
-        print("Sales Return ID not found. Webhook Received")
+        print("Credit Note ID not found. Webhook Received")
+
 
 
 def handle_customer_payment(data: dict):
@@ -1695,10 +1696,10 @@ def shipment(
     return "Shipment Webhook Received Successfully"
 
 
-@router.post("/sales_return")
-def sales_return(data: dict):
-    handle_sales_return(data)
-    return "Sales Return Webhook Received Successfully"
+@router.post("/credit_note")
+def credit_note(data: dict):
+    handle_credit_note(data)
+    return "Credit Note Webhook Received Successfully"
 
 
 @router.post("/customer_payment")
