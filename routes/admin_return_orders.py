@@ -203,7 +203,7 @@ def find_salesorder_for_return(
         return {"error": str(e), "salesorder_id": None}
 
 
-def _build_credit_note_payload(return_order: dict) -> dict:
+def _build_credit_note_payload(return_order: dict, reference_invoice_type: str = "registered") -> dict:
     """
     Build the credit note payload by looking up each product's Zoho item_id
     directly from the products collection.
@@ -267,7 +267,7 @@ def _build_credit_note_payload(return_order: dict) -> dict:
     # Build credit note payload
     payload = {
         "customer_id": contact_id,
-        "reference_invoice_type": "registered",
+        "reference_invoice_type": reference_invoice_type,
         "date": datetime.datetime.now().strftime("%Y-%m-%d"),
         "reference_number": str(return_order.get("_id", "")),
         "line_items": zoho_line_items,
@@ -280,7 +280,7 @@ def _build_credit_note_payload(return_order: dict) -> dict:
     }
 
 
-def create_zoho_credit_note(return_order: dict) -> dict:
+def create_zoho_credit_note(return_order: dict, reference_invoice_type: str = "registered") -> dict:
     """
     Create a credit note in Zoho Books.
     Returns the Zoho response or error details.
@@ -295,7 +295,7 @@ def create_zoho_credit_note(return_order: dict) -> dict:
             "Content-Type": "application/json",
         }
 
-        build_result = _build_credit_note_payload(return_order)
+        build_result = _build_credit_note_payload(return_order, reference_invoice_type)
         if not build_result.get("success"):
             return build_result
 
@@ -381,6 +381,11 @@ def update_zoho_credit_note(return_order: dict, creditnote_id: str) -> dict:
 # Pydantic model for status update
 class StatusUpdateRequest(BaseModel):
     status: str
+
+
+# Pydantic model for credit note creation
+class CreditNoteRequest(BaseModel):
+    reference_invoice_type: str = "registered"
 
 
 @router.get("")
@@ -682,24 +687,6 @@ def update_return_order_status(
             "updated_at": datetime.datetime.now(datetime.timezone.utc),
         }
 
-        # If status is being changed to "approved" and Zoho credit note hasn't been created yet
-        zoho_result = None
-        if new_status == "approved" and not existing_order.get("zoho_creditnote_id"):
-            print(f"Creating Zoho credit note for return order {return_order_id}")
-            zoho_result = create_zoho_credit_note(existing_order)
-
-            if zoho_result.get("success"):
-                update_data["zoho_creditnote_id"] = zoho_result.get("creditnote_id")
-                update_data["zoho_creditnote_number"] = zoho_result.get(
-                    "creditnote_number"
-                )
-                update_data["zoho_creditnote_status"] = zoho_result.get("status")
-                update_data["zoho_creditnote_created_at"] = datetime.datetime.now(datetime.timezone.utc)
-                print(f"Zoho credit note created successfully: {zoho_result}")
-            else:
-                print(f"Failed to create Zoho credit note: {zoho_result.get('error')}")
-                # Don't block status update, but include warning in response
-
         # Update the status
         update_result = return_orders_collection.update_one(
             {"_id": ObjectId(return_order_id)},
@@ -733,26 +720,10 @@ def update_return_order_status(
         cursor = return_orders_collection.aggregate(pipeline)
         updated_order = list(cursor)[0]
 
-        response = {
+        return {
             "message": f"Return order status updated to {status_request.status}",
             "return_order": serialize_mongo_document(updated_order),
         }
-
-        # Add Zoho credit note info to response if attempted
-        if zoho_result:
-            if zoho_result.get("success"):
-                response["zoho_creditnote"] = {
-                    "created": True,
-                    "creditnote_id": zoho_result.get("creditnote_id"),
-                    "creditnote_number": zoho_result.get("creditnote_number"),
-                }
-            else:
-                response["zoho_creditnote"] = {
-                    "created": False,
-                    "error": zoho_result.get("error"),
-                }
-
-        return response
 
     except HTTPException:
         raise
@@ -825,7 +796,7 @@ def update_return_order(return_order_id: str, update_data: dict):
 
 
 @router.post("/{return_order_id}/create-zoho-creditnote")
-def create_zoho_creditnote_for_return_order(return_order_id: str):
+def create_zoho_creditnote_for_return_order(return_order_id: str, request: CreditNoteRequest = None):
     """
     Manually create a Zoho credit note for a return order.
     Useful for retrying if auto-creation failed or for creating credit note
@@ -852,7 +823,9 @@ def create_zoho_creditnote_for_return_order(return_order_id: str):
                 },
             }
 
-        zoho_result = create_zoho_credit_note(return_order)
+        # Get reference_invoice_type from request or default to "registered"
+        reference_invoice_type = request.reference_invoice_type if request else "registered"
+        zoho_result = create_zoho_credit_note(return_order, reference_invoice_type)
 
         if zoho_result.get("success"):
             return_orders_collection.update_one(
