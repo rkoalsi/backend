@@ -9,10 +9,13 @@ from dateutil.parser import parse
 from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .helpers import send_email
-from typing import Dict, Any
+from typing import Dict, Any, List
 from bson import ObjectId
 from collections import defaultdict
 from calendar import monthrange
+from pathlib import Path
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 load_dotenv()
 
@@ -29,6 +32,108 @@ collection = db["products"]
 _access_token_cache = {"token": None, "expires_at": None}
 
 update_stock_lock = threading.Lock()
+
+# Google Sheets setup for tpack sync
+BASE_DIR = Path(__file__).resolve().parent.parent
+SERVICE_ACCOUNT_FILE = BASE_DIR / "creds.json"
+SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+TPACK_SHEET_ID = "1gz50Djg0OYH6bGOTf2iXmktylLOhybP2vMtZQJisuHo"
+TPACK_API_URL = "https://tpack.bubbleapps.io/version-test/api/1.1/wf/pupscribe-zoho-data/initialize"
+
+_sheets_service_webhooks = None
+
+def get_sheets_service_webhooks():
+    """Get or create Google Sheets service for webhooks"""
+    global _sheets_service_webhooks
+    if _sheets_service_webhooks is None:
+        credentials = Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SHEETS_SCOPES
+        )
+        _sheets_service_webhooks = build("sheets", "v4", credentials=credentials)
+    return _sheets_service_webhooks
+
+
+def sync_stock_to_tpack():
+    """
+    Fetch SKU codes from the Google Sheet, look them up in the products collection,
+    and send item_name, cf_sku_code, and stock (Pupscribe Warehouse) to tpack API.
+    """
+    try:
+        print("Starting tpack stock sync...")
+
+        # Get SKU codes from Google Sheet
+        sheets_service = get_sheets_service_webhooks()
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=TPACK_SHEET_ID,
+            range="A:Z"  # Get all columns to find the SKU Code (Final) column
+        ).execute()
+
+        values = result.get("values", [])
+        if not values:
+            print("No data found in the Google Sheet.")
+            return
+
+        # Find the "SKU Code (Final)" column index
+        header_row = values[0]
+        sku_col_index = None
+        for i, header in enumerate(header_row):
+            if header and "SKU Code (Final)" in header:
+                sku_col_index = i
+                break
+
+        if sku_col_index is None:
+            print("Could not find 'SKU Code (Final)' column in the sheet.")
+            return
+
+        # Extract SKU codes from the sheet (skip header row)
+        sku_codes = []
+        for row in values[1:]:
+            if len(row) > sku_col_index and row[sku_col_index]:
+                sku_codes.append(row[sku_col_index].strip())
+
+        print(f"Found {len(sku_codes)} SKU codes in the sheet.")
+
+        if not sku_codes:
+            print("No SKU codes found in the sheet.")
+            return
+
+        # Look up products by cf_sku_code in the database
+        products = list(collection.find(
+            {"cf_sku_code": {"$in": sku_codes}},
+            {"item_name": 1, "cf_sku_code": 1, "stock": 1, "_id": 0}
+        ))
+
+        print(f"Found {len(products)} matching products in the database.")
+
+        if not products:
+            print("No matching products found in the database.")
+            return
+
+        # Prepare data for API
+        stock_data: List[Dict[str, Any]] = []
+        for product in products:
+            stock_data.append({
+                "item_name": product.get("item_name", ""),
+                "cf_sku_code": product.get("cf_sku_code", ""),
+                "stock": product.get("stock", 0)
+            })
+
+        # Send to tpack API
+        print(f"Sending {len(stock_data)} products to tpack API...")
+        response = requests.post(
+            TPACK_API_URL,
+            json={"products": stock_data},
+            headers={"Content-Type": "application/json"},
+            timeout=60
+        )
+        print(f"{response.json()}")
+        if response.status_code == 200:
+            print(f"Successfully sent stock data to tpack API. Response: {response.text[:200]}")
+        else:
+            print(f"Failed to send stock data to tpack API. Status: {response.status_code}, Response: {response.text[:500]}")
+
+    except Exception as e:
+        print(f"Error in sync_stock_to_tpack: {e}")
 
 
 def parse_datetime(value):
@@ -650,6 +755,12 @@ def update_stock():
             print(f"Failed to execute bulk updates: {e}")
     else:
         print("No updates required.")
+
+    # Sync stock data to tpack API (run after DB update, before notifications)
+    try:
+        sync_stock_to_tpack()
+    except Exception as e:
+        print(f"Error syncing stock to tpack: {e}")
 
     # Check for in-stock notification requests
     try:

@@ -2,15 +2,25 @@ from fastapi import (
     APIRouter,
     HTTPException,
 )
-from ..config.root import get_database, serialize_mongo_document  
+from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
-import re, os
+import re, os, requests, json
 from dotenv import load_dotenv
 from collections import defaultdict
+from .helpers import get_access_token
+from passlib.hash import bcrypt
+
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    return bcrypt.hash(password)
 
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
+DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD")
+ZOHO_SALESPERSONS_URL = f"https://www.zohoapis.com/books/v3/salespersons?organization_id={org_id}"
 db = get_database()
 products_collection = db["products"]
 customers_collection = db["customers"]
@@ -117,9 +127,68 @@ async def create_salesperson(salesperson: dict):
             detail="Salesperson with this email or code already exists.",
         )
 
+    # Hash and add default password
+    salesperson["password"] = hash_password(DEFAULT_PASSWORD)
+
+    # Set default role
+    salesperson["role"] = "sales_person"
+
+    # Convert phone to integer
+    if salesperson.get("phone"):
+        salesperson["phone"] = int(salesperson["phone"])
+
+    # Split name into first_name and last_name
+    if salesperson.get("name"):
+        name_parts = salesperson["name"].strip().split()
+        salesperson["first_name"] = name_parts[0] if name_parts else ""
+        salesperson["last_name"] = name_parts[-1] if len(name_parts) > 1 else ""
+
     # Add salesperson to the collection
     db.users.insert_one(salesperson)
     return "Sales Person Created"
+
+
+@router.get("/zoho/salespersons")
+def get_zoho_salespersons():
+    """
+    Fetch salespersons from Zoho Books API and return only active ones.
+    """
+    try:
+        access_token = get_access_token("books")
+        if not access_token:
+            raise HTTPException(status_code=500, detail="Failed to get Zoho access token")
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        response = requests.get(ZOHO_SALESPERSONS_URL, headers=headers)
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Zoho API error: {response.text}"
+            )
+
+        data = response.json()
+        salespersons = data.get("data", [])
+
+        # Filter only active salespersons and return relevant fields
+        # Handle is_active as both boolean True and string "true"
+        print(json.dumps(salespersons, indent=4))
+        active_salespersons = [
+            {
+                "salesperson_id": sp.get("salesperson_id"),
+                "salesperson_name": sp.get("salesperson_name"),
+                "email": sp.get("salesperson_email", ""),
+            }
+            for sp in salespersons
+            if sp.get("is_active") in [True, "true", "True"]
+        ]
+
+        print(f"Total salespersons from Zoho: {len(salespersons)}, Active: {len(active_salespersons)}")
+
+        return {"salespersons": active_salespersons}
+
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
 
 
 @router.get("/{salesperson_id}")
