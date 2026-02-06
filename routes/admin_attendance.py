@@ -512,6 +512,7 @@ class CreateEmployeeRequest(BaseModel):
     department: Optional[str] = None
     designation: Optional[str] = None
     joining_date: Optional[str] = None
+    status: Optional[str] = None
     
     @validator('name')
     def validate_name(cls, v):
@@ -805,6 +806,7 @@ async def update_employee(employee_id: str, employee_data: CreateEmployeeRequest
                 "department": employee_data.department,
                 "designation": employee_data.designation,
                 "joining_date": employee_data.joining_date,
+                "status": employee_data.status or existing_employee.get("status", "active"),
                 "updated_at": datetime.now()
             }
         }
