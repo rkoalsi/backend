@@ -386,7 +386,9 @@ def get_products(
             "new": DESCENDING,
             "category": ASCENDING,
             "sub_category": ASCENDING,
+            "series_family": DESCENDING,
             "series": DESCENDING,
+            "series_order": ASCENDING,
             "rate": ASCENDING,              # PRICE FIRST within series
             "extracted_color": ASCENDING,   # COLOR SECOND - groups colors together
             "size_order": ASCENDING,        # SIZE THIRD - sorts sizes within each color
@@ -704,12 +706,14 @@ def get_all_products_catalogue(
         }
     })
 
-    # Use exact same sort as main products route (lines 373-383)
+    # Use exact same sort as main products route
     sort_stage = {
         "brand": ASCENDING,
         "category": ASCENDING,
         "sub_category": ASCENDING,
-        "series": ASCENDING,
+        "series_family": DESCENDING,
+        "series": DESCENDING,
+        "series_order": ASCENDING,
         "extracted_color": ASCENDING,
         "size_order": ASCENDING,
         "rate": ASCENDING,
