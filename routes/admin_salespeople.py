@@ -245,6 +245,13 @@ def salespeople_id(salesperson_id: str, salesperson: dict):
             status_code=400, detail="No valid fields provided for update"
         )
 
+    # Convert phone to integer if provided
+    if "phone" in update_data:
+        try:
+            update_data["phone"] = int(update_data["phone"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Phone must be a valid number")
+
     # Perform the update
     result = db.users.update_one(
         {"_id": ObjectId(salesperson_id)},
