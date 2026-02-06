@@ -36,7 +36,9 @@ def get_customer_invoices(
     skip = (page - 1) * per_page
 
     # Fetch invoices sorted by date descending
-    invoices_cursor = db.invoices.find(query).sort("date", -1).skip(skip).limit(per_page)
+    invoices_cursor = (
+        db.invoices.find(query).sort("date", -1).skip(skip).limit(per_page)
+    )
     invoices = [serialize_mongo_document(doc) for doc in invoices_cursor]
 
     # Calculate summary stats
@@ -58,7 +60,7 @@ def get_customer_invoices(
             "total_balance": total_balance,
             "paid_count": paid_count,
             "overdue_count": overdue_count,
-        }
+        },
     }
 
 
@@ -85,7 +87,9 @@ def get_customer_credit_notes(
     skip = (page - 1) * per_page
 
     # Fetch credit notes sorted by date descending
-    credit_notes_cursor = db.credit_notes.find(query).sort("date", -1).skip(skip).limit(per_page)
+    credit_notes_cursor = (
+        db.credit_notes.find(query).sort("date", -1).skip(skip).limit(per_page)
+    )
     credit_notes = [serialize_mongo_document(doc) for doc in credit_notes_cursor]
 
     # Calculate summary stats
@@ -103,7 +107,7 @@ def get_customer_credit_notes(
             "total_credit_notes": len(all_credit_notes),
             "total_credits": total_credits,
             "total_balance": total_balance,
-        }
+        },
     }
 
 
@@ -117,17 +121,13 @@ def get_customer_dashboard_summary(
     """
     # Get recent invoices (last 5)
     recent_invoices = list(
-        db.invoices.find({"customer_id": customer_id})
-        .sort("date", -1)
-        .limit(5)
+        db.invoices.find({"customer_id": customer_id}).sort("date", -1).limit(5)
     )
     recent_invoices = [serialize_mongo_document(doc) for doc in recent_invoices]
 
     # Get recent credit notes (last 5)
     recent_credit_notes = list(
-        db.credit_notes.find({"customer_id": customer_id})
-        .sort("date", -1)
-        .limit(5)
+        db.credit_notes.find({"customer_id": customer_id}).sort("date", -1).limit(5)
     )
     recent_credit_notes = [serialize_mongo_document(doc) for doc in recent_credit_notes]
 
@@ -139,7 +139,9 @@ def get_customer_dashboard_summary(
         "total_balance": sum(inv.get("balance", 0) or 0 for inv in all_invoices),
         "paid": len([inv for inv in all_invoices if inv.get("status") == "paid"]),
         "overdue": len([inv for inv in all_invoices if inv.get("status") == "overdue"]),
-        "pending": len([inv for inv in all_invoices if inv.get("status") not in ["paid", "void"]]),
+        "pending": len(
+            [inv for inv in all_invoices if inv.get("status") not in ["paid", "void"]]
+        ),
     }
 
     # Calculate credit note stats
@@ -181,7 +183,9 @@ def get_customer_payments(
     skip = (page - 1) * per_page
 
     # Fetch payments sorted by date descending
-    payments_cursor = db.customer_payments.find(query).sort("date", -1).skip(skip).limit(per_page)
+    payments_cursor = (
+        db.customer_payments.find(query).sort("date", -1).skip(skip).limit(per_page)
+    )
     payments = [serialize_mongo_document(doc) for doc in payments_cursor]
 
     # Calculate summary stats
@@ -199,7 +203,7 @@ def get_customer_payments(
             "total_payments": len(all_payments),
             "total_amount": total_amount,
             "total_unused": total_unused,
-        }
+        },
     }
 
 
@@ -243,7 +247,7 @@ async def download_customer_statement(
                 customer_id=customer_id,
                 from_date=from_date,
                 to_date=to_date,
-                org_id=org_id
+                org_id=org_id,
             ),
             headers=headers,
             allow_redirects=False,
