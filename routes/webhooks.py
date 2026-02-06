@@ -757,10 +757,10 @@ def update_stock():
         print("No updates required.")
 
     # Sync stock data to tpack API (run after DB update, before notifications)
-    try:
-        sync_stock_to_tpack()
-    except Exception as e:
-        print(f"Error syncing stock to tpack: {e}")
+    # try:
+    #     sync_stock_to_tpack()
+    # except Exception as e:
+    #     print(f"Error syncing stock to tpack: {e}")
 
     # Check for in-stock notification requests
     try:
