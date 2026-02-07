@@ -705,13 +705,13 @@ def update_stock():
         print(f"Fetched {len(active_products)} active products from the database.")
     except Exception as e:
         print(f"Failed to fetch active products from the database: {e}")
-        return
+        return 0
 
     # Fetch stock data from Zoho
     stock_data = get_zoho_stock()
     if not stock_data:
         print("No stock data fetched from Zoho.")
-        return
+        return 0
 
     stock_dict = {item["name"]: item["stock"] for item in stock_data}
     print(f"Stock data contains {len(stock_dict)} items.")
@@ -747,10 +747,12 @@ def update_stock():
                 print(f"Product: '{product_name}' - No similar matches")
 
     # Execute bulk updates
+    updated_count = 0
     if updates:
         try:
             result = collection.bulk_write(updates)
-            print(f"Total products updated with stock: {result.modified_count}")
+            updated_count = result.modified_count
+            print(f"Total products updated with stock: {updated_count}")
         except Exception as e:
             print(f"Failed to execute bulk updates: {e}")
     else:
@@ -774,7 +776,7 @@ def update_stock():
 
         if not in_stock_product_ids:
             print("No products currently in stock, skipping notification check.")
-            return
+            return updated_count
 
         # Find pending notify requests for products that are now in stock
         pending_requests = list(db["product_notify_requests"].find({
@@ -784,14 +786,14 @@ def update_stock():
 
         if not pending_requests:
             print("No pending stock notification requests.")
-            return
+            return updated_count
 
         print(f"Found {len(pending_requests)} pending stock notification requests.")
 
         template_doc = db.templates.find_one({"name": "in_stock_notification"})
         if not template_doc:
             print("WhatsApp template 'in_stock_notification' not found. Skipping notifications.")
-            return
+            return updated_count
 
         notified_ids = []
         for req in pending_requests:
@@ -834,6 +836,8 @@ def update_stock():
 
     except Exception as e:
         print(f"Error processing stock notifications: {e}")
+
+    return updated_count
 
 
 def run_update_stock():
