@@ -17,7 +17,9 @@ import uvicorn
 
 origins = [
     "http://localhost:3000",
+    "http://localhost:3001",
     "https://localhost:3000",
+    "https://localhost:3001",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
     "https://orderform.pupscribe.in",  # Frontend (home route)

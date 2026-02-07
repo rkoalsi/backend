@@ -28,6 +28,7 @@ from .admin_hooks import router as admin_hooks_router
 from .admin_potential_customers import router as admin_potential_customers_router
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
+from .webhooks import update_stock, update_stock_lock
 from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
@@ -36,6 +37,8 @@ from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_attendance import router as admin_attendance_router
 from .admin_users import router as admin_users_router
+from .admin_careers import router as admin_careers_router
+from .admin_career_applications import router as admin_career_applications_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -1076,6 +1079,22 @@ def get_products(
     except Exception as e:
         print(e)
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@router.post("/products/update-stock")
+def admin_update_stock():
+    """
+    Runs the stock update synchronously and returns the count of updated products.
+    """
+    if update_stock_lock.locked():
+        raise HTTPException(status_code=409, detail="Stock update is already running.")
+    with update_stock_lock:
+        try:
+            updated_count = update_stock()
+            return {"updated_count": updated_count}
+        except Exception as e:
+            print(f"Error running update_stock: {e}")
+            raise HTTPException(status_code=500, detail="Stock update failed.")
 
 
 @router.get("/products/download")
@@ -3157,5 +3176,17 @@ router.include_router(
     admin_users_router,
     prefix="/users",
     tags=["Customer Management"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_careers_router,
+    prefix="/careers",
+    tags=["Admin Careers"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_career_applications_router,
+    prefix="/career_applications",
+    tags=["Admin Career Applications"],
     dependencies=[Depends(JWTBearer())],
 )

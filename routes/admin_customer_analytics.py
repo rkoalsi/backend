@@ -1327,6 +1327,7 @@ def download_customer_analytics_report(
         description="Filter by last billing activity (all, last_month, last_45_days, last_2_months, last_3_months, not_last_month, not_last_45_days, not_last_2_months, not_last_3_months)",
     ),
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
+    include_brand_breakdown: Optional[bool] = Query(False, description="Include brand breakdown sheet"),
 ):
     try:
         # Build the match stage dynamically
@@ -2545,6 +2546,7 @@ def download_customer_analytics_report(
             {
                 "$project": {
                     "_id": 0,
+                    "customerId": 1,
                     "customerName": 1,
                     "shippingAddress": "$shippingAddressFormatted",  # Updated to use shipping address
                     "status": "$customerStatus",
@@ -2694,6 +2696,193 @@ def download_customer_analytics_report(
             adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
             worksheet.column_dimensions[column_letter].width = adjusted_width
 
+        # Add Brand Breakdown sheet if requested
+        if include_brand_breakdown:
+            brand_ws = workbook.create_sheet("Brand Breakdown")
+
+            current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
+            last_fy_label = f"FY {last_fy_start_year}-{str(last_fy_start_year + 1)[2:]}"
+            previous_fy_label = f"FY {previous_fy_start_year}-{str(previous_fy_start_year + 1)[2:]}"
+
+            brand_headers = [
+                "Customer Name",
+                "Brand",
+                previous_fy_label,
+                last_fy_label,
+                current_fy_label,
+            ]
+
+            for col, header in enumerate(brand_headers, 1):
+                cell = brand_ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+
+            # Pre-fetch product item_id -> brand map (lightweight, small collection)
+            brand_map = {}
+            for prod in products_collection.find({}, {"item_id": 1, "brand": 1, "_id": 0}):
+                brand_map[prod.get("item_id", "")] = prod.get("brand", "Unknown") or "Unknown"
+
+            # Collect customer IDs and name lookup
+            customer_ids = []
+            customer_name_map = {}
+            for customer in customers:
+                cid = customer.get("customerId", "")
+                if cid:
+                    customer_ids.append(cid)
+                    customer_name_map[cid] = customer.get("customerName", "")
+
+            # Lightweight pipeline: no $lookup, group by customer_id + item_id
+            brand_pipeline = [
+                {
+                    "$match": {
+                        "customer_id": {"$in": customer_ids},
+                        "date": {"$gte": "2023-04-01"},
+                        "status": {"$nin": ["void", "draft"]},
+                    }
+                },
+                {
+                    "$addFields": {
+                        "invoiceYear": {
+                            "$year": {"$dateFromString": {"dateString": "$date"}}
+                        },
+                        "invoiceMonth": {
+                            "$month": {"$dateFromString": {"dateString": "$date"}}
+                        },
+                    }
+                },
+                {
+                    "$addFields": {
+                        "isCurrentFY": {
+                            "$or": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", current_fy_start_year]},
+                                        {"$gte": ["$invoiceMonth", 4]},
+                                    ]
+                                },
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", current_fy_start_year + 1]},
+                                        {"$lte": ["$invoiceMonth", 3]},
+                                    ]
+                                },
+                            ]
+                        },
+                        "isLastFY": {
+                            "$or": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", last_fy_start_year]},
+                                        {"$gte": ["$invoiceMonth", 4]},
+                                    ]
+                                },
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", last_fy_start_year + 1]},
+                                        {"$lte": ["$invoiceMonth", 3]},
+                                    ]
+                                },
+                            ]
+                        },
+                        "isPreviousFY": {
+                            "$or": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", previous_fy_start_year]},
+                                        {"$gte": ["$invoiceMonth", 4]},
+                                    ]
+                                },
+                                {
+                                    "$and": [
+                                        {"$eq": ["$invoiceYear", previous_fy_start_year + 1]},
+                                        {"$lte": ["$invoiceMonth", 3]},
+                                    ]
+                                },
+                            ]
+                        },
+                    }
+                },
+                {"$unwind": {"path": "$line_items", "preserveNullAndEmptyArrays": False}},
+                {
+                    "$group": {
+                        "_id": {
+                            "customer_id": "$customer_id",
+                            "item_id": "$line_items.item_id",
+                        },
+                        "currentFY": {
+                            "$sum": {
+                                "$cond": [
+                                    "$isCurrentFY",
+                                    {"$ifNull": ["$line_items.item_total", 0]},
+                                    0,
+                                ]
+                            }
+                        },
+                        "lastFY": {
+                            "$sum": {
+                                "$cond": [
+                                    "$isLastFY",
+                                    {"$ifNull": ["$line_items.item_total", 0]},
+                                    0,
+                                ]
+                            }
+                        },
+                        "previousFY": {
+                            "$sum": {
+                                "$cond": [
+                                    "$isPreviousFY",
+                                    {"$ifNull": ["$line_items.item_total", 0]},
+                                    0,
+                                ]
+                            }
+                        },
+                    }
+                },
+            ]
+
+            # Run aggregation and re-aggregate by brand in Python
+            from collections import defaultdict
+            brand_totals = defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0})
+
+            for row in db.invoices.aggregate(brand_pipeline, allowDiskUse=True):
+                cid = row["_id"]["customer_id"]
+                item_id = row["_id"].get("item_id", "")
+                brand = brand_map.get(item_id, "Unknown")
+                key = (cid, brand)
+                brand_totals[key]["currentFY"] += row.get("currentFY", 0)
+                brand_totals[key]["lastFY"] += row.get("lastFY", 0)
+                brand_totals[key]["previousFY"] += row.get("previousFY", 0)
+
+            # Sort by customer name then by currentFY desc
+            sorted_brands = sorted(
+                brand_totals.items(),
+                key=lambda x: (customer_name_map.get(x[0][0], ""), -(x[1]["currentFY"])),
+            )
+
+            brand_row = 2
+            for (cid, brand), totals in sorted_brands:
+                customer_name = customer_name_map.get(cid, cid)
+                brand_ws.cell(row=brand_row, column=1, value=customer_name)
+                brand_ws.cell(row=brand_row, column=2, value=brand)
+                brand_ws.cell(row=brand_row, column=3, value=round(totals["previousFY"], 2))
+                brand_ws.cell(row=brand_row, column=4, value=round(totals["lastFY"], 2))
+                brand_ws.cell(row=brand_row, column=5, value=round(totals["currentFY"], 2))
+                brand_row += 1
+
+            # Auto-adjust column widths for brand sheet
+            for column in brand_ws.columns:
+                max_length = 0
+                column_letter = get_column_letter(column[0].column)
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                brand_ws.column_dimensions[column_letter].width = adjusted_width
+
         # Save to BytesIO
         excel_buffer = BytesIO()
         workbook.save(excel_buffer)
@@ -2711,4 +2900,223 @@ def download_customer_analytics_report(
 
     except Exception as e:
         logger.error(f"Error in download_customer_analytics_report: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@router.get("/brand-breakdown")
+def get_brand_breakdown(
+    customer_id: str = Query(..., description="Customer ID to get brand breakdown for"),
+):
+    try:
+        current_date = datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+
+        if current_month >= 4:
+            current_fy_start_year = current_year
+        else:
+            current_fy_start_year = current_year - 1
+
+        last_fy_start_year = current_fy_start_year - 1
+        previous_fy_start_year = current_fy_start_year - 2
+
+        pipeline = [
+            {
+                "$match": {
+                    "customer_id": customer_id,
+                    "date": {"$gte": "2023-04-01"},
+                    "status": {"$nin": ["void", "draft"]},
+                }
+            },
+            {
+                "$addFields": {
+                    "invoiceYear": {
+                        "$year": {"$dateFromString": {"dateString": "$date"}}
+                    },
+                    "invoiceMonth": {
+                        "$month": {"$dateFromString": {"dateString": "$date"}}
+                    },
+                }
+            },
+            {
+                "$addFields": {
+                    "fyLabel": {
+                        "$cond": {
+                            "if": {"$gte": ["$invoiceMonth", 4]},
+                            "then": {
+                                "$concat": [
+                                    "FY ",
+                                    {"$toString": "$invoiceYear"},
+                                    "-",
+                                    {
+                                        "$substr": [
+                                            {"$toString": {"$add": ["$invoiceYear", 1]}},
+                                            2,
+                                            2,
+                                        ]
+                                    },
+                                ]
+                            },
+                            "else": {
+                                "$concat": [
+                                    "FY ",
+                                    {
+                                        "$toString": {
+                                            "$subtract": ["$invoiceYear", 1]
+                                        }
+                                    },
+                                    "-",
+                                    {"$substr": [{"$toString": "$invoiceYear"}, 2, 2]},
+                                ]
+                            },
+                        }
+                    },
+                    "isCurrentFY": {
+                        "$or": [
+                            {
+                                "$and": [
+                                    {"$eq": ["$invoiceYear", current_fy_start_year]},
+                                    {"$gte": ["$invoiceMonth", 4]},
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {
+                                        "$eq": [
+                                            "$invoiceYear",
+                                            current_fy_start_year + 1,
+                                        ]
+                                    },
+                                    {"$lte": ["$invoiceMonth", 3]},
+                                ]
+                            },
+                        ]
+                    },
+                    "isLastFY": {
+                        "$or": [
+                            {
+                                "$and": [
+                                    {"$eq": ["$invoiceYear", last_fy_start_year]},
+                                    {"$gte": ["$invoiceMonth", 4]},
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {
+                                        "$eq": [
+                                            "$invoiceYear",
+                                            last_fy_start_year + 1,
+                                        ]
+                                    },
+                                    {"$lte": ["$invoiceMonth", 3]},
+                                ]
+                            },
+                        ]
+                    },
+                    "isPreviousFY": {
+                        "$or": [
+                            {
+                                "$and": [
+                                    {"$eq": ["$invoiceYear", previous_fy_start_year]},
+                                    {"$gte": ["$invoiceMonth", 4]},
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {
+                                        "$eq": [
+                                            "$invoiceYear",
+                                            previous_fy_start_year + 1,
+                                        ]
+                                    },
+                                    {"$lte": ["$invoiceMonth", 3]},
+                                ]
+                            },
+                        ]
+                    },
+                }
+            },
+            {"$unwind": {"path": "$line_items", "preserveNullAndEmptyArrays": False}},
+            {
+                "$lookup": {
+                    "from": "products",
+                    "localField": "line_items.item_id",
+                    "foreignField": "item_id",
+                    "as": "product_info",
+                }
+            },
+            {
+                "$addFields": {
+                    "brand": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$product_info.brand", 0]},
+                            "Unknown",
+                        ]
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$brand",
+                    "currentFY": {
+                        "$sum": {
+                            "$cond": [
+                                "$isCurrentFY",
+                                {"$ifNull": ["$line_items.item_total", 0]},
+                                0,
+                            ]
+                        }
+                    },
+                    "lastFY": {
+                        "$sum": {
+                            "$cond": [
+                                "$isLastFY",
+                                {"$ifNull": ["$line_items.item_total", 0]},
+                                0,
+                            ]
+                        }
+                    },
+                    "previousFY": {
+                        "$sum": {
+                            "$cond": [
+                                "$isPreviousFY",
+                                {"$ifNull": ["$line_items.item_total", 0]},
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "brand": "$_id",
+                    "currentFY": {"$round": ["$currentFY", 2]},
+                    "lastFY": {"$round": ["$lastFY", 2]},
+                    "previousFY": {"$round": ["$previousFY", 2]},
+                }
+            },
+            {"$sort": {"currentFY": -1}},
+        ]
+
+        results = list(db.invoices.aggregate(pipeline))
+
+        # Build FY labels
+        current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
+        last_fy_label = f"FY {last_fy_start_year}-{str(last_fy_start_year + 1)[2:]}"
+        previous_fy_label = f"FY {previous_fy_start_year}-{str(previous_fy_start_year + 1)[2:]}"
+
+        return JSONResponse(
+            content={
+                "brands": results,
+                "fyLabels": {
+                    "currentFY": current_fy_label,
+                    "lastFY": last_fy_label,
+                    "previousFY": previous_fy_label,
+                },
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error in get_brand_breakdown: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e)})
