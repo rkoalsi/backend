@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 import logging, asyncio, aiohttp, time, re, os, requests
 from typing import Optional, Dict
 from collections import OrderedDict
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
+from dateutil.parser import parse as dateutil_parse
 
 # Configure logging
 logging.basicConfig(
@@ -1393,6 +1393,211 @@ async def stock_cron():
         send_slack_notification("Stock Cron Error", success=False, error_msg=str(e))
 
 
+def parse_datetime(value):
+    """Parse a datetime string into a datetime object."""
+    if isinstance(value, datetime):
+        return value
+    try:
+        return dateutil_parse(value)
+    except (ValueError, TypeError):
+        return datetime.now()
+
+
+def process_item_data(item_data):
+    """Process item data and return only the required fields."""
+    item_data["item_id"] = str(item_data["item_id"])
+    item_name = str(item_data.get("name"))
+    brand_name = str(item_data.get("brand"))
+
+    result = {
+        "item_id": item_data.get("item_id", ""),
+        "name": item_data.get("name", ""),
+        "item_name": item_name,
+        "unit": item_data.get("unit", "pcs"),
+        "brand": brand_name,
+        "status": item_data.get("status", "inactive"),
+        "is_combo_product": item_data.get("is_combo_product", False),
+        "rate": item_data.get("rate", 1),
+        "item_tax_preferences": item_data.get("item_tax_preferences", []),
+        "account_name": item_data.get("account_name", ""),
+        "purchase_rate": item_data.get("purchase_rate", 0),
+        "item_type": item_data.get("item_type", "sales"),
+        "product_type": item_data.get("product_type", "goods"),
+        "is_taxable": item_data.get("is_taxable", True),
+        "track_batch_number": item_data.get("track_batch_number", False),
+        "hsn_or_sac": item_data.get("hsn_or_sac", ""),
+        "sku": item_data.get("sku", ""),
+        "upc_code": item_data.get("upc", ""),
+        "manufacturer": item_data.get("manufacturer", ""),
+        "cf_item_code": item_data.get("custom_field_hash", {}).get("cf_item_code", ""),
+        "cf_sku_code": item_data.get("custom_field_hash", {}).get("cf_sku_code", ""),
+        "series": item_data.get("custom_field_hash", {}).get("cf_series", ""),
+        "category": item_data.get("custom_field_hash", {}).get("cf_category", ""),
+        "sub_category": item_data.get("custom_field_hash", {}).get("cf_sub_category", ""),
+        "created_at": parse_datetime(item_data.get("created_time")),
+        "updated_at": parse_datetime(item_data.get("last_modified_time")),
+    }
+
+    return sort_dict_recursively(result)
+
+
+async def items_cron():
+    """Cron job for syncing items from Zoho Books daily (runs after estimates)."""
+    logger.info("Starting daily items sync...")
+    start_time = time.time()
+
+    total_processed = 0
+    total_inserted = 0
+    total_updated = 0
+    total_errors = 0
+
+    try:
+        db = get_database()
+        collection = db["products"]
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages
+            items_url = (
+                f"https://www.zohoapis.com/books/v3/items?"
+                f"page=1&per_page=200&response_option=2&"
+                f"organization_id={org_id}"
+            )
+
+            data = await api_client.make_request(items_url)
+            if not data:
+                logger.error("Failed to get response from items API")
+                return
+
+            page_context = data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            total_items = page_context.get("total", 0)
+
+            logger.info(f"Found {total_items} total items across {total_pages} pages")
+
+            # Process all pages
+            for page in range(1, total_pages + 1):
+                logger.info(f"Processing items page {page}/{total_pages}...")
+
+                page_url = (
+                    f"https://www.zohoapis.com/books/v3/items?"
+                    f"page={page}&per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data or "items" not in page_data:
+                    logger.warning(f"No items found on page {page}")
+                    continue
+
+                page_items = page_data["items"]
+                logger.info(f"Page {page}: Found {len(page_items)} items")
+
+                # Collect item IDs that need detail fetching
+                new_item_ids = []
+                existing_item_ids = []
+
+                for item in page_items:
+                    inv_id = str(item["item_id"])
+                    total_processed += 1
+                    existing_doc = collection.find_one({"item_id": inv_id}, {"_id": 1})
+                    if not existing_doc:
+                        new_item_ids.append(inv_id)
+                    else:
+                        existing_item_ids.append(inv_id)
+
+                logger.info(
+                    f"Page {page}: {len(new_item_ids)} new, {len(existing_item_ids)} existing"
+                )
+
+                if not new_item_ids:
+                    continue
+
+                # Fetch details for new items concurrently
+                detail_tasks = []
+                for inv_id in new_item_ids:
+                    detail_url = (
+                        f"https://www.zohoapis.com/books/v3/items/{inv_id}?"
+                        f"organization_id={org_id}"
+                    )
+                    detail_tasks.append(api_client.make_request(detail_url))
+
+                semaphore = asyncio.Semaphore(5)
+
+                async def fetch_detail_with_semaphore(task):
+                    async with semaphore:
+                        return await task
+
+                detail_results = await asyncio.gather(
+                    *[fetch_detail_with_semaphore(task) for task in detail_tasks],
+                    return_exceptions=True,
+                )
+
+                items_to_insert = []
+                for i, result in enumerate(detail_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(
+                                f"Error fetching item {new_item_ids[i]}: {result}"
+                            )
+                            total_errors += 1
+                            continue
+
+                        if result and "item" in result:
+                            processed_item = process_item_data(result["item"])
+                            items_to_insert.append(processed_item)
+                    except Exception as e:
+                        logger.error(f"Error processing item {new_item_ids[i]}: {e}")
+                        total_errors += 1
+
+                if items_to_insert:
+                    try:
+                        insert_result = collection.insert_many(
+                            items_to_insert, ordered=False
+                        )
+                        inserted = len(insert_result.inserted_ids)
+                        total_inserted += inserted
+                        logger.info(f"Inserted {inserted} items from page {page}")
+                    except Exception as e:
+                        logger.error(f"Error during bulk insert for page {page}: {e}")
+                        for doc in items_to_insert:
+                            try:
+                                collection.insert_one(doc)
+                                total_inserted += 1
+                            except Exception as e2:
+                                logger.error(f"Failed to insert item: {e2}")
+                                total_errors += 1
+
+                if page < total_pages:
+                    await asyncio.sleep(1)
+
+            duration = time.time() - start_time
+
+            logger.info(f"Items sync completed!")
+            logger.info(
+                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+            )
+
+            send_slack_notification(
+                "Items Cron",
+                success=True,
+                details={
+                    "processed": total_processed,
+                    "inserted": total_inserted,
+                    "pages": total_pages,
+                    "duration": duration,
+                },
+            )
+
+    except Exception as e:
+        error_msg = f"Error in items sync: {e}"
+        logger.error(error_msg)
+        send_slack_notification("Items Cron Error", success=False, error_msg=str(e))
+
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
@@ -1465,6 +1670,19 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added stock_cron job")
+
+        scheduler_instance.add_job(
+            items_cron,
+            "cron",
+            hour=16,
+            minute=30,
+            id="items_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added items_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
