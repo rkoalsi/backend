@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, validator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import random
 import re
 import httpx
@@ -9,6 +9,11 @@ from ..config.root import get_database
 from ..config.whatsapp import send_whatsapp
 
 router = APIRouter()
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist():
+    return datetime.now(IST)
 
 # Cache for country codes to avoid repeated API calls
 _country_codes_cache = None
@@ -392,9 +397,9 @@ async def send_otp(request: SendOTPRequest):
                 {
                     "$set": {
                         "otp": otp,
-                        "otp_created_at": datetime.now(),
+                        "otp_created_at": now_ist(),
                         "otp_attempts": 0,
-                        "updated_at": datetime.now()
+                        "updated_at": now_ist()
                     }
                 }
             )
@@ -403,11 +408,11 @@ async def send_otp(request: SendOTPRequest):
             db.catalogue_leads.insert_one({
                 "phone": phone,
                 "otp": otp,
-                "otp_created_at": datetime.now(),
+                "otp_created_at": now_ist(),
                 "otp_attempts": 0,
                 "verified": False,
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
+                "created_at": now_ist(),
+                "updated_at": now_ist()
             })
 
         # Get WhatsApp template
@@ -471,7 +476,9 @@ async def verify_otp(request: VerifyOTPRequest):
             raise HTTPException(status_code=400, detail="No OTP found. Please request a new OTP")
 
         # Check OTP expiry (10 minutes)
-        time_diff = datetime.now() - otp_created_at
+        if otp_created_at.tzinfo is None:
+            otp_created_at = otp_created_at.replace(tzinfo=IST)
+        time_diff = now_ist() - otp_created_at
         if time_diff > timedelta(minutes=10):
             raise HTTPException(status_code=400, detail="OTP expired. Please request a new OTP")
 
@@ -501,8 +508,8 @@ async def verify_otp(request: VerifyOTPRequest):
             {
                 "$set": {
                     "verified": True,
-                    "verified_at": datetime.now(),
-                    "updated_at": datetime.now()
+                    "verified_at": now_ist(),
+                    "updated_at": now_ist()
                 },
                 "$unset": {"otp": "", "otp_created_at": "", "otp_attempts": ""}
             }
