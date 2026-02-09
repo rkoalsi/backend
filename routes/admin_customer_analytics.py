@@ -36,6 +36,916 @@ s3_client = boto3.client(
 )
 
 
+def build_customer_analytics_pipeline(
+    match_stage,
+    customer_status_match_stage,
+    sales_person_logic,
+    due_status,
+    last_billed,
+    current_date_info,
+    include_all_invoices=False,
+):
+    """
+    Builds the shared MongoDB aggregation pipeline for customer analytics.
+    Both the GET endpoint and the /report endpoint call this.
+
+    current_date_info is a dict with keys:
+        current_year, current_month, current_fy_start_year,
+        last_fy_start_year, previous_fy_start_year,
+        completed_months_in_current_fy, current_date
+    """
+    current_year = current_date_info["current_year"]
+    current_month = current_date_info["current_month"]
+    current_fy_start_year = current_date_info["current_fy_start_year"]
+    last_fy_start_year = current_date_info["last_fy_start_year"]
+    previous_fy_start_year = current_date_info["previous_fy_start_year"]
+    completed_months_in_current_fy = current_date_info["completed_months_in_current_fy"]
+    current_date = current_date_info["current_date"]
+
+    pipeline = [
+        # Stage 1: Filter invoices
+        {"$match": match_stage},
+        # Stage 1b: Early $project — only carry forward fields needed downstream
+        {
+            "$project": {
+                "date": 1,
+                "customer_name": 1,
+                "customer_id": 1,
+                "invoice_number": 1,
+                "invoice_id": 1,
+                "due_date": 1,
+                "status": 1,
+                "total": 1,
+                "balance": 1,
+                "salesperson_name": 1,
+                "cf_sales_person": 1,
+                "shipping_address": 1,
+            }
+        },
+        # Stage 2: Parse date ONCE, then compute all date-derived fields
+        {
+            "$addFields": {
+                "parsedDate": {"$dateFromString": {"dateString": "$date"}},
+                "parsedYear": {"$year": {"$dateFromString": {"dateString": "$date"}}},
+                "parsedMonth": {"$month": {"$dateFromString": {"dateString": "$date"}}},
+            }
+        },
+        # Stage 3: Compute all boolean/derived fields using the pre-parsed date fields
+        {
+            "$addFields": {
+                "yearMonth": {
+                    "$concat": [
+                        {"$toString": "$parsedYear"},
+                        "-",
+                        {
+                            "$cond": {
+                                "if": {"$lt": ["$parsedMonth", 10]},
+                                "then": {
+                                    "$concat": [
+                                        "0",
+                                        {"$toString": "$parsedMonth"},
+                                    ]
+                                },
+                                "else": {"$toString": "$parsedMonth"},
+                            }
+                        },
+                    ]
+                },
+                # Payment categorization
+                "isDuePayment": {
+                    "$not": {"$in": ["$status", ["void", "draft", "sent", "paid"]]}
+                },
+                "isNotDuePayment": {
+                    "$not": {
+                        "$in": ["$status", ["void", "overdue", "partially_paid"]]
+                    }
+                },
+                # Current month check
+                "isCurrentMonth": {
+                    "$and": [
+                        {"$eq": ["$parsedYear", current_year]},
+                        {"$eq": ["$parsedMonth", current_month]},
+                    ]
+                },
+                # Completed months in current FY
+                "isCompletedMonth": {
+                    "$or": (
+                        [
+                            {
+                                "$and": [
+                                    {"$eq": ["$parsedYear", current_fy_start_year]},
+                                    {"$gte": ["$parsedMonth", 4]},
+                                    {"$lt": ["$parsedMonth", current_month]},
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {"$eq": ["$parsedYear", current_fy_start_year + 1]},
+                                    {"$gte": ["$parsedMonth", 1]},
+                                    {"$lt": ["$parsedMonth", current_month]},
+                                    {"$lte": ["$parsedMonth", 3]},
+                                ]
+                            },
+                        ]
+                        if current_month > 4
+                        else [
+                            {
+                                "$and": [
+                                    {"$eq": ["$parsedYear", current_fy_start_year]},
+                                    {"$gte": ["$parsedMonth", 4]},
+                                    {"$lt": ["$parsedMonth", current_month]},
+                                ]
+                            }
+                        ]
+                    )
+                },
+                # Current financial year
+                "isCurrentFY": {
+                    "$or": [
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", current_fy_start_year]},
+                                {"$gte": ["$parsedMonth", 4]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", current_fy_start_year + 1]},
+                                {"$lte": ["$parsedMonth", 3]},
+                            ]
+                        },
+                    ]
+                },
+                # Last financial year
+                "isLastFY": {
+                    "$or": [
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", last_fy_start_year]},
+                                {"$gte": ["$parsedMonth", 4]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", last_fy_start_year + 1]},
+                                {"$lte": ["$parsedMonth", 3]},
+                            ]
+                        },
+                    ]
+                },
+                # Previous financial year
+                "isPreviousFY": {
+                    "$or": [
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", previous_fy_start_year]},
+                                {"$gte": ["$parsedMonth", 4]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", previous_fy_start_year + 1]},
+                                {"$lte": ["$parsedMonth", 3]},
+                            ]
+                        },
+                    ]
+                },
+                # Normalize city
+                "normalizedCity": {
+                    "$switch": {
+                        "branches": [
+                            {
+                                "case": {
+                                    "$and": [
+                                        {"$ne": ["$shipping_address.city", None]},
+                                        {"$ne": ["$shipping_address.city", ""]},
+                                        {
+                                            "$regexMatch": {
+                                                "input": {
+                                                    "$ifNull": [
+                                                        "$shipping_address.city",
+                                                        "",
+                                                    ]
+                                                },
+                                                "regex": "^(bangalore|bengaluru)$",
+                                                "options": "i",
+                                            }
+                                        },
+                                    ]
+                                },
+                                "then": "bengaluru",
+                            },
+                            {
+                                "case": {
+                                    "$and": [
+                                        {"$ne": ["$shipping_address.city", None]},
+                                        {"$ne": ["$shipping_address.city", ""]},
+                                        {
+                                            "$regexMatch": {
+                                                "input": {
+                                                    "$ifNull": [
+                                                        "$shipping_address.city",
+                                                        "",
+                                                    ]
+                                                },
+                                                "regex": "^(mumbai|bombay)$",
+                                                "options": "i",
+                                            }
+                                        },
+                                    ]
+                                },
+                                "then": "mumbai",
+                            },
+                            {
+                                "case": {
+                                    "$and": [
+                                        {"$ne": ["$shipping_address.city", None]},
+                                        {"$ne": ["$shipping_address.city", ""]},
+                                        {
+                                            "$regexMatch": {
+                                                "input": {
+                                                    "$ifNull": [
+                                                        "$shipping_address.city",
+                                                        "",
+                                                    ]
+                                                },
+                                                "regex": "^(delhi|new delhi)$",
+                                                "options": "i",
+                                            }
+                                        },
+                                    ]
+                                },
+                                "then": "delhi",
+                            },
+                        ],
+                        "default": {
+                            "$toLower": {
+                                "$ifNull": [
+                                    "$shipping_address.city",
+                                    "unknown_city",
+                                ]
+                            }
+                        },
+                    }
+                },
+                # Normalized full street
+                "normalizedFullStreet": {
+                    "$trim": {
+                        "input": {
+                            "$replaceAll": {
+                                "input": {
+                                    "$replaceAll": {
+                                        "input": {
+                                            "$replaceAll": {
+                                                "input": {
+                                                    "$toLower": {
+                                                        "$concat": [
+                                                            {"$ifNull": ["$shipping_address.street", ""]},
+                                                            " ",
+                                                            {"$ifNull": ["$shipping_address.street2", ""]}
+                                                        ]
+                                                    }
+                                                },
+                                                "find": ",",
+                                                "replacement": " "
+                                            }
+                                        },
+                                        "find": ".",
+                                        "replacement": " "
+                                    }
+                                },
+                                "find": "  ",
+                                "replacement": " "
+                            }
+                        }
+                    }
+                },
+                # Shipping address checks
+                "hasShippingAddress": {"$ne": ["$shipping_address", None]},
+                "shippingAddressComplete": {
+                    "$and": [
+                        {"$ne": ["$shipping_address", None]},
+                        {"$ne": ["$shipping_address.city", None]},
+                        {"$ne": ["$shipping_address.city", ""]},
+                        {"$ne": ["$shipping_address.state", None]},
+                        {"$ne": ["$shipping_address.country", None]},
+                    ]
+                },
+                # Billing period validations using parsedYear/parsedMonth
+                "billedLastMonth": {
+                    "$and": [
+                        {
+                            "$eq": [
+                                "$parsedYear",
+                                (
+                                    current_year
+                                    if current_month > 1
+                                    else current_year - 1
+                                ),
+                            ]
+                        },
+                        {
+                            "$eq": [
+                                "$parsedMonth",
+                                current_month - 1 if current_month > 1 else 12,
+                            ]
+                        },
+                    ]
+                },
+                "billedLast45Days": {
+                    "$gte": [
+                        "$parsedDate",
+                        {
+                            "$dateFromString": {
+                                "dateString": f"{current_date.year}-{current_date.month:02d}-{max(1, current_date.day - 45):02d}"
+                            }
+                        },
+                    ]
+                },
+                "billedLast2Months": {
+                    "$or": [
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", current_year]},
+                                {"$eq": ["$parsedMonth", current_month]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {
+                                    "$eq": [
+                                        "$parsedYear",
+                                        (
+                                            current_year
+                                            if current_month > 1
+                                            else current_year - 1
+                                        ),
+                                    ]
+                                },
+                                {
+                                    "$eq": [
+                                        "$parsedMonth",
+                                        (
+                                            current_month - 1
+                                            if current_month > 1
+                                            else 12
+                                        ),
+                                    ]
+                                },
+                            ]
+                        },
+                    ]
+                },
+                "billedLast3Months": {
+                    "$or": [
+                        {
+                            "$and": [
+                                {"$eq": ["$parsedYear", current_year]},
+                                {"$eq": ["$parsedMonth", current_month]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {
+                                    "$eq": [
+                                        "$parsedYear",
+                                        (
+                                            current_year
+                                            if current_month > 1
+                                            else current_year - 1
+                                        ),
+                                    ]
+                                },
+                                {
+                                    "$eq": [
+                                        "$parsedMonth",
+                                        (
+                                            current_month - 1
+                                            if current_month > 1
+                                            else 12
+                                        ),
+                                    ]
+                                },
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {
+                                    "$eq": [
+                                        "$parsedYear",
+                                        (
+                                            current_year
+                                            if current_month > 2
+                                            else current_year - 1
+                                        ),
+                                    ]
+                                },
+                                {
+                                    "$eq": [
+                                        "$parsedMonth",
+                                        (
+                                            current_month - 2
+                                            if current_month > 2
+                                            else (12 + current_month - 2)
+                                        ),
+                                    ]
+                                },
+                            ]
+                        },
+                    ]
+                },
+            }
+        },
+    ]
+
+    # Stage 4: Group by customer name AND address
+    group_stage = {
+        "$group": {
+            "_id": {
+                "customerNameLower": {"$toLower": {"$trim": {"input": "$customer_name"}}},
+                "city": "$normalizedCity",
+                "state": {"$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}},
+                "zip": {"$replaceAll": {"input": {"$ifNull": ["$shipping_address.zip", ""]}, "find": " ", "replacement": ""}},
+                "fullStreet": "$normalizedFullStreet",
+            },
+            "customerId": {"$first": "$customer_id"},
+            "customerName": {"$first": "$customer_name"},
+            "shippingAddress": {"$first": "$shipping_address"},
+            "salesPerson": {"$first": sales_person_logic},
+            # Collect payment information
+            "duePayments": {
+                "$push": {
+                    "$cond": [
+                        "$isDuePayment",
+                        {
+                            "_id": "$_id",
+                            "date": "$date",
+                            "due_date": "$due_date",
+                            "invoice_number": "$invoice_number",
+                            "status": "$status",
+                            "invoice_id": "$invoice_id",
+                            "total": "$total",
+                            "balance": "$balance",
+                        },
+                        "$$REMOVE",
+                    ]
+                }
+            },
+            "notDuePayments": {
+                "$push": {
+                    "$cond": [
+                        "$isNotDuePayment",
+                        {
+                            "_id": "$_id",
+                            "date": "$date",
+                            "due_date": "$due_date",
+                            "invoice_number": "$invoice_number",
+                            "status": "$status",
+                            "invoice_id": "$invoice_id",
+                            "balance": "$balance",
+                            "total": "$total",
+                        },
+                        "$$REMOVE",
+                    ]
+                }
+            },
+            "totalSalesCurrentMonth": {
+                "$sum": {
+                    "$cond": [{"$eq": ["$isCurrentMonth", True]}, "$total", 0]
+                }
+            },
+            "lastBillDate": {"$max": "$parsedDate"},
+            "currentFYOrders": {
+                "$sum": {"$cond": [{"$eq": ["$isCurrentFY", True]}, 1, 0]}
+            },
+            "currentFYMonths": {
+                "$addToSet": {
+                    "$cond": [
+                        {"$eq": ["$isCurrentFY", True]},
+                        "$yearMonth",
+                        None,
+                    ]
+                }
+            },
+            "completedMonthOrders": {
+                "$sum": {"$cond": [{"$eq": ["$isCompletedMonth", True]}, 1, 0]}
+            },
+            "completedMonths": {
+                "$addToSet": {
+                    "$cond": [
+                        {"$eq": ["$isCompletedMonth", True]},
+                        "$yearMonth",
+                        None,
+                    ]
+                }
+            },
+            "billingTillDateCurrentYear": {
+                "$sum": {
+                    "$cond": [{"$eq": ["$isCurrentFY", True]}, "$total", 0]
+                }
+            },
+            "totalSalesLastFY": {
+                "$sum": {"$cond": [{"$eq": ["$isLastFY", True]}, "$total", 0]}
+            },
+            "totalSalesPreviousFY": {
+                "$sum": {
+                    "$cond": [{"$eq": ["$isPreviousFY", True]}, "$total", 0]
+                }
+            },
+            "hasBilledLastMonth": {
+                "$sum": {"$cond": [{"$eq": ["$billedLastMonth", True]}, 1, 0]}
+            },
+            "hasBilledLast45Days": {
+                "$sum": {"$cond": [{"$eq": ["$billedLast45Days", True]}, 1, 0]}
+            },
+            "hasBilledLast2Months": {
+                "$sum": {"$cond": [{"$eq": ["$billedLast2Months", True]}, 1, 0]}
+            },
+            "hasBilledLast3Months": {
+                "$sum": {"$cond": [{"$eq": ["$billedLast3Months", True]}, 1, 0]}
+            },
+            "totalInvoiceCount": {"$sum": 1},
+        }
+    }
+
+    # Only include allInvoices and allInvoiceDates when requested (report endpoint)
+    if include_all_invoices:
+        group_stage["$group"]["allInvoices"] = {
+            "$push": {
+                "_id": "$_id",
+                "invoice_number": "$invoice_number",
+                "date": "$date",
+                "due_date": "$due_date",
+                "status": "$status",
+                "total": "$total",
+                "balance": "$balance",
+                "customer_id": "$customer_id",
+                "invoice_id": "$invoice_id",
+                "yearMonth": "$yearMonth",
+                "isCurrentMonth": "$isCurrentMonth",
+                "isCurrentFY": "$isCurrentFY",
+                "isLastFY": "$isLastFY",
+                "isPreviousFY": "$isPreviousFY",
+            }
+        }
+        group_stage["$group"]["allInvoiceDates"] = {"$push": "$parsedDate"}
+
+    pipeline.append(group_stage)
+
+    # Stage 5: Lookup customer details
+    pipeline.append(
+        {
+            "$lookup": {
+                "from": "customers",
+                "localField": "customerId",
+                "foreignField": "contact_id",
+                "as": "customerDetails",
+            }
+        }
+    )
+    pipeline.append({"$match": customer_status_match_stage})
+
+    # Stage 6: Calculate derived fields
+    pipeline.append(
+        {
+            "$addFields": {
+                "currentFYMonthsFiltered": {
+                    "$filter": {
+                        "input": "$currentFYMonths",
+                        "cond": {"$ne": ["$$this", None]},
+                    }
+                },
+                "completedMonthsFiltered": {
+                    "$filter": {
+                        "input": "$completedMonths",
+                        "cond": {"$ne": ["$$this", None]},
+                    }
+                },
+                "customerStatus": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$customerDetails.status", 0]},
+                        "unknown",
+                    ]
+                },
+                "customerTier": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$customerDetails.cf_tier", 0]},
+                        "unknown",
+                    ]
+                },
+                "salesPerson": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
+                        "$salesPerson",
+                    ]
+                },
+                "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
+                "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
+                "hasBilledLast2Months": {"$gt": ["$hasBilledLast2Months", 0]},
+                "hasBilledLast3Months": {"$gt": ["$hasBilledLast3Months", 0]},
+            }
+        }
+    )
+
+    # Stage 7: Final metrics
+    pipeline.append(
+        {
+            "$addFields": {
+                "averageOrderFrequencyMonthly": {
+                    "$cond": [
+                        {"$gt": ["$currentFYOrders", 0]},
+                        {
+                            "$divide": [
+                                "$currentFYOrders",
+                                completed_months_in_current_fy,
+                            ]
+                        },
+                        0,
+                    ]
+                },
+                "shippingAddressFormatted": {
+                    "$concat": [
+                        {"$ifNull": ["$shippingAddress.street", ""]},
+                        {
+                            "$cond": [
+                                {"$ne": ["$shippingAddress.street2", ""]},
+                                {"$concat": [", ", "$shippingAddress.street2"]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$shippingAddress.city", ""]},
+                                {"$concat": [", ", "$shippingAddress.city"]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$shippingAddress.state", ""]},
+                                {"$concat": [", ", "$shippingAddress.state"]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$shippingAddress.zip", ""]},
+                                {"$concat": [" - ", "$shippingAddress.zip"]},
+                                "",
+                            ]
+                        },
+                    ]
+                },
+            }
+        }
+    )
+
+    # Stage 8: Due status filtering
+    pipeline.append(
+        {
+            "$addFields": {
+                "filteredDuePayments": {
+                    "$cond": [
+                        {
+                            "$or": [
+                                {"$eq": [due_status, "all"]},
+                                {"$eq": [due_status, "due"]},
+                            ]
+                        },
+                        "$duePayments",
+                        [],
+                    ]
+                },
+                "filteredNotDuePayments": {
+                    "$cond": [
+                        {
+                            "$or": [
+                                {"$eq": [due_status, "all"]},
+                                {"$eq": [due_status, "not_due"]},
+                            ]
+                        },
+                        "$notDuePayments",
+                        [],
+                    ]
+                },
+            }
+        }
+    )
+    pipeline.append(
+        {
+            "$match": {
+                "$expr": {
+                    "$or": [
+                        {"$eq": [due_status, "all"]},
+                        {
+                            "$and": [
+                                {"$eq": [due_status, "due"]},
+                                {"$gt": [{"$size": "$filteredDuePayments"}, 0]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [due_status, "not_due"]},
+                                {"$gt": [{"$size": "$filteredNotDuePayments"}, 0]},
+                            ]
+                        },
+                    ]
+                }
+            }
+        }
+    )
+
+    # Stage 9: Last billed filtering
+    pipeline.append(
+        {
+            "$match": {
+                "$expr": {
+                    "$or": [
+                        {"$eq": [last_billed, "all"]},
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "last_month"]},
+                                {"$eq": ["$hasBilledLastMonth", True]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "last_45_days"]},
+                                {"$eq": ["$hasBilledLast45Days", True]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "last_2_months"]},
+                                {"$eq": ["$hasBilledLast2Months", True]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "last_3_months"]},
+                                {"$eq": ["$hasBilledLast3Months", True]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "not_last_month"]},
+                                {"$eq": ["$hasBilledLastMonth", False]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "not_last_45_days"]},
+                                {"$eq": ["$hasBilledLast45Days", False]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "not_last_2_months"]},
+                                {"$eq": ["$hasBilledLast2Months", False]},
+                            ]
+                        },
+                        {
+                            "$and": [
+                                {"$eq": [last_billed, "not_last_3_months"]},
+                                {"$eq": ["$hasBilledLast3Months", False]},
+                            ]
+                        },
+                    ]
+                }
+            }
+        }
+    )
+
+    # Stage 10: Final projection
+    project_stage = {
+        "$project": {
+            "_id": 0,
+            "customerId": 1,
+            "customerName": 1,
+            "shippingAddress": "$shippingAddressFormatted",
+            "status": "$customerStatus",
+            "tier": "$customerTier",
+            "totalSalesCurrentMonth": {
+                "$round": ["$totalSalesCurrentMonth", 2]
+            },
+            "lastBillDate": {
+                "$dateToString": {"format": "%Y-%m-%d", "date": "$lastBillDate"}
+            },
+            "averageOrderFrequencyMonthly": {
+                "$round": ["$averageOrderFrequencyMonthly", 2]
+            },
+            "billingTillDateCurrentYear": {
+                "$round": ["$billingTillDateCurrentYear", 2]
+            },
+            "totalSalesLastFY": {"$round": ["$totalSalesLastFY", 2]},
+            "totalSalesPreviousFY": {"$round": ["$totalSalesPreviousFY", 2]},
+            "salesPerson": 1,
+            "hasBilledLastMonth": 1,
+            "hasBilledLast45Days": 1,
+            "hasBilledLast2Months": 1,
+            "hasBilledLast3Months": 1,
+            "duePayments": "$filteredDuePayments",
+            "notDuePayments": "$filteredNotDuePayments",
+            "totalInvoiceCount": 1,
+            "currentFYInvoiceCount": "$currentFYOrders",
+        }
+    }
+
+    if include_all_invoices:
+        project_stage["$project"]["allInvoices"] = 1
+
+    pipeline.append(project_stage)
+
+    # Stage 11: Sort by customer name
+    pipeline.append({"$sort": {"customerName": 1}})
+
+    return pipeline
+
+
+def _get_current_date_info():
+    """Compute all date-related info needed by the pipeline."""
+    current_date = datetime.now()
+    current_year = current_date.year
+    current_month = current_date.month
+
+    if current_month >= 4:
+        current_fy_start_year = current_year
+    else:
+        current_fy_start_year = current_year - 1
+
+    last_fy_start_year = current_fy_start_year - 1
+    previous_fy_start_year = current_fy_start_year - 2
+
+    if current_month >= 4:
+        completed_months_in_current_fy = current_month - 4
+    else:
+        completed_months_in_current_fy = (12 - 4) + current_month
+
+    completed_months_in_current_fy = max(1, completed_months_in_current_fy)
+
+    return {
+        "current_date": current_date,
+        "current_year": current_year,
+        "current_month": current_month,
+        "current_fy_start_year": current_fy_start_year,
+        "last_fy_start_year": last_fy_start_year,
+        "previous_fy_start_year": previous_fy_start_year,
+        "completed_months_in_current_fy": completed_months_in_current_fy,
+    }
+
+
+def _build_match_and_filters(status, tier, sort_by):
+    """Build common match_stage, customer_status_match_stage, sort_stage, and sales_person_logic."""
+    match_stage = {
+        "date": {"$gte": "2023-04-01"},
+        "status": {"$nin": ["void", "draft"]},
+        "$and": [
+            {
+                "customer_name": {
+                    "$not": {
+                        "$regex": r"\b(EC|NA|PUPEV|RS|MKT|SPUR|SSAM|OSAMP)\b",
+                        "$options": "i",
+                    }
+                }
+            },
+            {
+                "customer_name": {
+                    "$not": {
+                        "$regex": r"(amzb2b|amz2b2|Blinkit|Flipkart)",
+                        "$options": "i",
+                    }
+                }
+            },
+        ],
+    }
+    customer_status_match_stage = {}
+    sort_stage = {"$sort": {"totalSalesCurrentMonth": 1}}
+
+    if status == "all":
+        pass
+    elif status:
+        customer_status_match_stage["customerDetails.status"] = status
+
+    if sort_by:
+        sort_stage["$sort"] = [{"totalSalesCurrentMonth": -1}]
+
+    sales_person_logic = {
+        "$cond": [
+            {"$ne": ["$salesperson_name", None]},
+            "$salesperson_name",
+            "$cf_sales_person",
+        ]
+    }
+
+    if tier and len(tier) == 1:
+        customer_status_match_stage["customerDetails.cf_tier"] = {
+            "$regex": f"^{tier}$",
+            "$options": "i",
+        }
+
+    return match_stage, customer_status_match_stage, sort_stage, sales_person_logic
+
+
 @router.get("")
 def get_admin_customer_analytics(
     status: Optional[str] = Query(None, description="Filter by invoice status"),
@@ -50,1265 +960,22 @@ def get_admin_customer_analytics(
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
 ):
     try:
+        match_stage, customer_status_match_stage, sort_stage, sales_person_logic = (
+            _build_match_and_filters(status, tier, sort_by)
+        )
+        current_date_info = _get_current_date_info()
 
-        # Build the match stage dynamically
-        match_stage = {
-            "date": {"$gte": "2023-04-01"},
-            "status": {"$nin": ["void", "draft"]},
-            "$and": [
-                {
-                    "customer_name": {
-                        "$not": {
-                            "$regex": r"\b(EC|NA|PUPEV|RS|MKT|SPUR|SSAM|OSAMP)\b",
-                            "$options": "i",
-                        }
-                    }
-                },
-                {
-                    "customer_name": {
-                        "$not": {
-                            "$regex": r"(amzb2b|amz2b2|Blinkit|Flipkart)",
-                            "$options": "i",
-                        }
-                    }
-                },
-            ],
-        }
-        customer_status_match_stage = {}
-        sort_stage = {"$sort": {"totalSalesCurrentMonth": 1}}
+        pipeline = build_customer_analytics_pipeline(
+            match_stage=match_stage,
+            customer_status_match_stage=customer_status_match_stage,
+            sales_person_logic=sales_person_logic,
+            due_status=due_status,
+            last_billed=last_billed,
+            current_date_info=current_date_info,
+            include_all_invoices=False,
+        )
 
-        # Add status filter if provided, otherwise use default exclusions
-        if status == "all":
-            pass
-        elif status:
-            customer_status_match_stage["customerDetails.status"] = status
-
-        # Add salesperson filter if provided
-
-        if sort_by:
-            sort_stage["$sort"] = [
-                {"totalSalesCurrentMonth": -1},
-            ]
-
-        sales_person_logic = {
-            "$cond": [
-                {"$ne": ["$salesperson_name", None]},
-                "$salesperson_name",
-                "$cf_sales_person",
-            ]
-        }
-        if tier and len(tier) == 1:
-            customer_status_match_stage["customerDetails.cf_tier"] = {
-                "$regex": f"^{tier}$",
-                "$options": "i",
-            }
-
-        # Get current date for dynamic calculations
-        from datetime import datetime
-
-        current_date = datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-
-        # Calculate current financial year
-        if current_month >= 4:  # April onwards
-            current_fy_start_year = current_year
-        else:  # January-March
-            current_fy_start_year = current_year - 1
-
-        # Calculate last and previous financial years
-        last_fy_start_year = current_fy_start_year - 1
-        previous_fy_start_year = current_fy_start_year - 2
-
-        # Calculate total COMPLETED months passed in current FY (excluding current month)
-        if current_month >= 4:
-            # Same calendar year as FY start
-            completed_months_in_current_fy = (
-                current_month - 4
-            )  # Don't add +1 since we exclude current month
-        else:
-            # Next calendar year (Jan-Mar)
-            completed_months_in_current_fy = (
-                12 - 4
-            ) + current_month  # (Apr-Dec) + (Jan-current month, excluding current)
-
-        # Ensure we have at least 1 month to avoid division by zero
-        completed_months_in_current_fy = max(1, completed_months_in_current_fy)
-
-        # Complete aggregation pipeline
-        pipeline = [
-            # Stage 1: Filter invoices from April 1, 2023 onwards and only paid invoices
-            {"$match": match_stage},
-            # Stage 2: Add computed fields for date analysis
-            {
-                "$addFields": {
-                    "invoiceDate": {"$dateFromString": {"dateString": "$date"}},
-                    "year": {"$year": {"$dateFromString": {"dateString": "$date"}}},
-                    "month": {"$month": {"$dateFromString": {"dateString": "$date"}}},
-                    "yearMonth": {
-                        "$concat": [
-                            {
-                                "$toString": {
-                                    "$year": {
-                                        "$dateFromString": {"dateString": "$date"}
-                                    }
-                                }
-                            },
-                            "-",
-                            {
-                                "$cond": {
-                                    "if": {
-                                        "$lt": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            10,
-                                        ]
-                                    },
-                                    "then": {
-                                        "$concat": [
-                                            "0",
-                                            {
-                                                "$toString": {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "else": {
-                                        "$toString": {
-                                            "$month": {
-                                                "$dateFromString": {
-                                                    "dateString": "$date"
-                                                }
-                                            }
-                                        }
-                                    },
-                                }
-                            },
-                        ]
-                    },
-                    # Add payment categorization logic
-                    "isDuePayment": {
-                        "$not": {"$in": ["$status", ["void", "draft", "sent", "paid"]]}
-                    },
-                    "isNotDuePayment": {
-                        "$not": {
-                            "$in": ["$status", ["void", "overdue", "partially_paid"]]
-                        }
-                    },
-                    # Check if invoice is in current month (dynamic)
-                    "isCurrentMonth": {
-                        "$and": [
-                            {
-                                "$eq": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_year,
-                                ]
-                            },
-                            {
-                                "$eq": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_month,
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in completed months (dynamic: current FY start to last month)
-                    "isCompletedMonth": {
-                        "$or": (
-                            [
-                                # Same FY year, from April to previous month
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                4,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                    ]
-                                },
-                                # Next calendar year (if current month is Jan-Mar), from Jan to previous month
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year + 1,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                1,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                        {
-                                            "$lte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                3,
-                                            ]
-                                        },
-                                    ]
-                                },
-                            ]
-                            if current_month > 4
-                            else [
-                                # If current month is April or earlier, only check same calendar year
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                4,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                    ]
-                                }
-                            ]
-                        )
-                    },
-                    # Check if invoice is in current financial year (dynamic)
-                    "isCurrentFY": {
-                        "$or": [
-                            # From April onwards in FY start year
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Jan-Mar in next calendar year (if FY spans two calendar years)
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in last financial year (dynamic)
-                    "isLastFY": {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            last_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            last_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in previous financial year (dynamic)
-                    "isPreviousFY": {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            previous_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            previous_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Normalize city name to handle variations (with null handling) - Updated to use shipping_address
-                    "normalizedCity": {
-                        "$switch": {
-                            "branches": [
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(bangalore|bengaluru)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "bengaluru",
-                                },
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(mumbai|bombay)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "mumbai",
-                                },
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(delhi|new delhi)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "delhi",
-                                },
-                            ],
-                            "default": {
-                                "$toLower": {
-                                    "$ifNull": [
-                                        "$shipping_address.city",
-                                        "unknown_city",
-                                    ]
-                                }
-                            },
-                        }
-                    },
-                    # Combine street + street2 into full normalized street address (remove punctuation, extra spaces)
-                    "normalizedFullStreet": {
-                        "$trim": {
-                            "input": {
-                                "$replaceAll": {
-                                    "input": {
-                                        "$replaceAll": {
-                                            "input": {
-                                                "$replaceAll": {
-                                                    "input": {
-                                                        "$toLower": {
-                                                            "$concat": [
-                                                                {"$ifNull": ["$shipping_address.street", ""]},
-                                                                " ",
-                                                                {"$ifNull": ["$shipping_address.street2", ""]}
-                                                            ]
-                                                        }
-                                                    },
-                                                    "find": ",",
-                                                    "replacement": " "
-                                                }
-                                            },
-                                            "find": ".",
-                                            "replacement": " "
-                                        }
-                                    },
-                                    "find": "  ",
-                                    "replacement": " "
-                                }
-                            }
-                        }
-                    },
-                    # Add fields to check for missing shipping address data
-                    "hasShippingAddress": {"$ne": ["$shipping_address", None]},
-                    "shippingAddressComplete": {
-                        "$and": [
-                            {"$ne": ["$shipping_address", None]},
-                            {"$ne": ["$shipping_address.city", None]},
-                            {"$ne": ["$shipping_address.city", ""]},
-                            {"$ne": ["$shipping_address.state", None]},
-                            {"$ne": ["$shipping_address.country", None]},
-                        ]
-                    },
-                    # Billing period validations (dynamic)
-                    # Last month (previous month from current)
-                    "billedLastMonth": {
-                        "$and": [
-                            {
-                                "$eq": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    (
-                                        current_year
-                                        if current_month > 1
-                                        else current_year - 1
-                                    ),
-                                ]
-                            },
-                            {
-                                "$eq": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_month - 1 if current_month > 1 else 12,
-                                ]
-                            },
-                        ]
-                    },
-                    # Last 45 days (dynamic calculation)
-                    "billedLast45Days": {
-                        "$gte": [
-                            {"$dateFromString": {"dateString": "$date"}},
-                            {
-                                "$dateFromString": {
-                                    "dateString": f"{current_date.year}-{current_date.month:02d}-{max(1, current_date.day - 45):02d}"
-                                }
-                            },
-                        ]
-                    },
-                    # Last 2 months (dynamic)
-                    "billedLast2Months": {
-                        "$or": [
-                            # Current month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_year,
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_month,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Previous month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 1
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 1
-                                                if current_month > 1
-                                                else 12
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Last 3 months (dynamic)
-                    "billedLast3Months": {
-                        "$or": [
-                            # Current month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_year,
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_month,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Previous month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 1
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 1
-                                                if current_month > 1
-                                                else 12
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Month before that
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 2
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 2
-                                                if current_month > 2
-                                                else (12 + current_month - 2)
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                }
-            },
-            # Stage 3: Group by customer name AND address (all fields normalized)
-            # Note: Uses normalizedFullStreet (street + street2 combined) to handle data entry variations
-            {
-                "$group": {
-                    "_id": {
-                        "customerNameLower": {"$toLower": {"$trim": {"input": "$customer_name"}}},
-                        "city": "$normalizedCity",
-                        "state": {"$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}},
-                        "zip": {"$replaceAll": {"input": {"$ifNull": ["$shipping_address.zip", ""]}, "find": " ", "replacement": ""}},
-                        "fullStreet": "$normalizedFullStreet",
-                    },
-                    "customerId": {"$first": "$customer_id"},
-                    "customerName": {"$first": "$customer_name"},
-                    "shippingAddress": {"$first": "$shipping_address"},
-                    # Updated logic: Get the salesperson field that matches the sp_code
-                    "salesPerson": {"$first": sales_person_logic},
-                    # NEW: Collect ALL invoices for validation
-                    "allInvoices": {
-                        "$push": {
-                            "_id": "$_id",
-                            "invoice_number": "$invoice_number",
-                            "date": "$date",
-                            "due_date": "$due_date",
-                            "status": "$status",
-                            "total": "$total",
-                            "balance": "$balance",
-                            "customer_id": "$customer_id",
-                            "invoice_id": "$invoice_id",
-                            "yearMonth": "$yearMonth",
-                            "isCurrentMonth": "$isCurrentMonth",
-                            "isCurrentFY": "$isCurrentFY",
-                            "isLastFY": "$isLastFY",
-                            "isPreviousFY": "$isPreviousFY",
-                        }
-                    },
-                    # Collect payment information
-                    "duePayments": {
-                        "$push": {
-                            "$cond": [
-                                "$isDuePayment",
-                                {
-                                    "_id": "$_id",
-                                    "date": "$date",
-                                    "due_date": "$due_date",
-                                    "invoice_number": "$invoice_number",
-                                    "status": "$status",
-                                    "invoice_id": "$invoice_id",
-                                    "total": "$total",
-                                    "balance": "$balance",
-                                },
-                                "$$REMOVE",
-                            ]
-                        }
-                    },
-                    "notDuePayments": {
-                        "$push": {
-                            "$cond": [
-                                "$isNotDuePayment",
-                                {
-                                    "_id": "$_id",
-                                    "date": "$date",
-                                    "due_date": "$due_date",
-                                    "invoice_number": "$invoice_number",
-                                    "status": "$status",
-                                    "invoice_id": "$invoice_id",
-                                    "balance": "$balance",
-                                    "total": "$total",
-                                },
-                                "$$REMOVE",
-                            ]
-                        }
-                    },
-                    # Total sales current month (August 2025)
-                    "totalSalesCurrentMonth": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isCurrentMonth", True]}, "$total", 0]
-                        }
-                    },
-                    # Last bill date
-                    "lastBillDate": {"$max": "$invoiceDate"},
-                    # FIXED: Count of ALL orders in current financial year for frequency calculation
-                    "currentFYOrders": {
-                        "$sum": {"$cond": [{"$eq": ["$isCurrentFY", True]}, 1, 0]}
-                    },
-                    # FIXED: Unique months in current financial year for frequency calculation
-                    "currentFYMonths": {
-                        "$addToSet": {
-                            "$cond": [
-                                {"$eq": ["$isCurrentFY", True]},
-                                "$yearMonth",
-                                None,
-                            ]
-                        }
-                    },
-                    # Keep completed month orders for backward compatibility (if needed elsewhere)
-                    "completedMonthOrders": {
-                        "$sum": {"$cond": [{"$eq": ["$isCompletedMonth", True]}, 1, 0]}
-                    },
-                    # Keep completed months for backward compatibility (if needed elsewhere)
-                    "completedMonths": {
-                        "$addToSet": {
-                            "$cond": [
-                                {"$eq": ["$isCompletedMonth", True]},
-                                "$yearMonth",
-                                None,
-                            ]
-                        }
-                    },
-                    # Total billing current year (April 2025 onwards)
-                    "billingTillDateCurrentYear": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isCurrentFY", True]}, "$total", 0]
-                        }
-                    },
-                    # Total sales last financial year (April 2024 - March 2025)
-                    "totalSalesLastFY": {
-                        "$sum": {"$cond": [{"$eq": ["$isLastFY", True]}, "$total", 0]}
-                    },
-                    # Total sales previous financial year (April 2023 - March 2024)
-                    "totalSalesPreviousFY": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isPreviousFY", True]}, "$total", 0]
-                        }
-                    },
-                    # Billing validation checks
-                    "hasBilledLastMonth": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLastMonth", True]}, 1, 0]}
-                    },
-                    "hasBilledLast45Days": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast45Days", True]}, 1, 0]}
-                    },
-                    "hasBilledLast2Months": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast2Months", True]}, 1, 0]}
-                    },
-                    "hasBilledLast3Months": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast3Months", True]}, 1, 0]}
-                    },
-                    # All invoice dates for additional analysis
-                    "allInvoiceDates": {"$push": "$invoiceDate"},
-                }
-            },
-            # Stage 4: Lookup customer details from customers collection
-            {
-                "$lookup": {
-                    "from": "customers",
-                    "localField": "customerId",
-                    "foreignField": "contact_id",
-                    "as": "customerDetails",
-                }
-            },
-            {"$match": customer_status_match_stage},
-            # Stage 5: Calculate average order frequency and billing validations
-            {
-                "$addFields": {
-                    # FIXED: Remove null values from currentFYMonths array (for frequency calculation)
-                    "currentFYMonthsFiltered": {
-                        "$filter": {
-                            "input": "$currentFYMonths",
-                            "cond": {"$ne": ["$$this", None]},
-                        }
-                    },
-                    # Keep the old logic for backward compatibility
-                    "completedMonthsFiltered": {
-                        "$filter": {
-                            "input": "$completedMonths",
-                            "cond": {"$ne": ["$$this", None]},
-                        }
-                    },
-                    # Extract customer status and tier from lookup
-                    "customerStatus": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.status", 0]},
-                            "unknown",
-                        ]
-                    },
-                    "customerTier": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.cf_tier", 0]},
-                            "unknown",
-                        ]
-                    },
-                    # Get sales person from customer record (overrides invoice sales person)
-                    "salesPerson": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
-                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
-                        ]
-                    },
-                    # Boolean flags for billing periods (true = HAS billed)
-                    "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
-                    "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
-                    "hasBilledLast2Months": {"$gt": ["$hasBilledLast2Months", 0]},
-                    "hasBilledLast3Months": {"$gt": ["$hasBilledLast3Months", 0]},
-                }
-            },
-            # Stage 6: Calculate final metrics
-            {
-                "$addFields": {
-                    # FIXED: Calculate frequency using total orders divided by completed months in FY
-                    "averageOrderFrequencyMonthly": {
-                        "$cond": [
-                            {"$gt": ["$currentFYOrders", 0]},
-                            {
-                                "$divide": [
-                                    "$currentFYOrders",
-                                    completed_months_in_current_fy,
-                                ]
-                            },
-                            0,
-                        ]
-                    },
-                    # Format shipping address as string (updated from billing to shipping)
-                    "shippingAddressFormatted": {
-                        "$concat": [
-                            {"$ifNull": ["$shippingAddress.street", ""]},
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.street2", ""]},
-                                    {"$concat": [", ", "$shippingAddress.street2"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.city", ""]},
-                                    {"$concat": [", ", "$shippingAddress.city"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.state", ""]},
-                                    {"$concat": [", ", "$shippingAddress.state"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.zip", ""]},
-                                    {"$concat": [" - ", "$shippingAddress.zip"]},
-                                    "",
-                                ]
-                            },
-                        ]
-                    },
-                }
-            },
-            # Stage 7: Filter based on due_status if not "all"
-            {
-                "$addFields": {
-                    # Apply filtering based on due_status parameter
-                    "filteredDuePayments": {
-                        "$cond": [
-                            {
-                                "$or": [
-                                    {"$eq": [due_status, "all"]},
-                                    {"$eq": [due_status, "due"]},
-                                ]
-                            },
-                            "$duePayments",
-                            [],
-                        ]
-                    },
-                    "filteredNotDuePayments": {
-                        "$cond": [
-                            {
-                                "$or": [
-                                    {"$eq": [due_status, "all"]},
-                                    {"$eq": [due_status, "not_due"]},
-                                ]
-                            },
-                            "$notDuePayments",
-                            [],
-                        ]
-                    },
-                }
-            },
-            {
-                "$match": {
-                    "$expr": {
-                        "$or": [
-                            {
-                                "$eq": [due_status, "all"]
-                            },  # Include all customers when due_status is "all"
-                            {
-                                "$and": [
-                                    {"$eq": [due_status, "due"]},
-                                    {
-                                        "$gt": [{"$size": "$filteredDuePayments"}, 0]
-                                    },  # Only customers with due payments
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [due_status, "not_due"]},
-                                    {
-                                        "$gt": [{"$size": "$filteredNotDuePayments"}, 0]
-                                    },  # Only customers with not due payments
-                                ]
-                            },
-                        ]
-                    }
-                }
-            },
-            # NEW Stage 8: Filter based on last_billed parameter
-            {
-                "$match": {
-                    "$expr": {
-                        "$or": [
-                            {"$eq": [last_billed, "all"]},  # Include all customers
-                            # Positive filters (customers who HAVE billed in specific periods)
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_month"]},
-                                    {"$eq": ["$hasBilledLastMonth", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_45_days"]},
-                                    {"$eq": ["$hasBilledLast45Days", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_2_months"]},
-                                    {"$eq": ["$hasBilledLast2Months", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_3_months"]},
-                                    {"$eq": ["$hasBilledLast3Months", True]},
-                                ]
-                            },
-                            # Negative filters (customers who have NOT billed in specific periods)
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_month"]},
-                                    {"$eq": ["$hasBilledLastMonth", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_45_days"]},
-                                    {"$eq": ["$hasBilledLast45Days", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_2_months"]},
-                                    {"$eq": ["$hasBilledLast2Months", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_3_months"]},
-                                    {"$eq": ["$hasBilledLast3Months", False]},
-                                ]
-                            },
-                        ]
-                    }
-                }
-            },
-            # Stage 9: Project final output format
-            {
-                "$project": {
-                    "_id": 0,
-                    "customerName": 1,
-                    "shippingAddress": "$shippingAddressFormatted",  # Updated to use shipping address
-                    "status": "$customerStatus",
-                    "tier": "$customerTier",
-                    "totalSalesCurrentMonth": {
-                        "$round": ["$totalSalesCurrentMonth", 2]
-                    },
-                    "lastBillDate": {
-                        "$dateToString": {"format": "%Y-%m-%d", "date": "$lastBillDate"}
-                    },
-                    "averageOrderFrequencyMonthly": {
-                        "$round": ["$averageOrderFrequencyMonthly", 2]
-                    },
-                    "billingTillDateCurrentYear": {
-                        "$round": ["$billingTillDateCurrentYear", 2]
-                    },
-                    "totalSalesLastFY": {"$round": ["$totalSalesLastFY", 2]},
-                    "totalSalesPreviousFY": {"$round": ["$totalSalesPreviousFY", 2]},
-                    "salesPerson": 1,
-                    "hasBilledLastMonth": 1,
-                    "hasBilledLast45Days": 1,
-                    "hasBilledLast2Months": 1,
-                    "hasBilledLast3Months": 1,
-                    # Include payment lists
-                    "duePayments": "$filteredDuePayments",
-                    "notDuePayments": "$filteredNotDuePayments",
-                    # NEW: Include all invoices for validation
-                    "allInvoices": 1,
-                    # Additional fields for validation
-                    "totalInvoiceCount": {"$size": "$allInvoices"},
-                    "currentFYInvoiceCount": "$currentFYOrders",
-                }
-            },
-            # Stage 11: Sort by customer name
-            {"$sort": {"customerName": 1}},
-        ]
-
-        customers = list(db.invoices.aggregate(pipeline))
+        customers = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
         return serialize_mongo_document(customers)
     except Exception as e:
         logger.error(f"Error in get_customer_analytics: {str(e)}")
@@ -1330,1262 +997,23 @@ def download_customer_analytics_report(
     include_brand_breakdown: Optional[bool] = Query(False, description="Include brand breakdown sheet"),
 ):
     try:
-        # Build the match stage dynamically
-        match_stage = {
-            "date": {"$gte": "2023-04-01"},
-            "status": {"$nin": ["void", "draft"]},
-            "$and": [
-                {
-                    "customer_name": {
-                        "$not": {
-                            "$regex": r"\b(EC|NA|PUPEV|RS|MKT|SPUR|SSAM|OSAMP)\b",
-                            "$options": "i",
-                        }
-                    }
-                },
-                {
-                    "customer_name": {
-                        "$not": {
-                            "$regex": r"(amzb2b|amz2b2|Blinkit|Flipkart)",
-                            "$options": "i",
-                        }
-                    }
-                },
-            ],
-        }
-        customer_status_match_stage = {}
-        sort_stage = {"$sort": {"totalSalesCurrentMonth": 1}}
+        match_stage, customer_status_match_stage, sort_stage, sales_person_logic = (
+            _build_match_and_filters(status, tier, sort_by)
+        )
+        current_date_info = _get_current_date_info()
 
-        # Add status filter if provided, otherwise use default exclusions
-        if status == "all":
-            pass
-        elif status:
-            customer_status_match_stage["customerDetails.status"] = status
-
-        if sort_by:
-            sort_stage["$sort"] = [
-                {"totalSalesCurrentMonth": -1},
-            ]
-
-        sales_person_logic = {
-            "$cond": [
-                {"$ne": ["$salesperson_name", None]},
-                "$salesperson_name",
-                "$cf_sales_person",
-            ]
-        }
-        if tier and len(tier) == 1:
-            customer_status_match_stage["customerDetails.cf_tier"] = {
-                "$regex": f"^{tier}$",
-                "$options": "i",
-            }
-
-        # Get current date for dynamic calculations
-        current_date = datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-
-        # Calculate current financial year
-        if current_month >= 4:  # April onwards
-            current_fy_start_year = current_year
-        else:  # January-March
-            current_fy_start_year = current_year - 1
-
-        # Calculate last and previous financial years
-        last_fy_start_year = current_fy_start_year - 1
-        previous_fy_start_year = current_fy_start_year - 2
-
-        # Calculate total COMPLETED months passed in current FY (excluding current month)
-        if current_month >= 4:
-            # Same calendar year as FY start
-            completed_months_in_current_fy = (
-                current_month - 4
-            )  # Don't add +1 since we exclude current month
-        else:
-            # Next calendar year (Jan-Mar)
-            completed_months_in_current_fy = (
-                12 - 4
-            ) + current_month  # (Apr-Dec) + (Jan-current month, excluding current)
-
-        # Ensure we have at least 1 month to avoid division by zero
-        completed_months_in_current_fy = max(1, completed_months_in_current_fy)
-
-        # Complete aggregation pipeline
-        pipeline = [
-            # Stage 1: Filter invoices from April 1, 2023 onwards and only paid invoices
-            {"$match": match_stage},
-            # Stage 2: Add computed fields for date analysis
-            {
-                "$addFields": {
-                    "invoiceDate": {"$dateFromString": {"dateString": "$date"}},
-                    "year": {"$year": {"$dateFromString": {"dateString": "$date"}}},
-                    "month": {"$month": {"$dateFromString": {"dateString": "$date"}}},
-                    "yearMonth": {
-                        "$concat": [
-                            {
-                                "$toString": {
-                                    "$year": {
-                                        "$dateFromString": {"dateString": "$date"}
-                                    }
-                                }
-                            },
-                            "-",
-                            {
-                                "$cond": {
-                                    "if": {
-                                        "$lt": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            10,
-                                        ]
-                                    },
-                                    "then": {
-                                        "$concat": [
-                                            "0",
-                                            {
-                                                "$toString": {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "else": {
-                                        "$toString": {
-                                            "$month": {
-                                                "$dateFromString": {
-                                                    "dateString": "$date"
-                                                }
-                                            }
-                                        }
-                                    },
-                                }
-                            },
-                        ]
-                    },
-                    # Add payment categorization logic
-                    "isDuePayment": {
-                        "$not": {"$in": ["$status", ["void", "draft", "sent", "paid"]]}
-                    },
-                    "isNotDuePayment": {
-                        "$not": {
-                            "$in": ["$status", ["void", "overdue", "partially_paid"]]
-                        }
-                    },
-                    # Check if invoice is in current month (dynamic)
-                    "isCurrentMonth": {
-                        "$and": [
-                            {
-                                "$eq": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_year,
-                                ]
-                            },
-                            {
-                                "$eq": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_month,
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in completed months (dynamic: current FY start to last month)
-                    "isCompletedMonth": {
-                        "$or": (
-                            [
-                                # Same FY year, from April to previous month
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                4,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                    ]
-                                },
-                                # Next calendar year (if current month is Jan-Mar), from Jan to previous month
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year + 1,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                1,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                        {
-                                            "$lte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                3,
-                                            ]
-                                        },
-                                    ]
-                                },
-                            ]
-                            if current_month > 4
-                            else [
-                                # If current month is April or earlier, only check same calendar year
-                                {
-                                    "$and": [
-                                        {
-                                            "$eq": [
-                                                {
-                                                    "$year": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_fy_start_year,
-                                            ]
-                                        },
-                                        {
-                                            "$gte": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                4,
-                                            ]
-                                        },
-                                        {
-                                            "$lt": [
-                                                {
-                                                    "$month": {
-                                                        "$dateFromString": {
-                                                            "dateString": "$date"
-                                                        }
-                                                    }
-                                                },
-                                                current_month,
-                                            ]
-                                        },
-                                    ]
-                                }
-                            ]
-                        )
-                    },
-                    # Check if invoice is in current financial year (dynamic)
-                    "isCurrentFY": {
-                        "$or": [
-                            # From April onwards in FY start year
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Jan-Mar in next calendar year (if FY spans two calendar years)
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in last financial year (dynamic)
-                    "isLastFY": {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            last_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            last_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Check if invoice is in previous financial year (dynamic)
-                    "isPreviousFY": {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            previous_fy_start_year,
-                                        ]
-                                    },
-                                    {
-                                        "$gte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            4,
-                                        ]
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            previous_fy_start_year + 1,
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            3,
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Normalize city name to handle variations (with null handling) - Updated to use shipping_address
-                    "normalizedCity": {
-                        "$switch": {
-                            "branches": [
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(bangalore|bengaluru)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "bengaluru",
-                                },
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(mumbai|bombay)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "mumbai",
-                                },
-                                {
-                                    "case": {
-                                        "$and": [
-                                            {"$ne": ["$shipping_address.city", None]},
-                                            {"$ne": ["$shipping_address.city", ""]},
-                                            {
-                                                "$regexMatch": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$shipping_address.city",
-                                                            "",
-                                                        ]
-                                                    },
-                                                    "regex": "^(delhi|new delhi)$",
-                                                    "options": "i",
-                                                }
-                                            },
-                                        ]
-                                    },
-                                    "then": "delhi",
-                                },
-                            ],
-                            "default": {
-                                "$toLower": {
-                                    "$ifNull": [
-                                        "$shipping_address.city",
-                                        "unknown_city",
-                                    ]
-                                }
-                            },
-                        }
-                    },
-                    # Combine street + street2 into full normalized street address (remove punctuation, extra spaces)
-                    "normalizedFullStreet": {
-                        "$trim": {
-                            "input": {
-                                "$replaceAll": {
-                                    "input": {
-                                        "$replaceAll": {
-                                            "input": {
-                                                "$replaceAll": {
-                                                    "input": {
-                                                        "$toLower": {
-                                                            "$concat": [
-                                                                {"$ifNull": ["$shipping_address.street", ""]},
-                                                                " ",
-                                                                {"$ifNull": ["$shipping_address.street2", ""]}
-                                                            ]
-                                                        }
-                                                    },
-                                                    "find": ",",
-                                                    "replacement": " "
-                                                }
-                                            },
-                                            "find": ".",
-                                            "replacement": " "
-                                        }
-                                    },
-                                    "find": "  ",
-                                    "replacement": " "
-                                }
-                            }
-                        }
-                    },
-                    # Add fields to check for missing shipping address data
-                    "hasShippingAddress": {"$ne": ["$shipping_address", None]},
-                    "shippingAddressComplete": {
-                        "$and": [
-                            {"$ne": ["$shipping_address", None]},
-                            {"$ne": ["$shipping_address.city", None]},
-                            {"$ne": ["$shipping_address.city", ""]},
-                            {"$ne": ["$shipping_address.state", None]},
-                            {"$ne": ["$shipping_address.country", None]},
-                        ]
-                    },
-                    # Billing period validations (dynamic)
-                    # Last month (previous month from current)
-                    "billedLastMonth": {
-                        "$and": [
-                            {
-                                "$eq": [
-                                    {
-                                        "$year": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    (
-                                        current_year
-                                        if current_month > 1
-                                        else current_year - 1
-                                    ),
-                                ]
-                            },
-                            {
-                                "$eq": [
-                                    {
-                                        "$month": {
-                                            "$dateFromString": {"dateString": "$date"}
-                                        }
-                                    },
-                                    current_month - 1 if current_month > 1 else 12,
-                                ]
-                            },
-                        ]
-                    },
-                    # Last 45 days (dynamic calculation)
-                    "billedLast45Days": {
-                        "$gte": [
-                            {"$dateFromString": {"dateString": "$date"}},
-                            {
-                                "$dateFromString": {
-                                    "dateString": f"{current_date.year}-{current_date.month:02d}-{max(1, current_date.day - 45):02d}"
-                                }
-                            },
-                        ]
-                    },
-                    # Last 2 months (dynamic)
-                    "billedLast2Months": {
-                        "$or": [
-                            # Current month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_year,
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_month,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Previous month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 1
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 1
-                                                if current_month > 1
-                                                else 12
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    # Last 3 months (dynamic)
-                    "billedLast3Months": {
-                        "$or": [
-                            # Current month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_year,
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            current_month,
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Previous month
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 1
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 1
-                                                if current_month > 1
-                                                else 12
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                            # Month before that
-                            {
-                                "$and": [
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$year": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_year
-                                                if current_month > 2
-                                                else current_year - 1
-                                            ),
-                                        ]
-                                    },
-                                    {
-                                        "$eq": [
-                                            {
-                                                "$month": {
-                                                    "$dateFromString": {
-                                                        "dateString": "$date"
-                                                    }
-                                                }
-                                            },
-                                            (
-                                                current_month - 2
-                                                if current_month > 2
-                                                else (12 + current_month - 2)
-                                            ),
-                                        ]
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                }
-            },
-            # Stage 3: Group by customer name AND address (all fields normalized)
-            # Note: Uses normalizedFullStreet (street + street2 combined) to handle data entry variations
-            {
-                "$group": {
-                    "_id": {
-                        "customerNameLower": {"$toLower": {"$trim": {"input": "$customer_name"}}},
-                        "city": "$normalizedCity",
-                        "state": {"$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}},
-                        "zip": {"$replaceAll": {"input": {"$ifNull": ["$shipping_address.zip", ""]}, "find": " ", "replacement": ""}},
-                        "fullStreet": "$normalizedFullStreet",
-                    },
-                    "customerId": {"$first": "$customer_id"},
-                    "customerName": {"$first": "$customer_name"},
-                    "shippingAddress": {"$first": "$shipping_address"},
-                    # Updated logic: Get the salesperson field that matches the sp_code
-                    "salesPerson": {"$first": sales_person_logic},
-                    # NEW: Collect ALL invoices for validation
-                    "allInvoices": {
-                        "$push": {
-                            "_id": "$_id",
-                            "invoice_number": "$invoice_number",
-                            "date": "$date",
-                            "due_date": "$due_date",
-                            "status": "$status",
-                            "total": "$total",
-                            "balance": "$balance",
-                            "customer_id": "$customer_id",
-                            "invoice_id": "$invoice_id",
-                            "yearMonth": "$yearMonth",
-                            "isCurrentMonth": "$isCurrentMonth",
-                            "isCurrentFY": "$isCurrentFY",
-                            "isLastFY": "$isLastFY",
-                            "isPreviousFY": "$isPreviousFY",
-                        }
-                    },
-                    # Collect payment information
-                    "duePayments": {
-                        "$push": {
-                            "$cond": [
-                                "$isDuePayment",
-                                {
-                                    "_id": "$_id",
-                                    "date": "$date",
-                                    "due_date": "$due_date",
-                                    "invoice_number": "$invoice_number",
-                                    "status": "$status",
-                                    "invoice_id": "$invoice_id",
-                                    "total": "$total",
-                                    "balance": "$balance",
-                                },
-                                "$$REMOVE",
-                            ]
-                        }
-                    },
-                    "notDuePayments": {
-                        "$push": {
-                            "$cond": [
-                                "$isNotDuePayment",
-                                {
-                                    "_id": "$_id",
-                                    "date": "$date",
-                                    "due_date": "$due_date",
-                                    "invoice_number": "$invoice_number",
-                                    "status": "$status",
-                                    "invoice_id": "$invoice_id",
-                                    "balance": "$balance",
-                                    "total": "$total",
-                                },
-                                "$$REMOVE",
-                            ]
-                        }
-                    },
-                    # Total sales current month (August 2025)
-                    "totalSalesCurrentMonth": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isCurrentMonth", True]}, "$total", 0]
-                        }
-                    },
-                    # Last bill date
-                    "lastBillDate": {"$max": "$invoiceDate"},
-                    # FIXED: Count of ALL orders in current financial year for frequency calculation
-                    "currentFYOrders": {
-                        "$sum": {"$cond": [{"$eq": ["$isCurrentFY", True]}, 1, 0]}
-                    },
-                    # FIXED: Unique months in current financial year for frequency calculation
-                    "currentFYMonths": {
-                        "$addToSet": {
-                            "$cond": [
-                                {"$eq": ["$isCurrentFY", True]},
-                                "$yearMonth",
-                                None,
-                            ]
-                        }
-                    },
-                    # Keep completed month orders for backward compatibility (if needed elsewhere)
-                    "completedMonthOrders": {
-                        "$sum": {"$cond": [{"$eq": ["$isCompletedMonth", True]}, 1, 0]}
-                    },
-                    # Keep completed months for backward compatibility (if needed elsewhere)
-                    "completedMonths": {
-                        "$addToSet": {
-                            "$cond": [
-                                {"$eq": ["$isCompletedMonth", True]},
-                                "$yearMonth",
-                                None,
-                            ]
-                        }
-                    },
-                    # Total billing current year (April 2025 onwards)
-                    "billingTillDateCurrentYear": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isCurrentFY", True]}, "$total", 0]
-                        }
-                    },
-                    # Total sales last financial year (April 2024 - March 2025)
-                    "totalSalesLastFY": {
-                        "$sum": {"$cond": [{"$eq": ["$isLastFY", True]}, "$total", 0]}
-                    },
-                    # Total sales previous financial year (April 2023 - March 2024)
-                    "totalSalesPreviousFY": {
-                        "$sum": {
-                            "$cond": [{"$eq": ["$isPreviousFY", True]}, "$total", 0]
-                        }
-                    },
-                    # Billing validation checks
-                    "hasBilledLastMonth": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLastMonth", True]}, 1, 0]}
-                    },
-                    "hasBilledLast45Days": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast45Days", True]}, 1, 0]}
-                    },
-                    "hasBilledLast2Months": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast2Months", True]}, 1, 0]}
-                    },
-                    "hasBilledLast3Months": {
-                        "$sum": {"$cond": [{"$eq": ["$billedLast3Months", True]}, 1, 0]}
-                    },
-                    # All invoice dates for additional analysis
-                    "allInvoiceDates": {"$push": "$invoiceDate"},
-                }
-            },
-            # Stage 4: Lookup customer details from customers collection
-            {
-                "$lookup": {
-                    "from": "customers",
-                    "localField": "customerId",
-                    "foreignField": "contact_id",
-                    "as": "customerDetails",
-                }
-            },
-            {"$match": customer_status_match_stage},
-            # Stage 5: Calculate average order frequency and billing validations
-            {
-                "$addFields": {
-                    # FIXED: Remove null values from currentFYMonths array (for frequency calculation)
-                    "currentFYMonthsFiltered": {
-                        "$filter": {
-                            "input": "$currentFYMonths",
-                            "cond": {"$ne": ["$$this", None]},
-                        }
-                    },
-                    # Keep the old logic for backward compatibility
-                    "completedMonthsFiltered": {
-                        "$filter": {
-                            "input": "$completedMonths",
-                            "cond": {"$ne": ["$$this", None]},
-                        }
-                    },
-                    # Extract customer status and tier from lookup
-                    "customerStatus": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.status", 0]},
-                            "unknown",
-                        ]
-                    },
-                    "customerTier": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.cf_tier", 0]},
-                            "unknown",
-                        ]
-                    },
-                    # Get sales person from customer record (overrides invoice sales person)
-                    "salesPerson": {
-                        "$ifNull": [
-                            {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
-                            "$salesPerson",  # Fallback to invoice sales person if customer doesn't have one
-                        ]
-                    },
-                    # Boolean flags for billing periods (true = HAS billed)
-                    "hasBilledLastMonth": {"$gt": ["$hasBilledLastMonth", 0]},
-                    "hasBilledLast45Days": {"$gt": ["$hasBilledLast45Days", 0]},
-                    "hasBilledLast2Months": {"$gt": ["$hasBilledLast2Months", 0]},
-                    "hasBilledLast3Months": {"$gt": ["$hasBilledLast3Months", 0]},
-                }
-            },
-            # Stage 6: Calculate final metrics
-            {
-                "$addFields": {
-                    # FIXED: Calculate frequency using total orders divided by completed months in FY
-                    "averageOrderFrequencyMonthly": {
-                        "$cond": [
-                            {"$gt": ["$currentFYOrders", 0]},
-                            {
-                                "$divide": [
-                                    "$currentFYOrders",
-                                    completed_months_in_current_fy,
-                                ]
-                            },
-                            0,
-                        ]
-                    },
-                    # Format shipping address as string (updated from billing to shipping)
-                    "shippingAddressFormatted": {
-                        "$concat": [
-                            {"$ifNull": ["$shippingAddress.street", ""]},
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.street2", ""]},
-                                    {"$concat": [", ", "$shippingAddress.street2"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.city", ""]},
-                                    {"$concat": [", ", "$shippingAddress.city"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.state", ""]},
-                                    {"$concat": [", ", "$shippingAddress.state"]},
-                                    "",
-                                ]
-                            },
-                            {
-                                "$cond": [
-                                    {"$ne": ["$shippingAddress.zip", ""]},
-                                    {"$concat": [" - ", "$shippingAddress.zip"]},
-                                    "",
-                                ]
-                            },
-                        ]
-                    },
-                }
-            },
-            # Stage 7: Filter based on due_status if not "all"
-            {
-                "$addFields": {
-                    # Apply filtering based on due_status parameter
-                    "filteredDuePayments": {
-                        "$cond": [
-                            {
-                                "$or": [
-                                    {"$eq": [due_status, "all"]},
-                                    {"$eq": [due_status, "due"]},
-                                ]
-                            },
-                            "$duePayments",
-                            [],
-                        ]
-                    },
-                    "filteredNotDuePayments": {
-                        "$cond": [
-                            {
-                                "$or": [
-                                    {"$eq": [due_status, "all"]},
-                                    {"$eq": [due_status, "not_due"]},
-                                ]
-                            },
-                            "$notDuePayments",
-                            [],
-                        ]
-                    },
-                }
-            },
-            {
-                "$match": {
-                    "$expr": {
-                        "$or": [
-                            {
-                                "$eq": [due_status, "all"]
-                            },  # Include all customers when due_status is "all"
-                            {
-                                "$and": [
-                                    {"$eq": [due_status, "due"]},
-                                    {
-                                        "$gt": [{"$size": "$filteredDuePayments"}, 0]
-                                    },  # Only customers with due payments
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [due_status, "not_due"]},
-                                    {
-                                        "$gt": [{"$size": "$filteredNotDuePayments"}, 0]
-                                    },  # Only customers with not due payments
-                                ]
-                            },
-                        ]
-                    }
-                }
-            },
-            # NEW Stage 8: Filter based on last_billed parameter
-            {
-                "$match": {
-                    "$expr": {
-                        "$or": [
-                            {"$eq": [last_billed, "all"]},  # Include all customers
-                            # Positive filters (customers who HAVE billed in specific periods)
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_month"]},
-                                    {"$eq": ["$hasBilledLastMonth", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_45_days"]},
-                                    {"$eq": ["$hasBilledLast45Days", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_2_months"]},
-                                    {"$eq": ["$hasBilledLast2Months", True]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "last_3_months"]},
-                                    {"$eq": ["$hasBilledLast3Months", True]},
-                                ]
-                            },
-                            # Negative filters (customers who have NOT billed in specific periods)
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_month"]},
-                                    {"$eq": ["$hasBilledLastMonth", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_45_days"]},
-                                    {"$eq": ["$hasBilledLast45Days", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_2_months"]},
-                                    {"$eq": ["$hasBilledLast2Months", False]},
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"$eq": [last_billed, "not_last_3_months"]},
-                                    {"$eq": ["$hasBilledLast3Months", False]},
-                                ]
-                            },
-                        ]
-                    }
-                }
-            },
-            # Stage 9: Project final output format
-            {
-                "$project": {
-                    "_id": 0,
-                    "customerId": 1,
-                    "customerName": 1,
-                    "shippingAddress": "$shippingAddressFormatted",  # Updated to use shipping address
-                    "status": "$customerStatus",
-                    "tier": "$customerTier",
-                    "totalSalesCurrentMonth": {
-                        "$round": ["$totalSalesCurrentMonth", 2]
-                    },
-                    "lastBillDate": {
-                        "$dateToString": {"format": "%Y-%m-%d", "date": "$lastBillDate"}
-                    },
-                    "averageOrderFrequencyMonthly": {
-                        "$round": ["$averageOrderFrequencyMonthly", 2]
-                    },
-                    "billingTillDateCurrentYear": {
-                        "$round": ["$billingTillDateCurrentYear", 2]
-                    },
-                    "totalSalesLastFY": {"$round": ["$totalSalesLastFY", 2]},
-                    "totalSalesPreviousFY": {"$round": ["$totalSalesPreviousFY", 2]},
-                    "salesPerson": 1,
-                    "hasBilledLastMonth": 1,
-                    "hasBilledLast45Days": 1,
-                    "hasBilledLast2Months": 1,
-                    "hasBilledLast3Months": 1,
-                    # Include payment lists
-                    "duePayments": "$filteredDuePayments",
-                    "notDuePayments": "$filteredNotDuePayments",
-                    # NEW: Include all invoices for validation
-                    "allInvoices": 1,
-                    # Additional fields for validation
-                    "totalInvoiceCount": {"$size": "$allInvoices"},
-                    "currentFYInvoiceCount": "$currentFYOrders",
-                }
-            },
-            # Stage 10: Sort by customer name
-            {"$sort": {"customerName": 1}},
-        ]
+        pipeline = build_customer_analytics_pipeline(
+            match_stage=match_stage,
+            customer_status_match_stage=customer_status_match_stage,
+            sales_person_logic=sales_person_logic,
+            due_status=due_status,
+            last_billed=last_billed,
+            current_date_info=current_date_info,
+            include_all_invoices=True,
+        )
 
         # Execute the aggregation
-        customers = list(db.invoices.aggregate(pipeline))
+        customers = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
 
         # Create Excel file
         workbook = openpyxl.Workbook()
@@ -2595,7 +1023,7 @@ def download_customer_analytics_report(
         # Define headers
         headers = [
             "Customer Name",
-            "Shipping Address",  # Updated from Billing Address
+            "Shipping Address",
             "Status",
             "Tier",
             "Sales Person",
@@ -2631,7 +1059,7 @@ def download_customer_analytics_report(
             worksheet.cell(row=row, column=1, value=customer.get("customerName", ""))
             worksheet.cell(
                 row=row, column=2, value=customer.get("shippingAddress", "")
-            )  # Updated from billingAddress
+            )
             worksheet.cell(row=row, column=3, value=customer.get("status", ""))
             worksheet.cell(row=row, column=4, value=customer.get("tier", ""))
             sales_person = customer.get("salesPerson", "")
@@ -2698,25 +1126,15 @@ def download_customer_analytics_report(
 
         # Add Brand Breakdown sheet if requested
         if include_brand_breakdown:
+            current_fy_start_year = current_date_info["current_fy_start_year"]
+            last_fy_start_year = current_date_info["last_fy_start_year"]
+            previous_fy_start_year = current_date_info["previous_fy_start_year"]
+
             brand_ws = workbook.create_sheet("Brand Breakdown")
 
             current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
             last_fy_label = f"FY {last_fy_start_year}-{str(last_fy_start_year + 1)[2:]}"
             previous_fy_label = f"FY {previous_fy_start_year}-{str(previous_fy_start_year + 1)[2:]}"
-
-            brand_headers = [
-                "Customer Name",
-                "Brand",
-                previous_fy_label,
-                last_fy_label,
-                current_fy_label,
-            ]
-
-            for col, header in enumerate(brand_headers, 1):
-                cell = brand_ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
 
             # Pre-fetch product item_id -> brand map (lightweight, small collection)
             brand_map = {}
@@ -2843,31 +1261,50 @@ def download_customer_analytics_report(
 
             # Run aggregation and re-aggregate by brand in Python
             from collections import defaultdict
-            brand_totals = defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0})
+            # brand_totals[cid][brand] = {"currentFY": ..., "lastFY": ..., "previousFY": ...}
+            brand_totals = defaultdict(lambda: defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0}))
 
             for row in db.invoices.aggregate(brand_pipeline, allowDiskUse=True):
                 cid = row["_id"]["customer_id"]
                 item_id = row["_id"].get("item_id", "")
                 brand = brand_map.get(item_id, "Unknown")
-                key = (cid, brand)
-                brand_totals[key]["currentFY"] += row.get("currentFY", 0)
-                brand_totals[key]["lastFY"] += row.get("lastFY", 0)
-                brand_totals[key]["previousFY"] += row.get("previousFY", 0)
+                brand_totals[cid][brand]["currentFY"] += row.get("currentFY", 0)
+                brand_totals[cid][brand]["lastFY"] += row.get("lastFY", 0)
+                brand_totals[cid][brand]["previousFY"] += row.get("previousFY", 0)
 
-            # Sort by customer name then by currentFY desc
-            sorted_brands = sorted(
+            # Collect all unique brands sorted alphabetically
+            all_brands = sorted({brand for cid_brands in brand_totals.values() for brand in cid_brands})
+
+            # Build headers: Customer Name, then for each brand: Brand (PrevFY), Brand (LastFY), Brand (CurrentFY)
+            brand_headers = ["Customer Name"]
+            for brand in all_brands:
+                brand_headers.append(f"{brand} ({previous_fy_label})")
+                brand_headers.append(f"{brand} ({last_fy_label})")
+                brand_headers.append(f"{brand} ({current_fy_label})")
+
+            # Write headers
+            for col, header in enumerate(brand_headers, 1):
+                cell = brand_ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+
+            # Sort customers by name
+            sorted_customers = sorted(
                 brand_totals.items(),
-                key=lambda x: (customer_name_map.get(x[0][0], ""), -(x[1]["currentFY"])),
+                key=lambda x: customer_name_map.get(x[0], ""),
             )
 
             brand_row = 2
-            for (cid, brand), totals in sorted_brands:
+            for cid, brands in sorted_customers:
                 customer_name = customer_name_map.get(cid, cid)
                 brand_ws.cell(row=brand_row, column=1, value=customer_name)
-                brand_ws.cell(row=brand_row, column=2, value=brand)
-                brand_ws.cell(row=brand_row, column=3, value=round(totals["previousFY"], 2))
-                brand_ws.cell(row=brand_row, column=4, value=round(totals["lastFY"], 2))
-                brand_ws.cell(row=brand_row, column=5, value=round(totals["currentFY"], 2))
+                for brand_idx, brand in enumerate(all_brands):
+                    base_col = 2 + brand_idx * 3
+                    totals = brands.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
+                    brand_ws.cell(row=brand_row, column=base_col, value=round(totals["previousFY"], 2))
+                    brand_ws.cell(row=brand_row, column=base_col + 1, value=round(totals["lastFY"], 2))
+                    brand_ws.cell(row=brand_row, column=base_col + 2, value=round(totals["currentFY"], 2))
                 brand_row += 1
 
             # Auto-adjust column widths for brand sheet
