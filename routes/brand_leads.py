@@ -153,7 +153,7 @@ async def verify_otp(request: VerifyOTPRequest):
 
         # Check OTP expiry (10 minutes)
         if otp_created_at.tzinfo is None:
-            otp_created_at = otp_created_at.replace(tzinfo=IST)
+            otp_created_at = otp_created_at.replace(tzinfo=timezone.utc)
         time_diff = now_ist() - otp_created_at
         if time_diff > timedelta(minutes=10):
             raise HTTPException(status_code=400, detail="OTP expired. Please request a new OTP")
