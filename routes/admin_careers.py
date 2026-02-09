@@ -110,3 +110,23 @@ def delete_career(career_id: str):
             raise HTTPException(status_code=404, detail="Career not found")
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{career_id}/permanent")
+def permanent_delete_career(career_id: str):
+    try:
+        try:
+            obj_id = ObjectId(career_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid career_id format")
+
+        doc = db.careers.find_one({"_id": obj_id})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Career not found")
+
+        db.careers.delete_one({"_id": obj_id})
+        return {"detail": "Career deleted permanently"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
