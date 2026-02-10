@@ -556,6 +556,7 @@ async def list_employees(
     limit: int = 100,
     search: Optional[str] = None,
     department: Optional[str] = None,
+    status: Optional[str] = None,
 ):
     """
     List all employees with optional filtering and pagination
@@ -563,16 +564,19 @@ async def list_employees(
     try:
         # Build filter query
         filter_query = {}
-        
+
         if search:
             filter_query["$or"] = [
                 {"name": {"$regex": search, "$options": "i"}},
                 {"email": {"$regex": search, "$options": "i"}},
                 {"employee_number": {"$regex": search, "$options": "i"}}
             ]
-        
+
         if department:
             filter_query["department"] = {"$regex": department, "$options": "i"}
+
+        if status:
+            filter_query["status"] = status
         
         # Get total count
         total_count = employees_collection.count_documents(filter_query)
@@ -613,7 +617,98 @@ async def list_employees(
     except Exception as e:
         print(f"Error listing employees: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
+
+
+@router.get("/employees/download")
+async def download_employees_report(
+    search: Optional[str] = Query(None, description="Search by name, email, or employee number"),
+    department: Optional[str] = Query(None, description="Filter by department"),
+    status: Optional[str] = Query(None, description="Filter by status (active/inactive)"),
+):
+    """
+    Download all employees as an Excel file with optional filtering
+    """
+    try:
+        # Build filter query
+        filter_query = {}
+
+        if search:
+            filter_query["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+                {"employee_number": {"$regex": search, "$options": "i"}}
+            ]
+
+        if department:
+            filter_query["department"] = {"$regex": department, "$options": "i"}
+
+        if status:
+            filter_query["status"] = status
+
+        # Get all employees matching the filter
+        employees = list(employees_collection.find(filter_query).sort("name", 1))
+
+        if not employees:
+            raise HTTPException(status_code=404, detail="No employees found")
+
+        # Prepare data for Excel
+        excel_data = []
+        for emp in employees:
+            excel_data.append({
+                "Employee Number": emp.get("employee_number", ""),
+                "Name": emp["name"],
+                "Email": emp["email"],
+                "Phone": emp["phone"],
+                "Department": emp.get("department", ""),
+                "Designation": emp.get("designation", ""),
+                "Joining Date": emp.get("joining_date", ""),
+                "Status": emp.get("status", "active"),
+                "Created At": emp.get("created_at", "").strftime("%Y-%m-%d %H:%M:%S") if emp.get("created_at") else "",
+                "Updated At": emp.get("updated_at", "").strftime("%Y-%m-%d %H:%M:%S") if emp.get("updated_at") else ""
+            })
+
+        # Create Excel file
+        df = pd.DataFrame(excel_data)
+
+        # Create Excel file in memory
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Employees', index=False)
+
+            # Optimize column widths
+            worksheet = writer.sheets['Employees']
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+
+        output.seek(0)
+
+        # Generate filename
+        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"employees_report_{current_date}.xlsx"
+
+        # Return Excel file
+        return Response(
+            content=output.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error downloading employees report: {e}")
+        raise HTTPException(status_code=500, detail="Error generating report")
+
+
 @router.post("/employees", response_model=EmployeeResponse)
 async def create_employee(employee_data: CreateEmployeeRequest):
     """
