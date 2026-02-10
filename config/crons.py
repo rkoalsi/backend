@@ -1660,13 +1660,15 @@ async def items_cron():
 
 
 async def bills_cron():
-    """Cron job for syncing bills from Zoho Books - incremental sync all pages reverse."""
+    """Cron job for syncing bills from Zoho Books - delete and reinsert first 2 pages, incremental for rest."""
     logger.info("Starting daily bills sync...")
     start_time = time.time()
 
     total_processed = 0
     total_inserted = 0
+    total_deleted = 0
     total_errors = 0
+    RESYNC_PAGES = 2
 
     try:
         db = get_database()
@@ -1694,9 +1696,124 @@ async def bills_cron():
             total_pages = page_context.get("total_pages", 1)
 
             logger.info(f"Found {page_context.get('total', 0)} total bills across {total_pages} pages")
-            logger.info(f"Starting reverse processing: Page {total_pages} -> Page 1")
 
-            for page in range(total_pages, 0, -1):
+            # Step 1: Delete and reinsert first N pages (most recent bills)
+            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (delete and reinsert)...")
+
+            for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
+                logger.info(f"--- Resyncing Page {page} ---")
+
+                page_url = (
+                    f"https://www.zohoapis.com/books/v3/bills?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data or "bills" not in page_data:
+                    logger.warning(f"No bills found for page {page}")
+                    continue
+
+                page_bills = page_data["bills"]
+                logger.info(f"Page {page}: Found {len(page_bills)} bills")
+
+                # Collect bill IDs from this page and delete them
+                page_bill_ids = []
+                for bill in page_bills:
+                    bill_id = str(bill.get("bill_id", ""))
+                    if bill_id:
+                        page_bill_ids.append(bill_id)
+
+                if page_bill_ids:
+                    delete_result = collection.delete_many(
+                        {"bill_id": {"$in": page_bill_ids}}
+                    )
+                    total_deleted += delete_result.deleted_count
+                    logger.info(
+                        f"Deleted {delete_result.deleted_count} existing bills from page {page}"
+                    )
+
+                total_processed += len(page_bill_ids)
+
+                # Fetch details and reinsert
+                bills_to_insert = []
+                batch_size = 5
+                for i in range(0, len(page_bill_ids), batch_size):
+                    batch_ids = page_bill_ids[i : i + batch_size]
+
+                    detail_tasks = []
+                    for bid in batch_ids:
+                        detail_url = (
+                            f"https://www.zohoapis.com/books/v3/bills/{bid}?"
+                            f"organization_id={org_id}"
+                        )
+                        detail_tasks.append(api_client.make_request(detail_url))
+
+                    results = await asyncio.gather(
+                        *detail_tasks, return_exceptions=True
+                    )
+
+                    for j, result in enumerate(results):
+                        try:
+                            if isinstance(result, Exception):
+                                logger.error(
+                                    f"Error fetching bill {batch_ids[j]}: {result}"
+                                )
+                                total_errors += 1
+                                continue
+
+                            bill_detail = None
+                            if result:
+                                if "bill" in result:
+                                    bill_detail = result["bill"]
+                                elif "bills" in result:
+                                    bills = result["bills"]
+                                    if isinstance(bills, list) and len(bills) > 0:
+                                        bill_detail = bills[0]
+                                    else:
+                                        bill_detail = bills
+
+                            if bill_detail and isinstance(bill_detail, dict):
+                                processed = process_bill_data(bill_detail)
+                                bills_to_insert.append(processed)
+                            else:
+                                total_errors += 1
+                        except Exception as e:
+                            logger.error(f"Error processing bill: {e}")
+                            total_errors += 1
+
+                if bills_to_insert:
+                    try:
+                        result = collection.insert_many(
+                            bills_to_insert, ordered=False
+                        )
+                        inserted = len(result.inserted_ids)
+                        total_inserted += inserted
+                        logger.info(
+                            f"Reinserted {inserted} bills from page {page}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error during bulk insert for page {page}: {e}"
+                        )
+                        for doc in bills_to_insert:
+                            try:
+                                collection.insert_one(doc)
+                                total_inserted += 1
+                            except Exception as e2:
+                                logger.error(f"Failed to insert bill: {e2}")
+                                total_errors += 1
+
+                if page < min(RESYNC_PAGES, total_pages):
+                    await asyncio.sleep(1)
+
+            # Step 2: Incremental sync for remaining pages (reverse order)
+            logger.info(
+                f"Step 2: Incremental sync for pages {total_pages} -> {RESYNC_PAGES + 1}..."
+            )
+
+            for page in range(total_pages, RESYNC_PAGES, -1):
                 logger.info(f"--- Processing Page {page}/{total_pages} ---")
 
                 page_url = (
@@ -1805,14 +1922,14 @@ async def bills_cron():
                                     logger.error(f"Failed to insert bill: {e2}")
                                     total_errors += 1
 
-                if page > 1:
+                if page > RESYNC_PAGES + 1:
                     await asyncio.sleep(1)
 
             duration = time.time() - start_time
 
             logger.info(f"Bills sync completed!")
             logger.info(
-                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+                f"Summary: Processed {total_processed}, Deleted {total_deleted}, Inserted {total_inserted}, Errors {total_errors}"
             )
 
             send_slack_notification(
@@ -1820,6 +1937,7 @@ async def bills_cron():
                 success=True,
                 details={
                     "processed": total_processed,
+                    "deleted": total_deleted,
                     "inserted": total_inserted,
                     "pages": total_pages,
                     "duration": duration,
@@ -1833,13 +1951,15 @@ async def bills_cron():
 
 
 async def purchase_orders_cron():
-    """Cron job for syncing purchase orders from Zoho Books - incremental sync all pages reverse."""
+    """Cron job for syncing purchase orders from Zoho Books - delete and reinsert first 2 pages, incremental for rest."""
     logger.info("Starting daily purchase orders sync...")
     start_time = time.time()
 
     total_processed = 0
     total_inserted = 0
+    total_deleted = 0
     total_errors = 0
+    RESYNC_PAGES = 2
 
     try:
         db = get_database()
@@ -1867,9 +1987,126 @@ async def purchase_orders_cron():
             total_pages = page_context.get("total_pages", 1)
 
             logger.info(f"Found {page_context.get('total', 0)} total purchase orders across {total_pages} pages")
-            logger.info(f"Starting reverse processing: Page {total_pages} -> Page 1")
 
-            for page in range(total_pages, 0, -1):
+            # Step 1: Delete and reinsert first N pages (most recent purchase orders)
+            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (delete and reinsert)...")
+
+            for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
+                logger.info(f"--- Resyncing Page {page} ---")
+
+                page_url = (
+                    f"https://www.zohoapis.com/books/v3/purchaseorders?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data or "purchaseorders" not in page_data:
+                    logger.warning(f"No purchase orders found for page {page}")
+                    continue
+
+                page_pos = page_data["purchaseorders"]
+                logger.info(f"Page {page}: Found {len(page_pos)} purchase orders")
+
+                # Collect PO IDs from this page and delete them
+                page_po_ids = []
+                for po in page_pos:
+                    po_id = str(po.get("purchaseorder_id", ""))
+                    if po_id:
+                        page_po_ids.append(po_id)
+
+                if page_po_ids:
+                    delete_result = collection.delete_many(
+                        {"purchaseorder_id": {"$in": page_po_ids}}
+                    )
+                    total_deleted += delete_result.deleted_count
+                    logger.info(
+                        f"Deleted {delete_result.deleted_count} existing purchase orders from page {page}"
+                    )
+
+                total_processed += len(page_po_ids)
+
+                # Fetch details and reinsert
+                pos_to_insert = []
+                batch_size = 5
+                for i in range(0, len(page_po_ids), batch_size):
+                    batch_ids = page_po_ids[i : i + batch_size]
+
+                    detail_tasks = []
+                    for pid in batch_ids:
+                        detail_url = (
+                            f"https://www.zohoapis.com/books/v3/purchaseorders/{pid}?"
+                            f"organization_id={org_id}"
+                        )
+                        detail_tasks.append(api_client.make_request(detail_url))
+
+                    results = await asyncio.gather(
+                        *detail_tasks, return_exceptions=True
+                    )
+
+                    for j, result in enumerate(results):
+                        try:
+                            if isinstance(result, Exception):
+                                logger.error(
+                                    f"Error fetching purchase order {batch_ids[j]}: {result}"
+                                )
+                                total_errors += 1
+                                continue
+
+                            po_detail = None
+                            if result:
+                                if "purchaseorder" in result:
+                                    po_detail = result["purchaseorder"]
+                                elif "purchaseorders" in result:
+                                    pos = result["purchaseorders"]
+                                    if isinstance(pos, list) and len(pos) > 0:
+                                        po_detail = pos[0]
+                                    else:
+                                        po_detail = pos
+
+                            if po_detail and isinstance(po_detail, dict):
+                                processed = process_purchase_order_data(po_detail)
+                                pos_to_insert.append(processed)
+                            else:
+                                total_errors += 1
+                        except Exception as e:
+                            logger.error(f"Error processing purchase order: {e}")
+                            total_errors += 1
+
+                if pos_to_insert:
+                    try:
+                        result = collection.insert_many(
+                            pos_to_insert, ordered=False
+                        )
+                        inserted = len(result.inserted_ids)
+                        total_inserted += inserted
+                        logger.info(
+                            f"Reinserted {inserted} purchase orders from page {page}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error during bulk insert for page {page}: {e}"
+                        )
+                        for doc in pos_to_insert:
+                            try:
+                                collection.insert_one(doc)
+                                total_inserted += 1
+                            except Exception as e2:
+                                logger.error(
+                                    f"Failed to insert purchase order: {e2}"
+                                )
+                                total_errors += 1
+
+                if page < min(RESYNC_PAGES, total_pages):
+                    await asyncio.sleep(1)
+
+            # Step 2: Incremental sync for remaining pages (reverse order)
+            logger.info(
+                f"Step 2: Incremental sync for pages {total_pages} -> {RESYNC_PAGES + 1}..."
+            )
+
+            for page in range(total_pages, RESYNC_PAGES, -1):
                 logger.info(f"--- Processing Page {page}/{total_pages} ---")
 
                 page_url = (
@@ -1982,14 +2219,14 @@ async def purchase_orders_cron():
                                     )
                                     total_errors += 1
 
-                if page > 1:
+                if page > RESYNC_PAGES + 1:
                     await asyncio.sleep(1)
 
             duration = time.time() - start_time
 
             logger.info(f"Purchase orders sync completed!")
             logger.info(
-                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+                f"Summary: Processed {total_processed}, Deleted {total_deleted}, Inserted {total_inserted}, Errors {total_errors}"
             )
 
             send_slack_notification(
@@ -1997,6 +2234,7 @@ async def purchase_orders_cron():
                 success=True,
                 details={
                     "processed": total_processed,
+                    "deleted": total_deleted,
                     "inserted": total_inserted,
                     "pages": total_pages,
                     "duration": duration,
