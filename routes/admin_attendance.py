@@ -506,7 +506,7 @@ def convert_utc_to_ist(timestamp):
 
 class CreateEmployeeRequest(BaseModel):
     name: str
-    phone: str
+    phone: int
     email: EmailStr
     employee_number: Optional[str] = None
     department: Optional[str] = None
@@ -520,16 +520,16 @@ class CreateEmployeeRequest(BaseModel):
             raise ValueError('Name must be at least 2 characters long')
         return v.strip()
     
-    @validator('phone')
+    @validator('phone', pre=True)
     def validate_phone(cls, v):
         # Remove any non-digit characters
-        phone_digits = re.sub(r'\D', '', v)
+        phone_digits = re.sub(r'\D', '', str(v))
         # Check if it's a valid Indian phone number (10 digits)
         if len(phone_digits) != 10:
             raise ValueError('Phone number must be 10 digits')
         if not phone_digits.startswith(('6', '7', '8', '9')):
             raise ValueError('Invalid Indian phone number format')
-        return phone_digits
+        return int(phone_digits)
     
     @validator('employee_number')
     def validate_employee_number(cls, v):
@@ -542,7 +542,7 @@ class CreateEmployeeRequest(BaseModel):
 class EmployeeResponse(BaseModel):
     id: str
     name: str
-    phone: str
+    phone: int
     email: str
     employee_number: Optional[str]
     department: Optional[str]
@@ -895,7 +895,7 @@ async def update_employee(employee_id: str, employee_data: CreateEmployeeRequest
         update_doc = {
             "$set": {
                 "name": employee_data.name,
-                "phone": employee_data.phone,
+                "phone": int(employee_data.phone),
                 "email": employee_data.email,
                 "employee_number": employee_data.employee_number or existing_employee.get("employee_number"),
                 "department": employee_data.department,
