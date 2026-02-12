@@ -28,6 +28,7 @@ from .brand_leads import router as brand_leads
 from .customer_portal import router as customer_portal
 from .credit_notes import router as credit_notes
 from .careers import router as careers
+from .contact_submissions import router as contact_submissions
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -79,6 +80,8 @@ router.include_router(customer_portal, prefix="/customer_portal", tags=["Custome
 router.include_router(credit_notes, prefix="/credit-notes", tags=["Credit Notes"])
 
 router.include_router(careers, prefix="/careers", tags=["Careers"])
+
+router.include_router(contact_submissions, prefix="/contact_submissions", tags=["Contact Submissions"])
 
 
 @router.get("/")
