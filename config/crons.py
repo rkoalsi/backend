@@ -1660,7 +1660,7 @@ async def items_cron():
 
 
 async def bills_cron():
-    """Cron job for syncing bills from Zoho Books - delete and reinsert first 2 pages, incremental for rest."""
+    """Cron job for syncing bills from Zoho Books - fetch last 2 pages, delete and reinsert."""
     logger.info("Starting daily bills sync...")
     start_time = time.time()
 
@@ -1697,11 +1697,12 @@ async def bills_cron():
 
             logger.info(f"Found {page_context.get('total', 0)} total bills across {total_pages} pages")
 
-            # Step 1: Delete and reinsert first N pages (most recent bills)
-            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (delete and reinsert)...")
+            # Only process the first 2 pages (most recent bills) - delete and reinsert
+            pages_to_sync = list(range(1, min(RESYNC_PAGES + 1, total_pages + 1)))
+            logger.info(f"Resyncing pages {pages_to_sync} (delete and reinsert)...")
 
-            for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
-                logger.info(f"--- Resyncing Page {page} ---")
+            for page in pages_to_sync:
+                logger.info(f"--- Resyncing Page {page}/{total_pages} ---")
 
                 page_url = (
                     f"https://www.zohoapis.com/books/v3/bills?"
@@ -1805,124 +1806,7 @@ async def bills_cron():
                                 logger.error(f"Failed to insert bill: {e2}")
                                 total_errors += 1
 
-                if page < min(RESYNC_PAGES, total_pages):
-                    await asyncio.sleep(1)
-
-            # Step 2: Incremental sync for remaining pages (reverse order)
-            logger.info(
-                f"Step 2: Incremental sync for pages {total_pages} -> {RESYNC_PAGES + 1}..."
-            )
-
-            for page in range(total_pages, RESYNC_PAGES, -1):
-                logger.info(f"--- Processing Page {page}/{total_pages} ---")
-
-                page_url = (
-                    f"https://www.zohoapis.com/books/v3/bills?"
-                    f"page={page}&"
-                    f"per_page=200&"
-                    f"organization_id={org_id}"
-                )
-
-                page_data = await api_client.make_request(page_url)
-                if not page_data or "bills" not in page_data:
-                    logger.warning(f"No bills found for page {page}")
-                    continue
-
-                page_bills = page_data["bills"]
-                logger.info(f"Page {page}: Found {len(page_bills)} bills")
-
-                # Filter new bills
-                new_bill_ids = []
-                existing_count = 0
-
-                for bill in page_bills:
-                    bill_id = str(bill.get("bill_id", ""))
-                    if not bill_id:
-                        continue
-
-                    total_processed += 1
-                    existing_doc = collection.find_one({"bill_id": bill_id}, {"_id": 1})
-                    if not existing_doc:
-                        new_bill_ids.append(bill_id)
-                    else:
-                        existing_count += 1
-
-                logger.info(
-                    f"Page {page}: {len(new_bill_ids)} new, {existing_count} existing"
-                )
-
-                if new_bill_ids:
-                    # Fetch details for new bills
-                    bills_to_insert = []
-                    batch_size = 5
-                    for i in range(0, len(new_bill_ids), batch_size):
-                        batch_ids = new_bill_ids[i : i + batch_size]
-
-                        detail_tasks = []
-                        for bid in batch_ids:
-                            detail_url = (
-                                f"https://www.zohoapis.com/books/v3/bills/{bid}?"
-                                f"organization_id={org_id}"
-                            )
-                            detail_tasks.append(api_client.make_request(detail_url))
-
-                        results = await asyncio.gather(
-                            *detail_tasks, return_exceptions=True
-                        )
-
-                        for j, result in enumerate(results):
-                            try:
-                                if isinstance(result, Exception):
-                                    logger.error(
-                                        f"Error fetching bill {batch_ids[j]}: {result}"
-                                    )
-                                    total_errors += 1
-                                    continue
-
-                                bill_detail = None
-                                if result:
-                                    if "bill" in result:
-                                        bill_detail = result["bill"]
-                                    elif "bills" in result:
-                                        bills = result["bills"]
-                                        if isinstance(bills, list) and len(bills) > 0:
-                                            bill_detail = bills[0]
-                                        else:
-                                            bill_detail = bills
-
-                                if bill_detail and isinstance(bill_detail, dict):
-                                    processed = process_bill_data(bill_detail)
-                                    bills_to_insert.append(processed)
-                                else:
-                                    total_errors += 1
-                            except Exception as e:
-                                logger.error(f"Error processing bill: {e}")
-                                total_errors += 1
-
-                    # Bulk insert
-                    if bills_to_insert:
-                        try:
-                            result = collection.insert_many(
-                                bills_to_insert, ordered=False
-                            )
-                            inserted = len(result.inserted_ids)
-                            total_inserted += inserted
-                            logger.info(
-                                f"Inserted {inserted} bills from page {page}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Error during bulk insert for page {page}: {e}"
-                            )
-                            for doc in bills_to_insert:
-                                try:
-                                    collection.insert_one(doc)
-                                    total_inserted += 1
-                                except Exception as e2:
-                                    logger.error(f"Failed to insert bill: {e2}")
-                                    total_errors += 1
-
-                if page > RESYNC_PAGES + 1:
+                if page < pages_to_sync[-1]:
                     await asyncio.sleep(1)
 
             duration = time.time() - start_time
@@ -1939,7 +1823,7 @@ async def bills_cron():
                     "processed": total_processed,
                     "deleted": total_deleted,
                     "inserted": total_inserted,
-                    "pages": total_pages,
+                    "pages": len(pages_to_sync),
                     "duration": duration,
                 },
             )
