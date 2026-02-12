@@ -19,8 +19,9 @@ customers_collection = db["customers"]
 
 class NotifyMeRequest(BaseModel):
     product_id: str
-    order_id: str
+    order_id: Optional[str] = None
     customer_id: Optional[str] = None
+    quantity: int = 1
 
 
 def get_product(product_id: str, collection: Collection):
@@ -871,9 +872,13 @@ async def notify_me_when_available(request: NotifyMeRequest):
         customer = customers_collection.find_one({"_id": ObjectId(request.customer_id)})
 
         if existing_request:
-            # Request already exists
+            # Update quantity on existing request
+            notify_requests_collection.update_one(
+                {"_id": existing_request["_id"]},
+                {"$set": {"quantity": request.quantity, "updated_at": datetime.now()}}
+            )
             return {
-                "message": "You are already registered for notification",
+                "message": "Pre-order quantity updated successfully",
                 "request_id": str(existing_request["_id"])
             }
 
@@ -882,12 +887,14 @@ async def notify_me_when_available(request: NotifyMeRequest):
             "product_id": ObjectId(request.product_id),
             "customer_id": ObjectId(request.customer_id),
             "customer_name": customer.get('contact_name'),
-            "order_id":ObjectId(request.order_id),
             "product_name": product.get("name"),
             "product_brand": product.get("brand"),
+            "quantity": request.quantity,
             "created_at": datetime.now(),
             "notified": False,
         }
+        if request.order_id:
+            notify_document["order_id"] = ObjectId(request.order_id)
 
         result = notify_requests_collection.insert_one(notify_document)
 
