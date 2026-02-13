@@ -27,7 +27,7 @@ def get_career_applications(
     try:
         match_statement = {}
         if career_id:
-            match_statement["career_id"] = career_id
+            match_statement["career_id"] = ObjectId(career_id)
         if status:
             match_statement["status"] = status
 
