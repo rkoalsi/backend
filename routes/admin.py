@@ -40,6 +40,7 @@ from .admin_attendance import router as admin_attendance_router
 from .admin_users import router as admin_users_router
 from .admin_careers import router as admin_careers_router
 from .admin_career_applications import router as admin_career_applications_router
+from .admin_contact_leads import router as admin_contact_submissions_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -3195,5 +3196,11 @@ router.include_router(
     admin_career_applications_router,
     prefix="/career_applications",
     tags=["Admin Career Applications"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_contact_submissions_router,
+    prefix="/contact_submissions",
+    tags=["Admin Contact Submissions"],
     dependencies=[Depends(JWTBearer())],
 )
