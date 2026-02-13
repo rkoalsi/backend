@@ -23,7 +23,7 @@ def now_ist():
     return datetime.now(IST)
 
 
-@router.post("/")
+@router.post("")
 async def create_contact_submission(request: ContactSubmissionRequest):
     try:
         db = get_database()
