@@ -283,7 +283,7 @@ async def apply_for_career(
 
         # Check for duplicate applications (same career + same email or phone)
         existing_app = db.career_applications.find_one({
-            "career_id": career_id,
+            "career_id": ObjectId(career_id),
             "$or": [
                 {"applicant_email": email.strip().lower()},
                 {"applicant_phone": mobile.strip()},
@@ -345,7 +345,7 @@ async def apply_for_career(
         relevant_exp = f"{relevant_experience_years} Years {relevant_experience_months} Months"
 
         application = {
-            "career_id": career_id,
+            "career_id": ObjectId(career_id),
             "applicant_name": full_name.strip(),
             "applicant_email": email.strip().lower(),
             "applicant_phone": mobile.strip(),
