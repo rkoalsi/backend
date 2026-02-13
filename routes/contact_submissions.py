@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 from ..config.root import get_database
 
 router = APIRouter()
@@ -12,18 +12,18 @@ IST = timezone(timedelta(hours=5, minutes=30))
 class ContactSubmissionRequest(BaseModel):
     name: str
     email: str
-    phone: str
-    companyName: str
-    businessType: List[str]
-    city: str
-    message: str
+    phone: str = ""
+    companyName: str = ""
+    businessType: List[str] = []
+    city: str = ""
+    message: str = ""
 
 
 def now_ist():
     return datetime.now(IST)
 
 
-@router.post("")
+@router.post("/")
 async def create_contact_submission(request: ContactSubmissionRequest):
     try:
         db = get_database()
