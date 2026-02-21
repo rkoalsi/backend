@@ -1,5 +1,6 @@
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     HTTPException,
     Query,
     File,
@@ -28,7 +29,7 @@ from .admin_hooks import router as admin_hooks_router
 from .admin_potential_customers import router as admin_potential_customers_router
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
-from .webhooks import update_stock, update_stock_lock
+from .webhooks import update_stock_lock, run_update_stock
 from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
@@ -1084,19 +1085,14 @@ def get_products(
 
 
 @router.post("/products/update-stock")
-def admin_update_stock():
+def admin_update_stock(background_tasks: BackgroundTasks):
     """
-    Runs the stock update synchronously and returns the count of updated products.
+    Schedules the stock update to run in the background and returns immediately.
     """
     if update_stock_lock.locked():
         raise HTTPException(status_code=409, detail="Stock update is already running.")
-    with update_stock_lock:
-        try:
-            updated_count = update_stock()
-            return {"updated_count": updated_count}
-        except Exception as e:
-            print(f"Error running update_stock: {e}")
-            raise HTTPException(status_code=500, detail="Stock update failed.")
+    background_tasks.add_task(run_update_stock)
+    return {"message": "Stock update started in the background."}
 
 
 @router.get("/products/download")
