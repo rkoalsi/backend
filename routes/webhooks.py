@@ -429,6 +429,8 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 # Check if the field exists in the document and if its value has changed
                 if field in exists and exists[field] != value:
                     update_data[field] = value
+                elif field == "item_tax_preferences" and field not in exists:
+                    update_data[field] = value
 
             # If there are fields to update, perform the update
             if update_data:
