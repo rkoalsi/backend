@@ -1,15 +1,57 @@
 import os
+import re
 import time
+import random
 import boto3
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, validator
 from ..config.root import get_database, serialize_mongo_document
+from ..config.whatsapp import send_whatsapp
 from bson.objectid import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 router = APIRouter()
 db = get_database()
+
+
+class CareerSendOTPRequest(BaseModel):
+    phone: str
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        v = v.strip()
+        if not re.match(r'^\+\d+$', v):
+            raise ValueError('Phone number must be in international format (e.g., +919876543210)')
+        if len(v) < 10 or len(v) > 16:
+            raise ValueError('Invalid phone number length')
+        return v
+
+
+class CareerVerifyOTPRequest(BaseModel):
+    phone: str
+    otp: str
+
+    @validator('phone')
+    def validate_phone(cls, v):
+        v = v.strip()
+        if not re.match(r'^\+\d+$', v):
+            raise ValueError('Phone number must be in international format (e.g., +919876543210)')
+        if len(v) < 10 or len(v) > 16:
+            raise ValueError('Invalid phone number length')
+        return v
+
+    @validator('otp')
+    def validate_otp(cls, v):
+        v = v.strip()
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError('OTP must be a 6-digit number')
+        return v
+
+
+def generate_career_otp():
+    return str(random.randint(100000, 999999))
 
 AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
 AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
@@ -30,6 +72,22 @@ ALLOWED_RESUME_TYPES = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]
 MAX_RESUME_SIZE_MB = 5
+
+
+def send_career_email(to: list, subject: str, html: str):
+    import requests
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "from": "no-reply@no-reply.pupscribe.in",
+        "to": to,
+        "subject": subject,
+        "html": html,
+    }
+    requests.post(url, headers=headers, json=data)
 
 
 @router.get("")
@@ -62,19 +120,113 @@ def get_career(career_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.post("/send-otp")
+async def career_send_otp(request: CareerSendOTPRequest):
+    try:
+        phone = request.phone
+        otp = generate_career_otp()
+
+        existing = db.career_otp.find_one({"phone": phone})
+        if existing:
+            db.career_otp.update_one(
+                {"phone": phone},
+                {
+                    "$set": {
+                        "otp": otp,
+                        "otp_created_at": datetime.now(),
+                        "otp_attempts": 0,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+        else:
+            db.career_otp.insert_one(
+                {
+                    "phone": phone,
+                    "otp": otp,
+                    "otp_created_at": datetime.now(),
+                    "otp_attempts": 0,
+                    "verified": False,
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now(),
+                }
+            )
+
+        template = db.templates.find_one({"name": "otp_verification"})
+        if not template:
+            raise HTTPException(status_code=500, detail="OTP template not found")
+
+        send_whatsapp(to=phone, template_doc=template, params={"otp": otp})
+
+        return {"success": True, "message": "OTP sent successfully via WhatsApp", "phone": phone}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP: {str(e)}")
+
+
+@router.post("/verify-otp")
+async def career_verify_otp(request: CareerVerifyOTPRequest):
+    try:
+        phone = request.phone
+        otp = request.otp
+
+        record = db.career_otp.find_one({"phone": phone})
+        if not record:
+            raise HTTPException(status_code=404, detail="No OTP request found for this phone number")
+
+        if record.get("verified", False):
+            return {"success": True, "message": "Phone number already verified", "verified": True}
+
+        otp_created_at = record.get("otp_created_at")
+        if not otp_created_at:
+            raise HTTPException(status_code=400, detail="No OTP found. Please request a new OTP")
+
+        if datetime.now() - otp_created_at > timedelta(minutes=10):
+            raise HTTPException(status_code=400, detail="OTP expired. Please request a new OTP")
+
+        otp_attempts = record.get("otp_attempts", 0)
+        if otp_attempts >= 3:
+            raise HTTPException(status_code=429, detail="Too many failed attempts. Please request a new OTP")
+
+        stored_otp = record.get("otp")
+        if stored_otp != otp:
+            db.career_otp.update_one({"phone": phone}, {"$inc": {"otp_attempts": 1}})
+            remaining = 3 - (otp_attempts + 1)
+            raise HTTPException(status_code=400, detail=f"Invalid OTP. {remaining} attempts remaining")
+
+        db.career_otp.update_one(
+            {"phone": phone},
+            {
+                "$set": {"verified": True, "verified_at": datetime.now(), "updated_at": datetime.now()},
+                "$unset": {"otp": "", "otp_created_at": "", "otp_attempts": ""},
+            },
+        )
+
+        return {"success": True, "message": "Phone number verified successfully", "verified": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to verify OTP: {str(e)}")
+
+
 @router.post("/apply")
 async def apply_for_career(
+    background_tasks: BackgroundTasks,
     career_id: str = Form(...),
     full_name: str = Form(...),
     email: str = Form(...),
     mobile: str = Form(...),
-    current_location: str = Form(...),
-    total_experience: str = Form(...),
-    relevant_experience: str = Form(...),
+    current_city: str = Form(...),
+    current_state: str = Form(...),
+    total_experience_years: str = Form(...),
+    total_experience_months: str = Form(...),
+    relevant_experience_years: str = Form(...),
+    relevant_experience_months: str = Form(...),
     current_company: str = Form(...),
     current_designation: str = Form(...),
-    current_ctc: str = Form(...),
-    expected_ctc: str = Form(...),
+    current_ctc_amount: str = Form(...),
+    expected_ctc_amount: str = Form(...),
     notice_period: str = Form(...),
     preferred_location: str = Form(...),
     declaration: str = Form(...),
@@ -100,13 +252,12 @@ async def apply_for_career(
             "full_name": full_name,
             "email": email,
             "mobile": mobile,
-            "current_location": current_location,
-            "total_experience": total_experience,
-            "relevant_experience": relevant_experience,
+            "current_city": current_city,
+            "current_state": current_state,
             "current_company": current_company,
             "current_designation": current_designation,
-            "current_ctc": current_ctc,
-            "expected_ctc": expected_ctc,
+            "current_ctc_amount": current_ctc_amount,
+            "expected_ctc_amount": expected_ctc_amount,
             "notice_period": notice_period,
             "preferred_location": preferred_location,
             "declaration": declaration,
@@ -122,9 +273,27 @@ async def apply_for_career(
             raise HTTPException(status_code=400, detail="Declaration must be accepted")
 
         # Validate email format
-        import re
         if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
             raise HTTPException(status_code=400, detail="Invalid email format")
+
+        # Verify OTP was completed for this phone number
+        otp_record = db.career_otp.find_one({"phone": mobile.strip()})
+        if not otp_record or not otp_record.get("verified", False):
+            raise HTTPException(status_code=400, detail="Mobile number not verified. Please complete OTP verification.")
+
+        # Check for duplicate applications (same career + same email or phone)
+        existing_app = db.career_applications.find_one({
+            "career_id": ObjectId(career_id),
+            "$or": [
+                {"applicant_email": email.strip().lower()},
+                {"applicant_phone": mobile.strip()},
+            ],
+        })
+        if existing_app:
+            raise HTTPException(
+                status_code=409,
+                detail="You have already applied for this position with this email or phone number.",
+            )
 
         # Validate resume file type
         if resume.content_type not in ALLOWED_RESUME_TYPES:
@@ -164,19 +333,37 @@ async def apply_for_career(
             except json.JSONDecodeError:
                 parsed_custom_answers = None
 
+        # Validate CTC amounts are numeric
+        try:
+            float(current_ctc_amount)
+            float(expected_ctc_amount)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="CTC amount must be a valid number")
+
         # Build application document
+        total_exp = f"{total_experience_years} Years {total_experience_months} Months"
+        relevant_exp = f"{relevant_experience_years} Years {relevant_experience_months} Months"
+
         application = {
-            "career_id": career_id,
+            "career_id": ObjectId(career_id),
             "applicant_name": full_name.strip(),
-            "applicant_email": email.strip(),
+            "applicant_email": email.strip().lower(),
             "applicant_phone": mobile.strip(),
-            "current_location": current_location.strip(),
-            "total_experience": total_experience.strip(),
-            "relevant_experience": relevant_experience.strip(),
+            "current_city": current_city.strip(),
+            "current_state": current_state.strip(),
+            "current_location": f"{current_city.strip()}, {current_state.strip()}",
+            "total_experience": total_exp,
+            "total_experience_years": int(total_experience_years),
+            "total_experience_months": int(total_experience_months),
+            "relevant_experience": relevant_exp,
+            "relevant_experience_years": int(relevant_experience_years),
+            "relevant_experience_months": int(relevant_experience_months),
             "current_company": current_company.strip(),
             "current_designation": current_designation.strip(),
-            "current_ctc": current_ctc.strip(),
-            "expected_ctc": expected_ctc.strip(),
+            "current_ctc": f"{current_ctc_amount} LPA",
+            "current_ctc_amount": float(current_ctc_amount),
+            "expected_ctc": f"{expected_ctc_amount} LPA",
+            "expected_ctc_amount": float(expected_ctc_amount),
             "notice_period": notice_period.strip(),
             "preferred_location": preferred_location.strip(),
             "linkedin_url": linkedin_url.strip() if linkedin_url else None,
@@ -191,6 +378,53 @@ async def apply_for_career(
 
         result = db.career_applications.insert_one(application)
         if result.inserted_id:
+            role_title = career.get("title", "the position")
+            applicant_name = full_name.strip()
+
+            # Confirmation email to applicant
+            applicant_html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">Application Received</h2>
+                <p>Hi {applicant_name},</p>
+                <p>Thank you for applying for <strong>{role_title}</strong> at Pupscribe. We have received your application and our team will review it shortly.</p>
+                <p>We will get back to you if your profile matches our requirements.</p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px;">
+                    Thanks,<br>The Pupscribe Team
+                </p>
+            </div>
+            """
+            background_tasks.add_task(
+                send_career_email,
+                [email.strip().lower()],
+                f"Application Received - {role_title}",
+                applicant_html,
+            )
+
+            # Notification email to HR users
+            hr_users = list(db.users.find({"role": "hr", "status": "active"}, {"email": 1}))
+            hr_emails = [u["email"] for u in hr_users if u.get("email")]
+            if hr_emails:
+                hr_html = f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #333;">New Job Application</h2>
+                    <p>A new application has been submitted on the Order Form.</p>
+                    <p><strong>Applicant:</strong> {applicant_name}</p>
+                    <p><strong>Role:</strong> {role_title}</p>
+                    <p>Please log in to the admin panel to review the application.</p>
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                    <p style="color: #999; font-size: 12px;">
+                        Thanks,<br>The Pupscribe Team
+                    </p>
+                </div>
+                """
+                background_tasks.add_task(
+                    send_career_email,
+                    hr_emails,
+                    f"New Application - {role_title}",
+                    hr_html,
+                )
+
             return {"message": "Application submitted successfully", "id": str(result.inserted_id)}
         else:
             raise HTTPException(status_code=500, detail="Failed to submit application")

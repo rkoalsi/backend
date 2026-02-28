@@ -6,9 +6,12 @@ from .helpers import get_access_token
 from fastapi import APIRouter, HTTPException
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
-import time, os, httpx, requests, asyncio, ssl, socket
+import time, os, httpx, requests, asyncio, ssl, socket, re, io
 from dotenv import load_dotenv
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from ..config.constants import terms, STATE_CODES 
 from ..config.whatsapp import send_whatsapp 
 from googleapiclient.discovery import build
@@ -1008,7 +1011,161 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 status_code=500, 
                 detail=f"Failed to create order form: {str(e)}"
             )
-async def read_sheet_with_retry(service, spreadsheet_id: str, sheet_title: str, max_retries: int = 3, 
+@router.get("/download_order_xlsx")
+async def download_order_xlsx(customer_id: str, order_id: str, sort: str = "default"):
+    """Generate and return an XLSX version of the order form with embedded images"""
+    if not customer_id or not order_id:
+        raise HTTPException(status_code=400, detail="Customer and Order IDs are required")
+
+    order = db.orders.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    sort_stage = {"brand": 1, "rate": 1, "name": 1}
+    if sort == "price_asc":
+        sort_stage = {"rate": 1}
+    elif sort == "price_desc":
+        sort_stage = {"rate": -1}
+    elif sort == "catalogue":
+        sort_stage = {"catalogue_order": 1}
+
+    customer, products, special_margins = await asyncio.gather(
+        asyncio.to_thread(db.customers.find_one, {"_id": ObjectId(customer_id)}),
+        asyncio.to_thread(get_active_products, sort_stage),
+        asyncio.to_thread(lambda: {
+            str(sm["product_id"]): sm["margin"]
+            for sm in db.special_margins.find({"customer_id": ObjectId(customer_id)})
+        }),
+    )
+
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    brands: Dict[str, list] = {}
+    for product in products:
+        brands.setdefault(product.get("brand", "Unknown"), []).append(product)
+    if not brands:
+        raise HTTPException(status_code=404, detail="No active products found")
+
+    cart_products = order.get("products", [])
+    brand_data = prepare_brand_data(brands, customer, special_margins, cart_products)
+    sorted_brands = sorted([b for b in brand_data if b != "New Arrivals"])
+
+    # Collect all image URLs in order
+    image_urls: list[str] = []
+    for brand_name in sorted_brands:
+        for row in brand_data[brand_name][1:]:  # skip header
+            formula = row[0]
+            if isinstance(formula, str) and "IMAGE(" in formula.upper():
+                m = re.search(r'=IMAGE\("([^"]+)"', formula, re.IGNORECASE)
+                image_urls.append(m.group(1) if m else "")
+            else:
+                image_urls.append("")
+
+    # Download all images in parallel using a single shared client
+    semaphore = asyncio.Semaphore(30)
+
+    async def fetch_image(client: httpx.AsyncClient, url: str):
+        if not url:
+            return None
+        async with semaphore:
+            try:
+                r = await client.get(url)
+                return r.content if r.status_code == 200 else None
+            except Exception:
+                return None
+
+    async with httpx.AsyncClient(timeout=15.0, limits=httpx.Limits(max_connections=50, max_keepalive_connections=30)) as client:
+        image_contents = await asyncio.gather(*[fetch_image(client, u) for u in image_urls])
+
+    # Resize images to thumbnail size in parallel threads (avoids embedding huge originals)
+    from PIL import Image as PILImage
+
+    def resize_image(img_bytes):
+        if not img_bytes:
+            return None
+        try:
+            pil_img = PILImage.open(io.BytesIO(img_bytes))
+            pil_img.thumbnail((80, 80), PILImage.LANCZOS)
+            out = io.BytesIO()
+            pil_img.save(out, format="JPEG", quality=80, optimize=True)
+            out.seek(0)
+            return out.read()
+        except Exception:
+            return None
+
+    image_contents = await asyncio.gather(*[
+        asyncio.to_thread(resize_image, b) for b in image_contents
+    ])
+
+    # Build XLSX in a thread (CPU-bound, must not block the event loop)
+    def build_xlsx():
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+        header_font = Font(bold=True)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin = Side(style="thin")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        col_widths = [15, 35, 18, 18, 15, 10, 18, 10, 10, 14, 12, 12]
+
+        img_idx = 0
+        for brand_name in sorted_brands:
+            rows = brand_data[brand_name]
+            ws = wb.create_sheet(title=brand_name[:31])
+
+            for c, header in enumerate(rows[0], start=1):
+                cell = ws.cell(row=1, column=c, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center
+                cell.border = border
+            ws.row_dimensions[1].height = 20
+
+            for c, w in enumerate(col_widths, start=1):
+                ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = w
+
+            for r_offset, row_data in enumerate(rows[1:], start=2):
+                ws.row_dimensions[r_offset].height = 65
+
+                img_bytes = image_contents[img_idx]
+                img_idx += 1
+                if img_bytes:
+                    try:
+                        xl_img = XLImage(io.BytesIO(img_bytes))
+                        xl_img.width = 70
+                        xl_img.height = 70
+                        ws.add_image(xl_img, f"A{r_offset}")
+                    except Exception:
+                        ws.cell(row=r_offset, column=1, value="[img]").alignment = center
+
+                for c_offset, value in enumerate(row_data[1:], start=2):
+                    if c_offset == 12:
+                        qty = row_data[10] if row_data[10] else 0
+                        price = row_data[7] if row_data[7] else 0
+                        value = qty * price if qty and price else ""
+                    cell = ws.cell(row=r_offset, column=c_offset, value=value)
+                    cell.alignment = center
+                    cell.border = border
+
+        stream = io.BytesIO()
+        wb.save(stream)
+        stream.seek(0)
+        return stream
+
+    stream = await asyncio.to_thread(build_xlsx)
+
+    customer_name = customer.get("display_name", "Customer").replace(" ", "_")
+    filename = f"Order_Form_{customer_name}_{order_id[:8]}.xlsx"
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+async def read_sheet_with_retry(service, spreadsheet_id: str, sheet_title: str, max_retries: int = 3,
                                initial_delay: float = 1.0, backoff_factor: float = 2.0) -> Tuple[Optional[dict], Optional[str]]:
     """
     Read a single sheet with exponential backoff retry logic

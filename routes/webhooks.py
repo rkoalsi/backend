@@ -38,7 +38,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SERVICE_ACCOUNT_FILE = BASE_DIR / "creds.json"
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 TPACK_SHEET_ID = "1gz50Djg0OYH6bGOTf2iXmktylLOhybP2vMtZQJisuHo"
-TPACK_API_URL = "https://tpack.bubbleapps.io/version-test/api/1.1/wf/pupscribe-zoho-data/initialize"
+TPACK_API_URL = "https://tpack.bubbleapps.io/version-live/api/1.1/wf/pupscribe-zoho-data"
+TPACK_HEADERS = {"Authorization":f"Bearer {os.getenv('TPACK_TOKEN')}", "Content-Type": "application/json"}
 
 _sheets_service_webhooks = None
 
@@ -123,7 +124,7 @@ def sync_stock_to_tpack():
         response = requests.post(
             TPACK_API_URL,
             json={"products": stock_data},
-            headers={"Content-Type": "application/json"},
+            headers=TPACK_HEADERS,
             timeout=60
         )
         print(f"{response.json()}")
@@ -427,6 +428,8 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
 
                 # Check if the field exists in the document and if its value has changed
                 if field in exists and exists[field] != value:
+                    update_data[field] = value
+                elif field == "item_tax_preferences" and field not in exists:
                     update_data[field] = value
 
             # If there are fields to update, perform the update
@@ -759,10 +762,10 @@ def update_stock():
         print("No updates required.")
 
     # Sync stock data to tpack API (run after DB update, before notifications)
-    # try:
-    #     sync_stock_to_tpack()
-    # except Exception as e:
-    #     print(f"Error syncing stock to tpack: {e}")
+    try:
+        sync_stock_to_tpack()
+    except Exception as e:
+        print(f"Error syncing stock to tpack: {e}")
 
     # Check for in-stock notification requests
     try:
