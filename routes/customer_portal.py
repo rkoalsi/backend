@@ -111,6 +111,53 @@ def get_customer_credit_notes(
     }
 
 
+@router.get("/shipments")
+def get_customer_shipments(
+    customer_id: str = Query(..., description="Customer ID from Zoho"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=50),
+    status: Optional[str] = Query(None, description="Filter by status"),
+):
+    """
+    Get all credit notes for a specific customer by their customer_id.
+    Returns paginated results with credit note details.
+    """
+    query = {"customer_id": customer_id}
+
+    if status:
+        query["status"] = status
+
+    # Get total count
+    total = db.shipments.count_documents(query)
+
+    # Calculate skip
+    skip = (page - 1) * per_page
+
+    # Fetch credit notes sorted by date descending
+    shipments_cursor = (
+        db.shipments.find(query).sort("date", -1).skip(skip).limit(per_page)
+    )
+    shipments = [serialize_mongo_document(doc) for doc in shipments_cursor]
+
+    # Calculate summary stats
+    all_shipments = list(db.shipments.find({"customer_id": customer_id}))
+    total_credits = sum(cn.get("total", 0) or 0 for cn in all_shipments)
+    total_balance = sum(cn.get("balance", 0) or 0 for cn in all_shipments)
+
+    return {
+        "shipments": shipments,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if total > 0 else 0,
+        "summary": {
+            "total_shipments": len(all_shipments),
+            "total_credits": total_credits,
+            "total_balance": total_balance,
+        },
+    }
+
+
 @router.get("/dashboard-summary")
 def get_customer_dashboard_summary(
     customer_id: str = Query(..., description="Customer ID from Zoho"),
