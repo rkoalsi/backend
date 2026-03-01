@@ -6,6 +6,7 @@ from .zoho import router as zoho
 from .orders import router as orders
 from .util import router as util
 from .admin import router as admin
+from .admin_blog_posts import router as admin_blog_posts
 from .catalogues import router as catalogues
 from .trainings import router as trainings
 from .daily_visits import router as daily_visits
@@ -29,6 +30,7 @@ from .customer_portal import router as customer_portal
 from .credit_notes import router as credit_notes
 from .careers import router as careers
 from .contact_submissions import router as contact_submissions
+from .blog import router as blog
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -82,6 +84,17 @@ router.include_router(credit_notes, prefix="/credit-notes", tags=["Credit Notes"
 router.include_router(careers, prefix="/careers", tags=["Careers"])
 
 router.include_router(contact_submissions, prefix="/contact_submissions", tags=["Contact Submissions"])
+
+# Public blog routes (no auth)
+router.include_router(blog, prefix="/blog", tags=["Blog"])
+
+# Admin blog routes (JWT auth)
+router.include_router(
+    admin_blog_posts,
+    prefix="/admin/blog",
+    tags=["Admin Blog"],
+    dependencies=[Depends(JWTBearer())],
+)
 
 
 @router.get("/")
