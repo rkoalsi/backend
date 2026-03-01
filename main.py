@@ -24,6 +24,18 @@ origins = [
     "http://127.0.0.1:8080",
     "https://test.orderform.pupscribe.in",  # Frontend (home route)
     "http://test.orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://orderform.pupscribe.in",  # Frontend (home route)
+    "http://orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://pupscribe.in",  # Main domain
+    "http://pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://www.pupscribe.in",  # WWW subdomain
+    "http://www.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://blog.barkbutler.in",  # Barkbutler blog
+    "http://blog.barkbutler.in",   # HTTP fallback
+    "https://barkbutler.in",       # Barkbutler main
+    "http://barkbutler.in",        # HTTP fallback
+    "https://www.barkbutler.in",   # WWW subdomain
+    "http://www.barkbutler.in",    # HTTP fallback
 ]
 
 # Initialize the app
