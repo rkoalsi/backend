@@ -76,7 +76,7 @@ def create_post(data: dict):
     if collection.find_one({"slug": slug}):
         slug = f"{slug}-{uuid.uuid4().hex[:6]}"
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now()
     post = {
         **data,
         "slug": slug,
@@ -96,7 +96,7 @@ def create_post(data: dict):
 @router.put("/posts/{post_id}")
 def update_post(post_id: str, data: dict):
     collection = get_collection()
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    data["updated_at"] = datetime.now()
     data.pop("_id", None)
 
     result = collection.update_one({"_id": ObjectId(post_id)}, {"$set": data})
