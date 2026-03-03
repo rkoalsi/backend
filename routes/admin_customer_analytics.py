@@ -995,6 +995,7 @@ def download_customer_analytics_report(
     ),
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
     include_brand_breakdown: Optional[bool] = Query(False, description="Include brand breakdown sheet"),
+    brands: Optional[str] = Query(None, description="Comma-separated list of brands to include in brand breakdown (default: all)"),
 ):
     try:
         match_stage, customer_status_match_stage, sort_stage, sales_person_logic = (
@@ -1141,14 +1142,19 @@ def download_customer_analytics_report(
             for prod in products_collection.find({}, {"item_id": 1, "brand": 1, "_id": 0}):
                 brand_map[prod.get("item_id", "")] = prod.get("brand", "Unknown") or "Unknown"
 
-            # Collect customer IDs and name lookup
+            # Collect customer IDs, name lookup, and sales person lookup
             customer_ids = []
             customer_name_map = {}
+            customer_sales_person_map = {}
             for customer in customers:
                 cid = customer.get("customerId", "")
                 if cid:
                     customer_ids.append(cid)
                     customer_name_map[cid] = customer.get("customerName", "")
+                    sp = customer.get("salesPerson", "")
+                    if isinstance(sp, list):
+                        sp = ", ".join(sp) if sp else ""
+                    customer_sales_person_map[cid] = sp
 
             # Lightweight pipeline: no $lookup, group by customer_id + item_id
             brand_pipeline = [
@@ -1273,10 +1279,17 @@ def download_customer_analytics_report(
                 brand_totals[cid][brand]["previousFY"] += row.get("previousFY", 0)
 
             # Collect all unique brands sorted alphabetically
-            all_brands = sorted({brand for cid_brands in brand_totals.values() for brand in cid_brands})
+            all_brands_set = {brand for cid_brands in brand_totals.values() for brand in cid_brands}
 
-            # Build headers: Customer Name, then for each brand: Brand (PrevFY), Brand (LastFY), Brand (CurrentFY)
-            brand_headers = ["Customer Name"]
+            # Filter brands if a specific list was requested
+            if brands:
+                requested_brands = {b.strip() for b in brands.split(",") if b.strip()}
+                all_brands = sorted(all_brands_set & requested_brands)
+            else:
+                all_brands = sorted(all_brands_set)
+
+            # Build headers: Customer Name, Sales Person, then for each brand: Brand (PrevFY), Brand (LastFY), Brand (CurrentFY)
+            brand_headers = ["Customer Name", "Sales Person"]
             for brand in all_brands:
                 brand_headers.append(f"{brand} ({previous_fy_label})")
                 brand_headers.append(f"{brand} ({last_fy_label})")
@@ -1296,12 +1309,14 @@ def download_customer_analytics_report(
             )
 
             brand_row = 2
-            for cid, brands in sorted_customers:
+            for cid, cid_brand_totals in sorted_customers:
                 customer_name = customer_name_map.get(cid, cid)
+                sales_person = customer_sales_person_map.get(cid, "")
                 brand_ws.cell(row=brand_row, column=1, value=customer_name)
+                brand_ws.cell(row=brand_row, column=2, value=sales_person)
                 for brand_idx, brand in enumerate(all_brands):
-                    base_col = 2 + brand_idx * 3
-                    totals = brands.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
+                    base_col = 3 + brand_idx * 3
+                    totals = cid_brand_totals.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
                     brand_ws.cell(row=brand_row, column=base_col, value=round(totals["previousFY"], 2))
                     brand_ws.cell(row=brand_row, column=base_col + 1, value=round(totals["lastFY"], 2))
                     brand_ws.cell(row=brand_row, column=base_col + 2, value=round(totals["currentFY"], 2))
