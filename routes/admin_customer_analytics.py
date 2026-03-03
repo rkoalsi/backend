@@ -3,8 +3,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
-import boto3, logging, os, openpyxl
+import boto3, logging, os, openpyxl, re
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Optional
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
@@ -80,6 +81,7 @@ def build_customer_analytics_pipeline(
                 "salesperson_name": 1,
                 "cf_sales_person": 1,
                 "shipping_address": 1,
+                "billing_address": 1,
             }
         },
         # Stage 2: Parse date ONCE, then compute all date-derived fields
@@ -471,6 +473,7 @@ def build_customer_analytics_pipeline(
             "customerId": {"$first": "$customer_id"},
             "customerName": {"$first": "$customer_name"},
             "shippingAddress": {"$first": "$shipping_address"},
+            "billingAddress": {"$first": "$billing_address"},
             "salesPerson": {"$first": sales_person_logic},
             # Collect payment information
             "duePayments": {
@@ -696,6 +699,39 @@ def build_customer_analytics_pipeline(
                         },
                     ]
                 },
+                "billingAddressFormatted": {
+                    "$concat": [
+                        {"$ifNull": ["$billingAddress.street", ""]},
+                        {
+                            "$cond": [
+                                {"$ne": ["$billingAddress.street2", ""]},
+                                {"$concat": [", ", {"$ifNull": ["$billingAddress.street2", ""]}]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$billingAddress.city", ""]},
+                                {"$concat": [", ", {"$ifNull": ["$billingAddress.city", ""]}]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$billingAddress.state", ""]},
+                                {"$concat": [", ", {"$ifNull": ["$billingAddress.state", ""]}]},
+                                "",
+                            ]
+                        },
+                        {
+                            "$cond": [
+                                {"$ne": ["$billingAddress.zip", ""]},
+                                {"$concat": [" - ", {"$ifNull": ["$billingAddress.zip", ""]}]},
+                                "",
+                            ]
+                        },
+                    ]
+                },
             }
         }
     )
@@ -823,6 +859,7 @@ def build_customer_analytics_pipeline(
             "customerId": 1,
             "customerName": 1,
             "shippingAddress": "$shippingAddressFormatted",
+            "billingAddress": "$billingAddressFormatted",
             "status": "$customerStatus",
             "tier": "$customerTier",
             "totalSalesCurrentMonth": {
@@ -1124,6 +1161,154 @@ def download_customer_analytics_report(
 
             adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
             worksheet.column_dimensions[column_letter].width = adjusted_width
+
+        # Add Customer Address Summary sheet — fuzzy-group same customer/similar address rows
+        def _normalize_addr(addr):
+            if not addr:
+                return ""
+            addr = addr.lower()
+            addr = re.sub(r"[^\w\s]", " ", addr)
+            addr = re.sub(r"\s+", " ", addr).strip()
+            return addr
+
+        def _addr_similarity(a, b):
+            na, nb = _normalize_addr(a), _normalize_addr(b)
+            if not na and not nb:
+                return 1.0
+            if not na or not nb:
+                return 0.0
+            return SequenceMatcher(None, na, nb).ratio()
+
+        from collections import defaultdict
+
+        name_groups = defaultdict(list)
+        for c in customers:
+            key = c.get("customerName", "").lower().strip()
+            name_groups[key].append(c)
+
+        merged_rows = []
+        for _name_key, group in name_groups.items():
+            # Greedy address clustering: assign each item to first cluster it's similar to
+            clusters = []
+            for c in group:
+                addr = c.get("shippingAddress", "")
+                placed = False
+                for cluster in clusters:
+                    rep_addr = cluster[0].get("shippingAddress", "")
+                    if _addr_similarity(addr, rep_addr) >= 0.75:
+                        cluster.append(c)
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([c])
+
+            for cluster in clusters:
+                if len(cluster) == 1:
+                    c = cluster[0]
+                    sp = c.get("salesPerson", "")
+                    if isinstance(sp, list):
+                        sp = ", ".join(sp) if sp else ""
+                    merged_rows.append({
+                        "customerName": c.get("customerName", ""),
+                        "allShippingAddresses": [c.get("shippingAddress", "")],
+                        "billingAddress": c.get("billingAddress", ""),
+                        "status": c.get("status", ""),
+                        "tier": c.get("tier", ""),
+                        "salesPerson": sp,
+                        "totalSalesCurrentMonth": c.get("totalSalesCurrentMonth", 0),
+                        "lastBillDate": c.get("lastBillDate", ""),
+                        "averageOrderFrequencyMonthly": c.get("averageOrderFrequencyMonthly", 0),
+                        "billingTillDateCurrentYear": c.get("billingTillDateCurrentYear", 0),
+                        "totalSalesLastFY": c.get("totalSalesLastFY", 0),
+                        "totalSalesPreviousFY": c.get("totalSalesPreviousFY", 0),
+                        "totalInvoiceCount": c.get("totalInvoiceCount", 0),
+                        "addressCount": 1,
+                    })
+                else:
+                    sp = cluster[0].get("salesPerson", "")
+                    if isinstance(sp, list):
+                        sp = ", ".join(sp) if sp else ""
+                    merged_rows.append({
+                        "customerName": cluster[0].get("customerName", ""),
+                        "allShippingAddresses": [c.get("shippingAddress", "") for c in cluster if c.get("shippingAddress", "")],
+                        "billingAddress": cluster[0].get("billingAddress", ""),
+                        "status": cluster[0].get("status", ""),
+                        "tier": cluster[0].get("tier", ""),
+                        "salesPerson": sp,
+                        "totalSalesCurrentMonth": sum(c.get("totalSalesCurrentMonth", 0) for c in cluster),
+                        "lastBillDate": max((c.get("lastBillDate", "") for c in cluster), default=""),
+                        "averageOrderFrequencyMonthly": round(sum(c.get("averageOrderFrequencyMonthly", 0) for c in cluster), 2),
+                        "billingTillDateCurrentYear": sum(c.get("billingTillDateCurrentYear", 0) for c in cluster),
+                        "totalSalesLastFY": sum(c.get("totalSalesLastFY", 0) for c in cluster),
+                        "totalSalesPreviousFY": sum(c.get("totalSalesPreviousFY", 0) for c in cluster),
+                        "totalInvoiceCount": sum(c.get("totalInvoiceCount", 0) for c in cluster),
+                        "addressCount": len(cluster),
+                    })
+
+        merged_rows.sort(key=lambda x: x["customerName"].lower())
+
+        addr_ws = workbook.create_sheet("Customer Address Summary")
+        addr_headers = [
+            "Customer Name",
+            "Primary Shipping Address",
+            "All Shipping Addresses",
+            "Billing Address",
+            "Address Variants Merged",
+            "Status",
+            "Tier",
+            "Sales Person",
+            "Total Sales Current Month",
+            "Last Bill Date",
+            "Avg Order Frequency (Monthly)",
+            "Billing Till Date Current Year",
+            "Total Sales Last FY",
+            "Total Sales Previous FY",
+            "Total Invoice Count",
+        ]
+
+        for col, hdr in enumerate(addr_headers, 1):
+            cell = addr_ws.cell(row=1, column=col, value=hdr)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+
+        merged_highlight = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+        for row_idx, merged in enumerate(merged_rows, 2):
+            all_addrs = merged.get("allShippingAddresses", [])
+            primary_addr = all_addrs[0] if all_addrs else ""
+            all_addrs_str = " | ".join(a for a in all_addrs if a)
+            addr_ws.cell(row=row_idx, column=1, value=merged.get("customerName", ""))
+            addr_ws.cell(row=row_idx, column=2, value=primary_addr)
+            addr_ws.cell(row=row_idx, column=3, value=all_addrs_str)
+            addr_ws.cell(row=row_idx, column=4, value=merged.get("billingAddress", ""))
+            addr_ws.cell(row=row_idx, column=5, value=merged.get("addressCount", 1))
+            addr_ws.cell(row=row_idx, column=6, value=merged.get("status", ""))
+            addr_ws.cell(row=row_idx, column=7, value=merged.get("tier", ""))
+            addr_ws.cell(row=row_idx, column=8, value=merged.get("salesPerson", ""))
+            addr_ws.cell(row=row_idx, column=9, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
+            addr_ws.cell(row=row_idx, column=10, value=merged.get("lastBillDate", ""))
+            addr_ws.cell(row=row_idx, column=11, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
+            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
+            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("totalSalesLastFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesPreviousFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=15, value=merged.get("totalInvoiceCount", 0))
+            # Highlight rows where multiple address variants were merged
+            if merged.get("addressCount", 1) > 1:
+                for col in range(1, len(addr_headers) + 1):
+                    addr_ws.cell(row=row_idx, column=col).fill = merged_highlight
+
+        for column in addr_ws.columns:
+            max_length = 0
+            column_letter = get_column_letter(column[0].column)
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 60)
+            addr_ws.column_dimensions[column_letter].width = adjusted_width
 
         # Add Brand Breakdown sheet if requested
         if include_brand_breakdown:
