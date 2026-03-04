@@ -507,15 +507,16 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             return []
     else:
         # If no complete date provided, use current date logic
+        _now = datetime.datetime.now()
         if month is None:
-            month = now.month
+            month = _now.month
         if year is None:
-            year = now.year
+            year = _now.year
 
         if day is None:
-            if month == now.month and year == now.year:
+            if month == _now.month and year == _now.year:
                 # Current month - use current day
-                day = now.day
+                day = _now.day
             else:
                 # Previous month - use last day of that month
                 day = monthrange(year, month)[1]
@@ -617,7 +618,6 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
         if not isinstance(item, dict):
             print(f"Skipping item {item} because it is not a dictionary")
             continue
-
         # Handle new API structure with "warehouse_stock" array
         if "warehouse_stock" in item:
             for warehouse_entry in item["warehouse_stock"]:
