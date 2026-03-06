@@ -919,7 +919,6 @@ async def create_customer_request(
         print(f"Error creating customer request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get("/")
 async def get_customer_requests(
     current_user: dict = Depends(get_current_user),
@@ -931,18 +930,14 @@ async def get_customer_requests(
     try:
         db = get_database()
 
-        # Extract user data from JWT payload (nested under "data" key)
         user_data = current_user.get("data", {})
 
-        # Get user_id as ObjectId
         user_id = user_data.get("_id")
         if isinstance(user_id, str):
             user_id = ObjectId(user_id)
 
-        # Build filter
         filter_query = {}
 
-        # If user is sales_person, only show their own requests
         user_role = user_data.get("role", "")
         if user_role == "sales_person":
             filter_query["created_by"] = user_id
@@ -950,21 +945,51 @@ async def get_customer_requests(
         if status:
             filter_query["status"] = status
 
-        # Calculate skip value
         skip = (page - 1) * limit
 
-        # Get total count
         total_count = db.customer_creation_requests.count_documents(filter_query)
 
-        # Get requests sorted by latest first
-        requests = list(
-            db.customer_creation_requests.find(filter_query)
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(limit)
-        )
+        pipeline = [
+            {"$match": filter_query},
 
-        # Serialize the results
+            # Lookup customers collection
+            {
+                "$lookup": {
+                    "from": "customers",
+                    "localField": "zoho_contact_id",
+                    "foreignField": "contact_id",
+                    "as": "customer_data",
+                }
+            },
+
+            # Flatten customer_data
+            {
+                "$unwind": {
+                    "path": "$customer_data",
+                    "preserveNullAndEmptyArrays": True
+                }
+            },
+
+            # Conditionally populate company_name
+            {
+                "$addFields": {
+                    "zoho_customer_name": {
+                        "$cond": [
+                            {"$eq": ["$status", "created_on_zoho"]},
+                            "$customer_data.company_name",
+                            "$company_name",
+                        ]
+                    }
+                }
+            },
+
+            {"$sort": {"created_at": -1}},
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+
+        requests = list(db.customer_creation_requests.aggregate(pipeline))
+
         serialized_requests = [serialize_mongo_document(req) for req in requests]
 
         return {
@@ -977,7 +1002,6 @@ async def get_customer_requests(
     except Exception as e:
         print(f"Error fetching customer requests: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.put("/{request_id}/status")
 async def update_request_status(
