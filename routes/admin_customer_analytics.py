@@ -1473,12 +1473,16 @@ def download_customer_analytics_report(
             else:
                 all_brands = sorted(all_brands_set)
 
-            # Build headers: Customer Name, Sales Person, then for each brand: Brand (PrevFY), Brand (LastFY), Brand (CurrentFY)
+            # Build headers: Customer Name, Sales Person, then for each brand:
+            # Brand (PrevFY) | Brand (LastFY) | YoY% (Prev→Last) | Brand (CurrentFY) | YoY% (Last→Current)
+            COLS_PER_BRAND = 5
             brand_headers = ["Customer Name", "Sales Person"]
             for brand in all_brands:
                 brand_headers.append(f"{brand} ({previous_fy_label})")
                 brand_headers.append(f"{brand} ({last_fy_label})")
+                brand_headers.append(f"{brand} YoY% ({previous_fy_label}→{last_fy_label})")
                 brand_headers.append(f"{brand} ({current_fy_label})")
+                brand_headers.append(f"{brand} YoY% ({last_fy_label}→{current_fy_label})")
 
             # Write headers
             for col, header in enumerate(brand_headers, 1):
@@ -1486,6 +1490,26 @@ def download_customer_analytics_report(
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = header_alignment
+
+            growth_positive_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            growth_negative_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            growth_positive_font = Font(color="276221")
+            growth_negative_font = Font(color="9C0006")
+
+            def _yoy_pct(current, previous):
+                if previous == 0:
+                    return None
+                return round((current - previous) / previous * 100, 1)
+
+            def _write_growth(ws, row, col, pct):
+                cell = ws.cell(row=row, column=col)
+                if pct is None:
+                    cell.value = "N/A"
+                else:
+                    cell.value = f"{'+' if pct >= 0 else ''}{pct}%"
+                    cell.fill = growth_positive_fill if pct >= 0 else growth_negative_fill
+                    cell.font = growth_positive_font if pct >= 0 else growth_negative_font
+                cell.alignment = Alignment(horizontal="center")
 
             # Sort customers by name
             sorted_customers = sorted(
@@ -1500,11 +1524,16 @@ def download_customer_analytics_report(
                 brand_ws.cell(row=brand_row, column=1, value=customer_name)
                 brand_ws.cell(row=brand_row, column=2, value=sales_person)
                 for brand_idx, brand in enumerate(all_brands):
-                    base_col = 3 + brand_idx * 3
+                    base_col = 3 + brand_idx * COLS_PER_BRAND
                     totals = cid_brand_totals.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
-                    brand_ws.cell(row=brand_row, column=base_col, value=round(totals["previousFY"], 2))
-                    brand_ws.cell(row=brand_row, column=base_col + 1, value=round(totals["lastFY"], 2))
-                    brand_ws.cell(row=brand_row, column=base_col + 2, value=round(totals["currentFY"], 2))
+                    prev_val = round(totals["previousFY"], 2)
+                    last_val = round(totals["lastFY"], 2)
+                    curr_val = round(totals["currentFY"], 2)
+                    brand_ws.cell(row=brand_row, column=base_col, value=prev_val)
+                    brand_ws.cell(row=brand_row, column=base_col + 1, value=last_val)
+                    _write_growth(brand_ws, brand_row, base_col + 2, _yoy_pct(last_val, prev_val))
+                    brand_ws.cell(row=brand_row, column=base_col + 3, value=curr_val)
+                    _write_growth(brand_ws, brand_row, base_col + 4, _yoy_pct(curr_val, last_val))
                 brand_row += 1
 
             # Auto-adjust column widths for brand sheet
@@ -1722,6 +1751,19 @@ def get_brand_breakdown(
                             ]
                         }
                     },
+                    # Quarterly: Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar
+                    "currentFY_Q1": {"$sum": {"$cond": [{"$and": ["$isCurrentFY", {"$in": ["$invoiceMonth", [4, 5, 6]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "currentFY_Q2": {"$sum": {"$cond": [{"$and": ["$isCurrentFY", {"$in": ["$invoiceMonth", [7, 8, 9]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "currentFY_Q3": {"$sum": {"$cond": [{"$and": ["$isCurrentFY", {"$in": ["$invoiceMonth", [10, 11, 12]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "currentFY_Q4": {"$sum": {"$cond": [{"$and": ["$isCurrentFY", {"$in": ["$invoiceMonth", [1, 2, 3]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "lastFY_Q1": {"$sum": {"$cond": [{"$and": ["$isLastFY", {"$in": ["$invoiceMonth", [4, 5, 6]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "lastFY_Q2": {"$sum": {"$cond": [{"$and": ["$isLastFY", {"$in": ["$invoiceMonth", [7, 8, 9]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "lastFY_Q3": {"$sum": {"$cond": [{"$and": ["$isLastFY", {"$in": ["$invoiceMonth", [10, 11, 12]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "lastFY_Q4": {"$sum": {"$cond": [{"$and": ["$isLastFY", {"$in": ["$invoiceMonth", [1, 2, 3]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "previousFY_Q1": {"$sum": {"$cond": [{"$and": ["$isPreviousFY", {"$in": ["$invoiceMonth", [4, 5, 6]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "previousFY_Q2": {"$sum": {"$cond": [{"$and": ["$isPreviousFY", {"$in": ["$invoiceMonth", [7, 8, 9]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "previousFY_Q3": {"$sum": {"$cond": [{"$and": ["$isPreviousFY", {"$in": ["$invoiceMonth", [10, 11, 12]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
+                    "previousFY_Q4": {"$sum": {"$cond": [{"$and": ["$isPreviousFY", {"$in": ["$invoiceMonth", [1, 2, 3]]}]}, {"$ifNull": ["$line_items.item_total", 0]}, 0]}},
                 }
             },
             {
@@ -1731,12 +1773,42 @@ def get_brand_breakdown(
                     "currentFY": {"$round": ["$currentFY", 2]},
                     "lastFY": {"$round": ["$lastFY", 2]},
                     "previousFY": {"$round": ["$previousFY", 2]},
+                    "currentFY_Q1": {"$round": ["$currentFY_Q1", 2]},
+                    "currentFY_Q2": {"$round": ["$currentFY_Q2", 2]},
+                    "currentFY_Q3": {"$round": ["$currentFY_Q3", 2]},
+                    "currentFY_Q4": {"$round": ["$currentFY_Q4", 2]},
+                    "lastFY_Q1": {"$round": ["$lastFY_Q1", 2]},
+                    "lastFY_Q2": {"$round": ["$lastFY_Q2", 2]},
+                    "lastFY_Q3": {"$round": ["$lastFY_Q3", 2]},
+                    "lastFY_Q4": {"$round": ["$lastFY_Q4", 2]},
+                    "previousFY_Q1": {"$round": ["$previousFY_Q1", 2]},
+                    "previousFY_Q2": {"$round": ["$previousFY_Q2", 2]},
+                    "previousFY_Q3": {"$round": ["$previousFY_Q3", 2]},
+                    "previousFY_Q4": {"$round": ["$previousFY_Q4", 2]},
                 }
             },
             {"$sort": {"currentFY": -1}},
         ]
 
         results = list(db.invoices.aggregate(pipeline))
+
+        def _calc_growth(current, previous):
+            if previous == 0:
+                return None
+            return round((current - previous) / previous * 100, 1)
+
+        for r in results:
+            r["yoyGrowth"] = {
+                "prevToLast": _calc_growth(r.get("lastFY", 0), r.get("previousFY", 0)),
+                "lastToCurrent": _calc_growth(r.get("currentFY", 0), r.get("lastFY", 0)),
+            }
+            r["quarterlyGrowth"] = {
+                q: {
+                    "prevToLast": _calc_growth(r.get(f"lastFY_{q}", 0), r.get(f"previousFY_{q}", 0)),
+                    "lastToCurrent": _calc_growth(r.get(f"currentFY_{q}", 0), r.get(f"lastFY_{q}", 0)),
+                }
+                for q in ["Q1", "Q2", "Q3", "Q4"]
+            }
 
         # Build FY labels
         current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
