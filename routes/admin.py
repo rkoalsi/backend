@@ -2890,6 +2890,90 @@ async def update_brand_image(file: UploadFile = File(...), brand_name: str = For
         print(f"Database update error for brand '{brand_name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
 
+
+@router.put("/brands/secondary_image")
+async def update_brand_secondary_image(file: UploadFile = File(...), brand_name: str = Form(...)):
+    if not brand_name or not brand_name.strip():
+        raise HTTPException(status_code=400, detail="Brand name is required")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    brand_name = brand_name.strip()
+
+    S3_URL_BASE = os.getenv("S3_URL")
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+
+    if not s3_client or not S3_BUCKET_NAME or not S3_URL_BASE:
+        raise HTTPException(status_code=500, detail="S3 configuration missing or failed to initialize.")
+
+    file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+    ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "svg", "webp", "gif"}
+
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    try:
+        file_content = await file.read()
+        if len(file_content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
+
+    image_s3_key = f"brands/{slugify(brand_name.lower())}_secondary.{file_extension}"
+
+    try:
+        s3_client.upload_fileobj(
+            io.BytesIO(file_content),
+            S3_BUCKET_NAME,
+            image_s3_key,
+            ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+        )
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {e.response['Error']['Code']}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to upload image to S3")
+
+    new_image_url = f"{S3_URL_BASE}/brands/{slugify(brand_name.lower())}_secondary.{file_extension}"
+
+    try:
+        db.brands.update_one(
+            {"name": brand_name},
+            {"$set": {"secondary_image_url": new_image_url}},
+        )
+        return {"message": f"Brand secondary image updated for '{brand_name}'.", "secondary_image_url": new_image_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
+
+
+@router.put("/brands/{brand_id}")
+async def update_brand(brand_id: str, payload: dict):
+    from bson import ObjectId
+
+    allowed_fields = {"description", "status"}
+    update_data = {k: v for k, v in payload.items() if k in allowed_fields}
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    try:
+        result = db.brands.update_one(
+            {"_id": ObjectId(brand_id)},
+            {"$set": update_data},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Brand not found")
+        return {"message": "Brand updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update brand: {e}")
+
+
 @router.put("/products/{product_id}")
 async def update_product(
     product_id: str,
