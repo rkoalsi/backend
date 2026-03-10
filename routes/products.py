@@ -17,6 +17,7 @@ products_collection = db["products"]
 notify_requests_collection = db["product_notify_requests"]
 customers_collection = db["customers"]
 
+
 class NotifyMeRequest(BaseModel):
     product_id: str
     order_id: Optional[str] = None
@@ -70,12 +71,14 @@ def get_product_counts():
 
         # Add count for "New Arrivals" - products created in last 3 months
         three_months_ago = datetime.now() - relativedelta(months=3)
-        new_products_count = db.products.count_documents({
-            "stock": {"$gt": 0},
-            "is_deleted": {"$exists": False},
-            "status": "active",
-            "created_at": {"$gte": three_months_ago}
-        })
+        new_products_count = db.products.count_documents(
+            {
+                "stock": {"$gt": 0},
+                "is_deleted": {"$exists": False},
+                "status": "active",
+                "created_at": {"$gte": three_months_ago},
+            }
+        )
 
         result["New Arrivals"] = {"All Products": new_products_count}
 
@@ -107,10 +110,20 @@ def get_all_brands():
 
                 if brand_doc:
                     # Create brand object with name and image
-                    brand = {"brand": brand_name, "image": brand_doc.get("image_url")}
+                    brand = {
+                        "brand": brand_name,
+                        "image": brand_doc.get("image_url"),
+                        "secondary_image_url": brand_doc.get("secondary_image_url"),
+                        "description": brand_doc.get("description"),
+                    }
                 else:
                     # If no brand document found, just include the name
-                    brand = {"brand": brand_name, "image": None}
+                    brand = {
+                        "brand": brand_name,
+                        "image": None,
+                        "secondary_image_url": None,
+                        "description": '',
+                    }
 
                 brands.append(brand)
 
@@ -183,60 +196,65 @@ def extract_base_name(product_name: str) -> str:
 
     # Define size patterns (both abbreviated and full words)
     # IMPORTANT: Longer sizes must come first to avoid partial matches (XXXXL before XXXL before XXL before XL before L)
-    size_pattern_abbrev = '(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)'
-    size_pattern_full = '(X-Large|X-Small|XX-Large|XXX-Large|Extra Large|Extra Small|Large|Medium|Small)'
+    size_pattern_abbrev = "(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)"
+    size_pattern_full = "(X-Large|X-Small|XX-Large|XXX-Large|Extra Large|Extra Small|Large|Medium|Small)"
 
     # NEW: Remove (SIZE/measurement) pattern first - e.g., (XXL/62CM), (M/32CM), （XL/48CM）
     # Handles both regular parentheses () and full-width parentheses （）
-    base_name = re.sub(rf'[（(]\s*{size_pattern_abbrev}\s*/\s*\d+\s*[Cc]?[Mm]\s*[)）]', '', base_name, flags=re.IGNORECASE)
+    base_name = re.sub(
+        rf"[（(]\s*{size_pattern_abbrev}\s*/\s*\d+\s*[Cc]?[Mm]\s*[)）]",
+        "",
+        base_name,
+        flags=re.IGNORECASE,
+    )
 
     # Remove various size patterns (matching frontend logic)
     # First, handle full word size patterns
     full_word_patterns = [
-        rf'\s+-\s+{size_pattern_full}$',        # " - Large", " - Medium", " - X-Large" at end
-        rf'\s+{size_pattern_full}$',            # " Large", " Medium" at end
-        rf'-{size_pattern_full}$',              # "-Large", "-Medium" at end
-        rf'\s+-\s+{size_pattern_full}\s+',      # " - Large ", " - Medium " in middle
-        rf'\s+{size_pattern_full}\s+',          # " Large ", " Medium " in middle
+        rf"\s+-\s+{size_pattern_full}$",  # " - Large", " - Medium", " - X-Large" at end
+        rf"\s+{size_pattern_full}$",  # " Large", " Medium" at end
+        rf"-{size_pattern_full}$",  # "-Large", "-Medium" at end
+        rf"\s+-\s+{size_pattern_full}\s+",  # " - Large ", " - Medium " in middle
+        rf"\s+{size_pattern_full}\s+",  # " Large ", " Medium " in middle
     ]
 
     for pattern in full_word_patterns:
-        base_name = re.sub(pattern, '', base_name, flags=re.IGNORECASE)
+        base_name = re.sub(pattern, "", base_name, flags=re.IGNORECASE)
 
     # Then handle abbreviated size patterns
     # Pattern 1: Special handling to keep the color part
-    pattern1 = rf'-([A-Za-z][^-]+)-{size_pattern_abbrev}$'
-    base_name = re.sub(pattern1, r' \1', base_name, flags=re.IGNORECASE)
+    pattern1 = rf"-([A-Za-z][^-]+)-{size_pattern_abbrev}$"
+    base_name = re.sub(pattern1, r" \1", base_name, flags=re.IGNORECASE)
 
     # Remaining patterns - replace with space
     abbrev_patterns = [
-        rf'\s+{size_pattern_abbrev}\s+-\s+',           # Pattern 2
-        rf'\s+-\s+{size_pattern_abbrev}\s+',           # Pattern 3
-        rf'-{size_pattern_abbrev}-',                   # Pattern 4
-        rf'-{size_pattern_abbrev}\s+',                 # Pattern 5
-        rf'-{size_pattern_abbrev}$',                   # Pattern 6
-        rf'\s+{size_pattern_abbrev}\s+',               # Pattern 7
-        rf'\s+{size_pattern_abbrev}$',                 # Pattern 8
-        rf'^{size_pattern_abbrev}\s+',                 # Pattern 9
-        rf'\s*\({size_pattern_abbrev}\)$',             # Pattern 10
-        rf'\s*#\d+\s*',                                # Pattern 11 - shoe sizes
-        rf'\s*\d+\.?\d*mm\s*',                         # Pattern 12 - measurements in mm
-        rf'\s*\d+\.?\d*[Mm]\s*',                       # Pattern 13 - measurements in meters (3M, 5M)
-        rf'\s+{size_pattern_abbrev}-',                 # Pattern 14
+        rf"\s+{size_pattern_abbrev}\s+-\s+",  # Pattern 2
+        rf"\s+-\s+{size_pattern_abbrev}\s+",  # Pattern 3
+        rf"-{size_pattern_abbrev}-",  # Pattern 4
+        rf"-{size_pattern_abbrev}\s+",  # Pattern 5
+        rf"-{size_pattern_abbrev}$",  # Pattern 6
+        rf"\s+{size_pattern_abbrev}\s+",  # Pattern 7
+        rf"\s+{size_pattern_abbrev}$",  # Pattern 8
+        rf"^{size_pattern_abbrev}\s+",  # Pattern 9
+        rf"\s*\({size_pattern_abbrev}\)$",  # Pattern 10
+        rf"\s*#\d+\s*",  # Pattern 11 - shoe sizes
+        rf"\s*\d+\.?\d*mm\s*",  # Pattern 12 - measurements in mm
+        rf"\s*\d+\.?\d*[Mm]\s*",  # Pattern 13 - measurements in meters (3M, 5M)
+        rf"\s+{size_pattern_abbrev}-",  # Pattern 14
     ]
 
     for pattern in abbrev_patterns:
-        base_name = re.sub(pattern, ' ', base_name, flags=re.IGNORECASE)
+        base_name = re.sub(pattern, " ", base_name, flags=re.IGNORECASE)
 
     # Remove weight indicators
-    base_name = re.sub(r'\s*\(Max\s+\d+kgs?\)', '', base_name, flags=re.IGNORECASE)
-    base_name = re.sub(r'\s*\(\d+-\d+kgs?\)', '', base_name, flags=re.IGNORECASE)
+    base_name = re.sub(r"\s*\(Max\s+\d+kgs?\)", "", base_name, flags=re.IGNORECASE)
+    base_name = re.sub(r"\s*\(\d+-\d+kgs?\)", "", base_name, flags=re.IGNORECASE)
 
     # Clean up extra spaces and dashes
-    base_name = re.sub(r'\s*-+\s*$', '', base_name)  # Remove trailing dashes
-    base_name = re.sub(r'^\s*-+\s*', '', base_name)  # Remove leading dashes
-    base_name = re.sub(r'\s*-\s*', ' - ', base_name)  # Normalize spacing around dashes
-    base_name = re.sub(r'\s+', ' ', base_name).strip()
+    base_name = re.sub(r"\s*-+\s*$", "", base_name)  # Remove trailing dashes
+    base_name = re.sub(r"^\s*-+\s*", "", base_name)  # Remove leading dashes
+    base_name = re.sub(r"\s*-\s*", " - ", base_name)  # Normalize spacing around dashes
+    base_name = re.sub(r"\s+", " ", base_name).strip()
 
     return base_name
 
@@ -255,8 +273,12 @@ def get_products(
     sort: Optional[str] = Query(
         "default", description="Sort order: default, price_asc, price_desc, catalogue"
     ),
-    group_by_name: Optional[bool] = Query(False, description="Group products by base name"),
-    new_only: Optional[bool] = Query(False, description="Filter to show only new products (created in last 3 months)"),
+    group_by_name: Optional[bool] = Query(
+        False, description="Group products by base name"
+    ),
+    new_only: Optional[bool] = Query(
+        False, description="Filter to show only new products (created in last 3 months)"
+    ),
 ):
     """
     Retrieves paginated products with optional filters.
@@ -299,11 +321,7 @@ def get_products(
 
     # Filter to only new products if new_only is True
     if new_only:
-        pipeline.append({
-            "$match": {
-                "created_at": {"$gte": three_months_ago}
-            }
-        })
+        pipeline.append({"$match": {"created_at": {"$gte": three_months_ago}}})
 
     # Adjust query and sort based on sort order
     if sort == "price_asc":
@@ -318,69 +336,87 @@ def get_products(
         sort_stage = {"catalogue_order": ASCENDING}
     else:
         # Stage 1: Extract color and size
-        pipeline.append({
-            "$addFields": {
-                # Extract color (last word before parenthesis or end)
-                "extracted_color": {
-                    "$arrayElemAt": [
-                        {
-                            "$split": [
-                                {
-                                    "$trim": {
-                                        "input": {
-                                            "$arrayElemAt": [
-                                                {"$split": ["$name", "("]},
-                                                0,
-                                            ]
+        pipeline.append(
+            {
+                "$addFields": {
+                    # Extract color (last word before parenthesis or end)
+                    "extracted_color": {
+                        "$arrayElemAt": [
+                            {
+                                "$split": [
+                                    {
+                                        "$trim": {
+                                            "input": {
+                                                "$arrayElemAt": [
+                                                    {"$split": ["$name", "("]},
+                                                    0,
+                                                ]
+                                            }
                                         }
-                                    }
-                                },
-                                " ",
-                            ]
-                        },
-                        -1,
-                    ]
-                },
-                # Extract size - match XS, S, M, L, XL, XXL, XXXL, XXXXL with word boundaries
-                "extracted_size": {
-                    "$regexFind": {
-                        "input": "$name",
-                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
-                    }
-                },
+                                    },
+                                    " ",
+                                ]
+                            },
+                            -1,
+                        ]
+                    },
+                    # Extract size - match XS, S, M, L, XL, XXL, XXXL, XXXXL with word boundaries
+                    "extracted_size": {
+                        "$regexFind": {
+                            "input": "$name",
+                            "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
+                        }
+                    },
+                }
             }
-        })
+        )
 
         # Stage 2: Create size_for_sort from extracted_size
-        pipeline.append({
-            "$addFields": {
-                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+        pipeline.append(
+            {
+                "$addFields": {
+                    "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+                }
             }
-        })
+        )
 
         # Stage 3: Create size_order from size_for_sort
-        pipeline.append({
-            "$addFields": {
-                "size_order": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
-                            {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
-                            {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
-                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
-                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
-                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
-                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
-                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
-                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
-                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
-                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
-                        ],
-                        "default": 99,
-                    }
-                },
+        pipeline.append(
+            {
+                "$addFields": {
+                    "size_order": {
+                        "$switch": {
+                            "branches": [
+                                {
+                                    "case": {"$eq": ["$size_for_sort", "XXXXS"]},
+                                    "then": 1,
+                                },
+                                {
+                                    "case": {"$eq": ["$size_for_sort", "XXXS"]},
+                                    "then": 2,
+                                },
+                                {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
+                                {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
+                                {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
+                                {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
+                                {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
+                                {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
+                                {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
+                                {
+                                    "case": {"$eq": ["$size_for_sort", "XXXL"]},
+                                    "then": 10,
+                                },
+                                {
+                                    "case": {"$eq": ["$size_for_sort", "XXXXL"]},
+                                    "then": 11,
+                                },
+                            ],
+                            "default": 99,
+                        }
+                    },
+                }
             }
-        })
+        )
 
         sort_stage = {
             "brand": ASCENDING,
@@ -388,8 +424,8 @@ def get_products(
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": ASCENDING,
-            "extracted_color": ASCENDING,   # COLOR FIRST - groups colors together
-            "size_order": ASCENDING,        # SIZE SECOND - sorts sizes within each color
+            "extracted_color": ASCENDING,  # COLOR FIRST - groups colors together
+            "size_order": ASCENDING,  # SIZE SECOND - sorts sizes within each color
             "rate": ASCENDING,
             "name": ASCENDING,
         }
@@ -446,13 +482,15 @@ def get_products(
                 # First time seeing this base name - add at current position
                 position = len(result_items)
                 seen_base_names[base_name_key] = position
-                result_items.append({
-                    "is_group": False,  # Will be set to True if more products added
-                    "groupId": f"group-{base_name_key.replace(' ', '-')}",
-                    "baseName": base_name,
-                    "products": [product],
-                    "primaryProduct": product,
-                })
+                result_items.append(
+                    {
+                        "is_group": False,  # Will be set to True if more products added
+                        "groupId": f"group-{base_name_key.replace(' ', '-')}",
+                        "baseName": base_name,
+                        "products": [product],
+                        "primaryProduct": product,
+                    }
+                )
 
         # Convert to final format maintaining exact order
         items_in_order = []
@@ -460,19 +498,23 @@ def get_products(
         for item in result_items:
             if item["is_group"]:
                 # This is a true group (2+ products)
-                items_in_order.append({
-                    "type": "group",
-                    "groupId": item["groupId"],
-                    "baseName": item["baseName"],
-                    "products": item["products"],
-                    "primaryProduct": item["primaryProduct"],
-                })
+                items_in_order.append(
+                    {
+                        "type": "group",
+                        "groupId": item["groupId"],
+                        "baseName": item["baseName"],
+                        "products": item["products"],
+                        "primaryProduct": item["primaryProduct"],
+                    }
+                )
             else:
                 # Single product
-                items_in_order.append({
-                    "type": "product",
-                    "product": item["products"][0],
-                })
+                items_in_order.append(
+                    {
+                        "type": "product",
+                        "product": item["products"][0],
+                    }
+                )
 
         return {
             "items": items_in_order,  # Ordered list with type indicators
@@ -588,8 +630,12 @@ def get_all_products_catalogue(
     brand: Optional[str] = Query(None, description="Filter by brand"),
     category: Optional[str] = Query(None, description="Filter by category"),
     search: Optional[str] = Query(None, description="Search term for name or SKU code"),
-    group_by_name: Optional[bool] = Query(True, description="Group products by base name"),
-    new_only: Optional[bool] = Query(None, description="Filter only new arrivals products"),
+    group_by_name: Optional[bool] = Query(
+        True, description="Group products by base name"
+    ),
+    new_only: Optional[bool] = Query(
+        None, description="Filter only new arrivals products"
+    ),
 ):
     """
     PUBLIC ROUTE: Retrieves all active products for the public catalogue.
@@ -635,75 +681,77 @@ def get_all_products_catalogue(
 
     # Filter to only new products if new_only is True
     if new_only:
-        pipeline.append({
-            "$match": {
-                "created_at": {"$gte": three_months_ago}
-            }
-        })
+        pipeline.append({"$match": {"created_at": {"$gte": three_months_ago}}})
 
     # Add default sorting (same as main products route)
     # Stage 1: Extract color and size
-    pipeline.append({
-        "$addFields": {
-            "extracted_color": {
-                "$arrayElemAt": [
-                    {
-                        "$split": [
-                            {
-                                "$trim": {
-                                    "input": {
-                                        "$arrayElemAt": [
-                                            {"$split": ["$name", "("]},
-                                            0,
-                                        ]
+    pipeline.append(
+        {
+            "$addFields": {
+                "extracted_color": {
+                    "$arrayElemAt": [
+                        {
+                            "$split": [
+                                {
+                                    "$trim": {
+                                        "input": {
+                                            "$arrayElemAt": [
+                                                {"$split": ["$name", "("]},
+                                                0,
+                                            ]
+                                        }
                                     }
-                                }
-                            },
-                            " ",
-                        ]
-                    },
-                    -1,
-                ]
-            },
-            "extracted_size": {
-                "$regexFind": {
-                    "input": "$name",
-                    "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",
-                }
-            },
+                                },
+                                " ",
+                            ]
+                        },
+                        -1,
+                    ]
+                },
+                "extracted_size": {
+                    "$regexFind": {
+                        "input": "$name",
+                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",
+                    }
+                },
+            }
         }
-    })
+    )
 
     # Stage 2: Create size_for_sort from extracted_size
-    pipeline.append({
-        "$addFields": {
-            "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+    pipeline.append(
+        {
+            "$addFields": {
+                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+            }
         }
-    })
+    )
 
     # Stage 3: Create size_order from size_for_sort
-    pipeline.append({
-        "$addFields": {
-            "size_order": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
-                        {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
-                        {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
-                        {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
-                        {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
-                        {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
-                        {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
-                        {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
-                        {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
-                        {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
-                        {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
-                    ],
-                    "default": 99,
-                }
-            },
+    pipeline.append(
+        {
+            "$addFields": {
+                "size_order": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
+                            {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
+                            {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
+                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
+                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
+                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
+                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
+                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
+                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
+                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
+                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
+                        ],
+                        "default": 99,
+                    }
+                },
+            }
         }
-    })
+    )
 
     # Use exact same sort as main products route (lines 373-383)
     sort_stage = {
@@ -763,29 +811,35 @@ def get_all_products_catalogue(
             else:
                 position = len(result_items)
                 seen_base_names[base_name_key] = position
-                result_items.append({
-                    "is_group": False,
-                    "groupId": f"group-{base_name_key.replace(' ', '-')}",
-                    "baseName": base_name,
-                    "products": [product],
-                    "primaryProduct": product,
-                })
+                result_items.append(
+                    {
+                        "is_group": False,
+                        "groupId": f"group-{base_name_key.replace(' ', '-')}",
+                        "baseName": base_name,
+                        "products": [product],
+                        "primaryProduct": product,
+                    }
+                )
 
         items_in_order = []
         for item in result_items:
             if item["is_group"]:
-                items_in_order.append({
-                    "type": "group",
-                    "groupId": item["groupId"],
-                    "baseName": item["baseName"],
-                    "products": item["products"],
-                    "primaryProduct": item["primaryProduct"],
-                })
+                items_in_order.append(
+                    {
+                        "type": "group",
+                        "groupId": item["groupId"],
+                        "baseName": item["baseName"],
+                        "products": item["products"],
+                        "primaryProduct": item["primaryProduct"],
+                    }
+                )
             else:
-                items_in_order.append({
-                    "type": "product",
-                    "product": item["products"][0],
-                })
+                items_in_order.append(
+                    {
+                        "type": "product",
+                        "product": item["products"][0],
+                    }
+                )
 
         return {
             "items": items_in_order,
@@ -824,10 +878,7 @@ def get_out_of_stock_products(
     try:
         # Define base query for out of stock products
         query = {
-            "$or": [
-                {"stock": {"$lte": 0}},
-                {"stock": {"$exists": False}}
-            ],
+            "$or": [{"stock": {"$lte": 0}}, {"stock": {"$exists": False}}],
             "is_deleted": {"$exists": False},
             "status": "active",
         }
@@ -839,16 +890,22 @@ def get_out_of_stock_products(
             query["category"] = category
 
         # Fetch out of stock products
-        out_of_stock_products = list(products_collection.find(query).sort("name", ASCENDING))
+        out_of_stock_products = list(
+            products_collection.find(query).sort("name", ASCENDING)
+        )
 
         # Serialize the products
-        serialized_products = [serialize_mongo_document(doc) for doc in out_of_stock_products]
+        serialized_products = [
+            serialize_mongo_document(doc) for doc in out_of_stock_products
+        ]
 
         return {"products": serialized_products}
 
     except Exception as e:
         print(f"Error fetching out of stock products: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch out of stock products")
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch out of stock products"
+        )
 
 
 @router.post("/notify-me")
@@ -864,29 +921,31 @@ async def notify_me_when_available(request: NotifyMeRequest):
             raise HTTPException(status_code=404, detail="Product not found")
 
         # Check if a similar request already exists
-        existing_request = notify_requests_collection.find_one({
-            "product_id": request.product_id,
-            "customer_id": request.customer_id,
-            "notified": {"$ne": True}
-        })
+        existing_request = notify_requests_collection.find_one(
+            {
+                "product_id": request.product_id,
+                "customer_id": request.customer_id,
+                "notified": {"$ne": True},
+            }
+        )
         customer = customers_collection.find_one({"_id": ObjectId(request.customer_id)})
 
         if existing_request:
             # Update quantity on existing request
             notify_requests_collection.update_one(
                 {"_id": existing_request["_id"]},
-                {"$set": {"quantity": request.quantity, "updated_at": datetime.now()}}
+                {"$set": {"quantity": request.quantity, "updated_at": datetime.now()}},
             )
             return {
                 "message": "Pre-order quantity updated successfully",
-                "request_id": str(existing_request["_id"])
+                "request_id": str(existing_request["_id"]),
             }
 
         # Create the notify request document
         notify_document = {
             "product_id": ObjectId(request.product_id),
             "customer_id": ObjectId(request.customer_id),
-            "customer_name": customer.get('contact_name'),
+            "customer_name": customer.get("contact_name"),
             "product_name": product.get("name"),
             "product_brand": product.get("brand"),
             "quantity": request.quantity,
@@ -900,14 +959,16 @@ async def notify_me_when_available(request: NotifyMeRequest):
 
         return {
             "message": "Successfully registered for notification",
-            "request_id": str(result.inserted_id)
+            "request_id": str(result.inserted_id),
         }
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error creating notify request: {e}")
-        raise HTTPException(status_code=500, detail="Failed to register for notification")
+        raise HTTPException(
+            status_code=500, detail="Failed to register for notification"
+        )
 
 
 @router.get("/notify-requests")
@@ -929,7 +990,9 @@ def get_notify_requests(
             query["product_id"] = product_id
 
         # Fetch notification requests
-        requests = list(notify_requests_collection.find(query).sort("created_at", DESCENDING))
+        requests = list(
+            notify_requests_collection.find(query).sort("created_at", DESCENDING)
+        )
 
         # Serialize the requests
         serialized_requests = [serialize_mongo_document(doc) for doc in requests]
@@ -943,14 +1006,13 @@ def get_notify_requests(
                     req["customer_email"] = customer.get("email")
                     req["customer_phone"] = customer.get("cf_phone")
 
-        return {
-            "requests": serialized_requests,
-            "total": len(serialized_requests)
-        }
+        return {"requests": serialized_requests, "total": len(serialized_requests)}
 
     except Exception as e:
         print(f"Error fetching notify requests: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch notification requests")
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch notification requests"
+        )
 
 
 @router.get("/{product_id}")
