@@ -18,7 +18,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from pymongo import DESCENDING, ASCENDING
 from pathlib import Path
 from collections import defaultdict
 
@@ -134,8 +133,8 @@ def create_order(order: dict, collection: Collection) -> str:
             for item in products
         ]
     order["created_by"] = ObjectId(order.get("created_by", ""))
-    order["created_at"] = datetime.utcnow()
-    order["updated_at"] = datetime.utcnow()
+    order["created_at"] = datetime.now()
+    order["updated_at"] = datetime.now()
 
     # Insert the document into MongoDB
     result = collection.insert_one(order)
@@ -220,7 +219,7 @@ def update_order(
     order_collection: Collection,
     customer_collection: Collection,
 ):
-    order_update["updated_at"] = datetime.utcnow()
+    order_update["updated_at"] = datetime.now()
     if "created_by" in order_update:
         order_update["created_by"] = ObjectId(order_update.get("created_by"))
     # Handle customer updates
@@ -1735,9 +1734,21 @@ async def finalise(order_dict: dict):
             last_estimate_number = str(
                 y.json()["estimates"][0]["estimate_number"]
             ).split("/")
-            new_last_part = str(int(last_estimate_number[-1]) + 1).zfill(
-                len(last_estimate_number[-1])
+            last_num = int(last_estimate_number[-1])
+            # Sync the counter up to Zoho's current value, then atomically claim the next number.
+            # $max ensures the counter never goes backwards (handles out-of-band Zoho estimates).
+            # $inc is atomic, so concurrent requests each get a unique sequential number.
+            db.counters.update_one(
+                {"_id": "estimate_counter"},
+                {"$max": {"seq": last_num}},
+                upsert=True,
             )
+            counter = db.counters.find_one_and_update(
+                {"_id": "estimate_counter"},
+                {"$inc": {"seq": 1}},
+                return_document=True,
+            )
+            new_last_part = str(counter["seq"]).zfill(len(last_estimate_number[-1]))
             # Reconstruct the estimate number
             new_estimate_number = (
                 f"{last_estimate_number[0]}/{last_estimate_number[1]}/{new_last_part}"
@@ -2035,7 +2046,7 @@ async def clear_sheet(order_id: str):
             {
                 "$set": {
                     "spreadsheet_created": False,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now()
                 },
                 "$unset": {
                     "spreadsheet_url": "",
