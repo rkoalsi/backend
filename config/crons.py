@@ -493,6 +493,39 @@ def process_purchase_order_data(po_data):
     return sort_dict_recursively(po_data)
 
 
+def process_customerpayment_data(payment_data):
+    """Process customer payment data to ensure proper formatting and datetime conversion."""
+    payment_data["payment_id"] = str(payment_data.get("payment_id", ""))
+
+    datetime_fields = [
+        "created_time", "date", "last_modified_time",
+        "created_time_formatted", "last_modified_time_formatted",
+        "mail_first_viewed_time", "mail_last_viewed_time",
+    ]
+
+    for field in datetime_fields:
+        if field in payment_data and payment_data[field]:
+            datetime_value = parse_datetime_field(payment_data[field])
+            if isinstance(datetime_value, datetime):
+                payment_data[field] = datetime_value
+
+    if "created_time" in payment_data:
+        payment_data["created_at"] = payment_data.get("created_time")
+    elif "date" in payment_data:
+        date_val = parse_datetime_field(payment_data["date"])
+        if isinstance(date_val, datetime):
+            payment_data["created_at"] = date_val
+        else:
+            payment_data["created_at"] = payment_data["date"]
+
+    if "created_at" not in payment_data:
+        logger.warning(
+            f"No created_at field for customer payment {payment_data.get('payment_id')}"
+        )
+
+    return sort_dict_recursively(payment_data)
+
+
 def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[str]:
     """
     Find product ID by querying MongoDB with dual matching strategy.
@@ -2133,6 +2166,191 @@ async def purchase_orders_cron():
         )
 
 
+async def customer_payments_cron():
+    """Cron job for syncing the last 5 pages of customer payments from Zoho Books daily."""
+    logger.info("🚀 Starting daily customer payments sync (last 5 pages)...")
+    start_time = time.time()
+
+    total_processed = 0
+    total_inserted = 0
+    total_errors = 0
+
+    try:
+        db = get_database()
+        collection = db["customer_payments"]
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages
+            logger.info("🔍 Determining total number of pages...")
+            payments_url = (
+                f"https://www.zohoapis.com/books/v3/customerpayments?"
+                f"response_option=2&"
+                f"organization_id={org_id}"
+            )
+
+            data = await api_client.make_request(payments_url)
+            if not data:
+                logger.error("Failed to get response from customer payments API")
+                return
+
+            page_context = data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            total_payments = page_context.get("total", 0)
+
+            logger.info(
+                f"📊 Found {total_payments} total customer payments across {total_pages} pages"
+            )
+
+            # Only process the last 5 pages (highest page numbers = oldest records not yet synced)
+            pages_to_fetch = 5
+            start_page = total_pages
+            end_page = max(1, total_pages - pages_to_fetch + 1)
+
+            logger.info(
+                f"🚀 Processing pages {start_page} → {end_page} ({pages_to_fetch} pages)"
+            )
+
+            for page in range(start_page, end_page - 1, -1):
+                logger.info(f"--- Processing Page {page}/{total_pages} ---")
+
+                page_url = (
+                    f"https://www.zohoapis.com/books/v3/customerpayments?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                page_payments = (
+                    page_data.get("customerpayments") or page_data.get("customerpayment")
+                )
+                if not page_payments:
+                    logger.warning(f"No customer payments found for page {page}")
+                    continue
+
+                logger.info(f"Page {page}: Found {len(page_payments)} customer payments")
+
+                # Filter new payments
+                new_payment_ids = []
+                existing_count = 0
+
+                for payment in page_payments:
+                    payment_id = str(payment.get("payment_id") or "")
+                    if not payment_id:
+                        continue
+
+                    total_processed += 1
+                    existing_doc = collection.find_one(
+                        {"payment_id": payment_id}, {"_id": 1}
+                    )
+                    if not existing_doc:
+                        new_payment_ids.append(payment_id)
+                    else:
+                        existing_count += 1
+
+                logger.info(
+                    f"Page {page}: {len(new_payment_ids)} new, {existing_count} existing"
+                )
+
+                if new_payment_ids:
+                    payments_to_insert = []
+                    batch_size = 5
+                    for i in range(0, len(new_payment_ids), batch_size):
+                        batch_ids = new_payment_ids[i : i + batch_size]
+
+                        detail_tasks = []
+                        for pid in batch_ids:
+                            detail_url = (
+                                f"https://www.zohoapis.com/books/v3/customerpayments/{pid}?"
+                                f"organization_id={org_id}"
+                            )
+                            detail_tasks.append(api_client.make_request(detail_url))
+
+                        results = await asyncio.gather(
+                            *detail_tasks, return_exceptions=True
+                        )
+
+                        for j, result in enumerate(results):
+                            try:
+                                if isinstance(result, Exception):
+                                    logger.error(
+                                        f"Error fetching payment {batch_ids[j]}: {result}"
+                                    )
+                                    total_errors += 1
+                                    continue
+
+                                payment_detail = None
+                                if result:
+                                    payment_detail = result.get("payment") or result.get("payments")
+
+                                if payment_detail and isinstance(payment_detail, dict):
+                                    processed = process_customerpayment_data(payment_detail)
+                                    payments_to_insert.append(processed)
+                                else:
+                                    total_errors += 1
+                            except Exception as e:
+                                logger.error(f"Error processing customer payment: {e}")
+                                total_errors += 1
+
+                    if payments_to_insert:
+                        try:
+                            result = collection.insert_many(
+                                payments_to_insert, ordered=False
+                            )
+                            inserted = len(result.inserted_ids)
+                            total_inserted += inserted
+                            logger.info(
+                                f"✅ Inserted {inserted} customer payments from page {page}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Error during bulk insert for page {page}: {e}"
+                            )
+                            for doc in payments_to_insert:
+                                try:
+                                    collection.insert_one(doc)
+                                    total_inserted += 1
+                                except Exception as e2:
+                                    logger.error(f"Failed to insert customer payment: {e2}")
+                                    total_errors += 1
+
+                if page > end_page:
+                    await asyncio.sleep(1)
+
+            duration = time.time() - start_time
+
+            logger.info(f"🎉 Customer payments sync completed!")
+            logger.info(
+                f"📊 Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+            )
+
+            send_slack_notification(
+                "Customer Payments Cron",
+                success=True,
+                details={
+                    "processed": total_processed,
+                    "inserted": total_inserted,
+                    "pages": pages_to_fetch,
+                    "duration": duration,
+                },
+            )
+
+    except Exception as e:
+        error_msg = f"Error in customer payments sync: {e}"
+        logger.error(error_msg)
+        send_slack_notification(
+            "Customer Payments Cron Error", success=False, error_msg=str(e)
+        )
+
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
@@ -2244,6 +2462,19 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added purchase_orders_cron job")
+
+        scheduler_instance.add_job(
+            customer_payments_cron,
+            "cron",
+            hour=17,
+            minute=15,
+            id="customer_payments_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added customer_payments_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
