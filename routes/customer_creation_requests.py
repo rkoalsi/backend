@@ -608,12 +608,25 @@ def create_zoho_contact(
     }
 
     # Build the contact payload according to Zoho Books API
+    payment_terms_label = customer_data.get("payment_terms", "")
+    payment_terms_days_map = {
+        "Due On Receipt": 0,
+        "Upfront": 0,
+        "Immediate": 0,
+        "Net 15": 15,
+        "Net 30": 30,
+        "Net 45": 45,
+        "Net 60": 60,
+    }
+    payment_terms_days = payment_terms_days_map.get(payment_terms_label, 0)
+
     contact_payload = {
         "contact_name": customer_data.get("shop_name", ""),
         "company_name": customer_data.get("shop_name", ""),
         "contact_type": "customer",
         "customer_sub_type": "business",
-        "payment_terms_label": customer_data.get("payment_terms", ""),
+        "payment_terms": payment_terms_days,
+        "payment_terms_label": payment_terms_label,
     }
 
     # Add custom fields
