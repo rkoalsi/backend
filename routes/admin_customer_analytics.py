@@ -1210,6 +1210,7 @@ def download_customer_analytics_report(
                         sp = ", ".join(sp) if sp else ""
                     merged_rows.append({
                         "customerName": c.get("customerName", ""),
+                        "customerIds": [c.get("customerId", "")] if c.get("customerId", "") else [],
                         "allShippingAddresses": [c.get("shippingAddress", "")],
                         "billingAddress": c.get("billingAddress", ""),
                         "status": c.get("status", ""),
@@ -1230,6 +1231,7 @@ def download_customer_analytics_report(
                         sp = ", ".join(sp) if sp else ""
                     merged_rows.append({
                         "customerName": cluster[0].get("customerName", ""),
+                        "customerIds": [c.get("customerId", "") for c in cluster if c.get("customerId", "")],
                         "allShippingAddresses": [c.get("shippingAddress", "") for c in cluster if c.get("shippingAddress", "")],
                         "billingAddress": cluster[0].get("billingAddress", ""),
                         "status": cluster[0].get("status", ""),
@@ -1247,101 +1249,26 @@ def download_customer_analytics_report(
 
         merged_rows.sort(key=lambda x: x["customerName"].lower())
 
-        addr_ws = workbook.create_sheet("Customer Address Summary")
-        addr_headers = [
-            "Customer Name",
-            "Primary Shipping Address",
-            "All Shipping Addresses",
-            "Billing Address",
-            "Address Variants Merged",
-            "Status",
-            "Tier",
-            "Sales Person",
-            "Total Sales Current Month",
-            "Last Bill Date",
-            "Avg Order Frequency (Monthly)",
-            "Billing Till Date Current Year",
-            "Total Sales Last FY",
-            "Total Sales Previous FY",
-            "Total Invoice Count",
-        ]
-
-        for col, hdr in enumerate(addr_headers, 1):
-            cell = addr_ws.cell(row=1, column=col, value=hdr)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-
-        merged_highlight = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-
-        for row_idx, merged in enumerate(merged_rows, 2):
-            all_addrs = merged.get("allShippingAddresses", [])
-            primary_addr = all_addrs[0] if all_addrs else ""
-            all_addrs_str = " | ".join(a for a in all_addrs if a)
-            addr_ws.cell(row=row_idx, column=1, value=merged.get("customerName", ""))
-            addr_ws.cell(row=row_idx, column=2, value=primary_addr)
-            addr_ws.cell(row=row_idx, column=3, value=all_addrs_str)
-            addr_ws.cell(row=row_idx, column=4, value=merged.get("billingAddress", ""))
-            addr_ws.cell(row=row_idx, column=5, value=merged.get("addressCount", 1))
-            addr_ws.cell(row=row_idx, column=6, value=merged.get("status", ""))
-            addr_ws.cell(row=row_idx, column=7, value=merged.get("tier", ""))
-            addr_ws.cell(row=row_idx, column=8, value=merged.get("salesPerson", ""))
-            addr_ws.cell(row=row_idx, column=9, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
-            addr_ws.cell(row=row_idx, column=10, value=merged.get("lastBillDate", ""))
-            addr_ws.cell(row=row_idx, column=11, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
-            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
-            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("totalSalesLastFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesPreviousFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=15, value=merged.get("totalInvoiceCount", 0))
-            # Highlight rows where multiple address variants were merged
-            if merged.get("addressCount", 1) > 1:
-                for col in range(1, len(addr_headers) + 1):
-                    addr_ws.cell(row=row_idx, column=col).fill = merged_highlight
-
-        for column in addr_ws.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 60)
-            addr_ws.column_dimensions[column_letter].width = adjusted_width
-
-        # Add Brand Breakdown sheet if requested
+        # Compute brand breakdown data if requested (before building the combined sheet)
+        brand_totals = None
+        all_brands = []
+        current_fy_label = last_fy_label = previous_fy_label = ""
         if include_brand_breakdown:
             current_fy_start_year = current_date_info["current_fy_start_year"]
             last_fy_start_year = current_date_info["last_fy_start_year"]
             previous_fy_start_year = current_date_info["previous_fy_start_year"]
 
-            brand_ws = workbook.create_sheet("Brand Breakdown")
-
             current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
             last_fy_label = f"FY {last_fy_start_year}-{str(last_fy_start_year + 1)[2:]}"
             previous_fy_label = f"FY {previous_fy_start_year}-{str(previous_fy_start_year + 1)[2:]}"
 
-            # Pre-fetch product item_id -> brand map (lightweight, small collection)
+            # Pre-fetch product item_id -> brand map
             brand_map = {}
             for prod in products_collection.find({}, {"item_id": 1, "brand": 1, "_id": 0}):
                 brand_map[prod.get("item_id", "")] = prod.get("brand", "Unknown") or "Unknown"
 
-            # Collect customer IDs, name lookup, and sales person lookup
-            customer_ids = []
-            customer_name_map = {}
-            customer_sales_person_map = {}
-            for customer in customers:
-                cid = customer.get("customerId", "")
-                if cid:
-                    customer_ids.append(cid)
-                    customer_name_map[cid] = customer.get("customerName", "")
-                    sp = customer.get("salesPerson", "")
-                    if isinstance(sp, list):
-                        sp = ", ".join(sp) if sp else ""
-                    customer_sales_person_map[cid] = sp
+            customer_ids = [c.get("customerId", "") for c in customers if c.get("customerId", "")]
 
-            # Lightweight pipeline: no $lookup, group by customer_id + item_id
             brand_pipeline = [
                 {
                     "$match": {
@@ -1450,11 +1377,8 @@ def download_customer_analytics_report(
                 },
             ]
 
-            # Run aggregation and re-aggregate by brand in Python
-            from collections import defaultdict
             # brand_totals[cid][brand] = {"currentFY": ..., "lastFY": ..., "previousFY": ...}
             brand_totals = defaultdict(lambda: defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0}))
-
             for row in db.invoices.aggregate(brand_pipeline, allowDiskUse=True):
                 cid = row["_id"]["customer_id"]
                 item_id = row["_id"].get("item_id", "")
@@ -1463,91 +1387,130 @@ def download_customer_analytics_report(
                 brand_totals[cid][brand]["lastFY"] += row.get("lastFY", 0)
                 brand_totals[cid][brand]["previousFY"] += row.get("previousFY", 0)
 
-            # Collect all unique brands sorted alphabetically
             all_brands_set = {brand for cid_brands in brand_totals.values() for brand in cid_brands}
-
-            # Filter brands if a specific list was requested
             if brands:
                 requested_brands = {b.strip() for b in brands.split(",") if b.strip()}
                 all_brands = sorted(all_brands_set & requested_brands)
             else:
                 all_brands = sorted(all_brands_set)
 
-            # Build headers: Customer Name, Sales Person, then for each brand:
-            # Brand (PrevFY) | Brand (LastFY) | YoY% (Prev→Last) | Brand (CurrentFY) | YoY% (Last→Current)
-            COLS_PER_BRAND = 5
-            brand_headers = ["Customer Name", "Sales Person"]
+        # Build combined Address & Brand Breakdown sheet
+        COLS_PER_BRAND = 5
+        addr_base_headers = [
+            "Customer Name",
+            "Primary Shipping Address",
+            "All Shipping Addresses",
+            "Billing Address",
+            "Address Variants Merged",
+            "Status",
+            "Tier",
+            "Sales Person",
+            "Total Sales Current Month",
+            "Last Bill Date",
+            "Avg Order Frequency (Monthly)",
+            "Billing Till Date Current Year",
+            "Total Sales Last FY",
+            "Total Sales Previous FY",
+            "Total Invoice Count",
+        ]
+        brand_col_headers = []
+        if include_brand_breakdown:
             for brand in all_brands:
-                brand_headers.append(f"{brand} ({previous_fy_label})")
-                brand_headers.append(f"{brand} ({last_fy_label})")
-                brand_headers.append(f"{brand} YoY% ({previous_fy_label}→{last_fy_label})")
-                brand_headers.append(f"{brand} ({current_fy_label})")
-                brand_headers.append(f"{brand} YoY% ({last_fy_label}→{current_fy_label})")
+                brand_col_headers.append(f"{brand} ({previous_fy_label})")
+                brand_col_headers.append(f"{brand} ({last_fy_label})")
+                brand_col_headers.append(f"{brand} YoY% ({previous_fy_label}→{last_fy_label})")
+                brand_col_headers.append(f"{brand} ({current_fy_label})")
+                brand_col_headers.append(f"{brand} YoY% ({last_fy_label}→{current_fy_label})")
 
-            # Write headers
-            for col, header in enumerate(brand_headers, 1):
-                cell = brand_ws.cell(row=1, column=col, value=header)
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_alignment
+        combined_headers = addr_base_headers + brand_col_headers
 
-            growth_positive_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-            growth_negative_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-            growth_positive_font = Font(color="276221")
-            growth_negative_font = Font(color="9C0006")
+        addr_ws = workbook.create_sheet("Address & Brand Breakdown")
+        for col, hdr in enumerate(combined_headers, 1):
+            cell = addr_ws.cell(row=1, column=col, value=hdr)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
 
-            def _yoy_pct(current, previous):
-                if previous == 0:
-                    return None
-                return round((current - previous) / previous * 100, 1)
+        merged_highlight = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        growth_positive_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        growth_negative_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        growth_positive_font = Font(color="276221")
+        growth_negative_font = Font(color="9C0006")
 
-            def _write_growth(ws, row, col, pct):
-                cell = ws.cell(row=row, column=col)
-                if pct is None:
-                    cell.value = "N/A"
-                else:
-                    cell.value = f"{'+' if pct >= 0 else ''}{pct}%"
-                    cell.fill = growth_positive_fill if pct >= 0 else growth_negative_fill
-                    cell.font = growth_positive_font if pct >= 0 else growth_negative_font
-                cell.alignment = Alignment(horizontal="center")
+        def _yoy_pct(current, previous):
+            if previous == 0:
+                return None
+            return round((current - previous) / previous * 100, 1)
 
-            # Sort customers by name
-            sorted_customers = sorted(
-                brand_totals.items(),
-                key=lambda x: customer_name_map.get(x[0], ""),
-            )
+        def _write_growth(ws, row, col, pct):
+            cell = ws.cell(row=row, column=col)
+            if pct is None:
+                cell.value = "N/A"
+            else:
+                cell.value = f"{'+' if pct >= 0 else ''}{pct}%"
+                cell.fill = growth_positive_fill if pct >= 0 else growth_negative_fill
+                cell.font = growth_positive_font if pct >= 0 else growth_negative_font
+            cell.alignment = Alignment(horizontal="center")
 
-            brand_row = 2
-            for cid, cid_brand_totals in sorted_customers:
-                customer_name = customer_name_map.get(cid, cid)
-                sales_person = customer_sales_person_map.get(cid, "")
-                brand_ws.cell(row=brand_row, column=1, value=customer_name)
-                brand_ws.cell(row=brand_row, column=2, value=sales_person)
+        for row_idx, merged in enumerate(merged_rows, 2):
+            all_addrs = merged.get("allShippingAddresses", [])
+            primary_addr = all_addrs[0] if all_addrs else ""
+            all_addrs_str = " | ".join(a for a in all_addrs if a)
+            addr_ws.cell(row=row_idx, column=1, value=merged.get("customerName", ""))
+            addr_ws.cell(row=row_idx, column=2, value=primary_addr)
+            addr_ws.cell(row=row_idx, column=3, value=all_addrs_str)
+            addr_ws.cell(row=row_idx, column=4, value=merged.get("billingAddress", ""))
+            addr_ws.cell(row=row_idx, column=5, value=merged.get("addressCount", 1))
+            addr_ws.cell(row=row_idx, column=6, value=merged.get("status", ""))
+            addr_ws.cell(row=row_idx, column=7, value=merged.get("tier", ""))
+            addr_ws.cell(row=row_idx, column=8, value=merged.get("salesPerson", ""))
+            addr_ws.cell(row=row_idx, column=9, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
+            addr_ws.cell(row=row_idx, column=10, value=merged.get("lastBillDate", ""))
+            addr_ws.cell(row=row_idx, column=11, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
+            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
+            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("totalSalesLastFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesPreviousFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=15, value=merged.get("totalInvoiceCount", 0))
+            # Highlight rows where multiple address variants were merged
+            if merged.get("addressCount", 1) > 1:
+                for col in range(1, len(addr_base_headers) + 1):
+                    addr_ws.cell(row=row_idx, column=col).fill = merged_highlight
+
+            # Write brand breakdown columns for this merged row
+            if include_brand_breakdown and brand_totals is not None:
+                # Aggregate brand totals across all customerIds in this cluster
+                row_brand_totals = defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0})
+                for cid in merged.get("customerIds", []):
+                    if cid in brand_totals:
+                        for brand, totals in brand_totals[cid].items():
+                            if brand in all_brands:
+                                row_brand_totals[brand]["currentFY"] += totals["currentFY"]
+                                row_brand_totals[brand]["lastFY"] += totals["lastFY"]
+                                row_brand_totals[brand]["previousFY"] += totals["previousFY"]
+
                 for brand_idx, brand in enumerate(all_brands):
-                    base_col = 3 + brand_idx * COLS_PER_BRAND
-                    totals = cid_brand_totals.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
+                    base_col = len(addr_base_headers) + 1 + brand_idx * COLS_PER_BRAND
+                    totals = row_brand_totals.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
                     prev_val = round(totals["previousFY"], 2)
                     last_val = round(totals["lastFY"], 2)
                     curr_val = round(totals["currentFY"], 2)
-                    brand_ws.cell(row=brand_row, column=base_col, value=prev_val)
-                    brand_ws.cell(row=brand_row, column=base_col + 1, value=last_val)
-                    _write_growth(brand_ws, brand_row, base_col + 2, _yoy_pct(last_val, prev_val))
-                    brand_ws.cell(row=brand_row, column=base_col + 3, value=curr_val)
-                    _write_growth(brand_ws, brand_row, base_col + 4, _yoy_pct(curr_val, last_val))
-                brand_row += 1
+                    addr_ws.cell(row=row_idx, column=base_col, value=prev_val)
+                    addr_ws.cell(row=row_idx, column=base_col + 1, value=last_val)
+                    _write_growth(addr_ws, row_idx, base_col + 2, _yoy_pct(last_val, prev_val))
+                    addr_ws.cell(row=row_idx, column=base_col + 3, value=curr_val)
+                    _write_growth(addr_ws, row_idx, base_col + 4, _yoy_pct(curr_val, last_val))
 
-            # Auto-adjust column widths for brand sheet
-            for column in brand_ws.columns:
-                max_length = 0
-                column_letter = get_column_letter(column[0].column)
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                adjusted_width = min(max_length + 2, 50)
-                brand_ws.column_dimensions[column_letter].width = adjusted_width
+        for column in addr_ws.columns:
+            max_length = 0
+            column_letter = get_column_letter(column[0].column)
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 60)
+            addr_ws.column_dimensions[column_letter].width = adjusted_width
 
         # Save to BytesIO
         excel_buffer = BytesIO()
