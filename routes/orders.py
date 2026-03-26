@@ -3,7 +3,7 @@ from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket, re, io
@@ -401,13 +401,27 @@ def validate_order(order_id: str):
 
 # Create a new order
 @router.post("/")
-def create_new_order(order: dict):
+def create_new_order(order: dict, request: Request, background_tasks: BackgroundTasks):
     """
     Create a new order with raw dictionary data.
     """
     try:
         order_id = create_order(order, orders_collection)
         order["_id"] = order_id  # Add the generated ID back to the response
+
+        created_by = order.get("created_by")
+        if created_by:
+            from .customer_activity import log_order_activity_for_user, extract_client_info
+            ip, ua = extract_client_info(request)
+            background_tasks.add_task(
+                log_order_activity_for_user,
+                action="create_order",
+                user_id=str(created_by),
+                metadata={"order_id": str(order_id)},
+                ip_address=ip,
+                user_agent=ua,
+            )
+
         return serialize_mongo_document(order)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1644,7 +1658,7 @@ def clear_order_cart(order_id: str):
 
 # Finalise an order (Create Estimate)
 @router.post("/finalise")
-async def finalise(order_dict: dict):
+async def finalise(order_dict: dict, request: Request, background_tasks: BackgroundTasks):
     """
     finalise an existing order
     """
@@ -1670,6 +1684,27 @@ async def finalise(order_dict: dict):
     created_by = order.get("created_by")
     user = users_collection.find_one({"_id": ObjectId(created_by)})
     reference_number = order.get("reference_number", "")
+
+    # Log finalize activity for customer accounts
+    if user and user.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+        ip, ua = extract_client_info(request)
+        customer_name = (
+            user.get("contact_name")
+            or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        )
+        background_tasks.add_task(
+            log_activity,
+            action="finalize_order",
+            category="orders",
+            user_id=str(user["_id"]),
+            customer_id=user.get("customer_id"),
+            customer_name=customer_name,
+            email=user.get("email"),
+            metadata={"order_id": order_id, "status": status},
+            ip_address=ip,
+            user_agent=ua,
+        )
     # Fetch SPecial Margins
     customer_id = order.get("customer_id")
     special_margins_cursor = db.special_margins.find(

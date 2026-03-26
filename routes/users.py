@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request
 from fastapi.security import OAuth2PasswordBearer
 from ..config.root import get_database, serialize_mongo_document
 from pydantic import BaseModel, EmailStr
@@ -160,7 +160,7 @@ async def register_user(user: dict):
 
 
 @router.post("/login")
-async def login_user(user: UserLogin):
+async def login_user(user: UserLogin, request: Request, background_tasks: BackgroundTasks):
     # Find user by email
     user = authenticate_user(user.email, user.password)
     if not user:
@@ -170,6 +170,28 @@ async def login_user(user: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = create_access_token(data={"data": user})
+
+    # Log login activity for customer accounts
+    if user.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+        ip, ua = extract_client_info(request)
+        customer_name = (
+            user.get("contact_name")
+            or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        )
+        background_tasks.add_task(
+            log_activity,
+            action="login",
+            category="auth",
+            user_id=user.get("_id"),
+            customer_id=user.get("customer_id"),
+            customer_name=customer_name,
+            email=user.get("email"),
+            metadata={},
+            ip_address=ip,
+            user_agent=ua,
+        )
+
     return {
         "message": "Login successful",
         "user_id": user["_id"],
