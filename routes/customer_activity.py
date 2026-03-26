@@ -240,7 +240,7 @@ def activity_summary(_=Depends(JWTBearer())):
         action_counts: dict = {}
         for a in r.get("actions", []):
             action_counts[a] = action_counts.get(a, 0) + 1
-        summaries.append({
+        summaries.append(serialize_mongo_document({
             "customer_id": r["_id"],
             "customer_name": r.get("customer_name"),
             "email": r.get("email"),
@@ -250,6 +250,6 @@ def activity_summary(_=Depends(JWTBearer())):
             "total_actions": r.get("total_actions", 0),
             "last_seen": r.get("last_seen"),
             "action_counts": action_counts,
-        })
+        }))
 
     return {"summary": summaries, "total_customers": len(summaries)}
