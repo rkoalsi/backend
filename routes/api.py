@@ -31,6 +31,7 @@ from .credit_notes import router as credit_notes
 from .careers import router as careers
 from .contact_submissions import router as contact_submissions
 from .blog import router as blog
+from .customer_activity import router as customer_activity
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -84,6 +85,8 @@ router.include_router(credit_notes, prefix="/credit-notes", tags=["Credit Notes"
 router.include_router(careers, prefix="/careers", tags=["Careers"])
 
 router.include_router(contact_submissions, prefix="/contact_submissions", tags=["Contact Submissions"])
+
+router.include_router(customer_activity, prefix="/customer_activity", tags=["Customer Activity"])
 
 # Public blog routes (no auth)
 router.include_router(blog, prefix="/blog", tags=["Blog"])
