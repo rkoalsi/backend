@@ -76,7 +76,7 @@ def download_career_applications_report(
         applications = list(db.career_applications.aggregate(pipeline))
 
         # Build career_id -> title lookup
-        career_ids = list({app.get("career_id", "") for app in applications if app.get("career_id")})
+        career_ids = list({str(app.get("career_id", "")) for app in applications if app.get("career_id")})
         career_map = {}
         if career_ids:
             for career in db.careers.find({"_id": {"$in": [ObjectId(cid) for cid in career_ids]}}, {"title": 1}):
@@ -122,7 +122,8 @@ def download_career_applications_report(
             ws.cell(row=row_idx, column=1, value=app.get("applicant_name", ""))
             ws.cell(row=row_idx, column=2, value=app.get("applicant_email", ""))
             ws.cell(row=row_idx, column=3, value=app.get("applicant_phone", ""))
-            ws.cell(row=row_idx, column=4, value=career_map.get(app.get("career_id", ""), app.get("career_id", "")))
+            career_id_str = str(app.get("career_id", ""))
+            ws.cell(row=row_idx, column=4, value=career_map.get(career_id_str, career_id_str))
             ws.cell(row=row_idx, column=5, value=app.get("current_location", ""))
             ws.cell(row=row_idx, column=6, value=app.get("total_experience", ""))
             ws.cell(row=row_idx, column=7, value=app.get("relevant_experience", ""))
