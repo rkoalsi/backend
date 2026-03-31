@@ -1060,6 +1060,7 @@ def download_customer_analytics_report(
 
         # Define headers
         headers = [
+            "Customer ID",
             "Customer Name",
             "Shipping Address",
             "Status",
@@ -1094,57 +1095,58 @@ def download_customer_analytics_report(
 
         # Add data rows
         for row, customer in enumerate(customers, 2):
-            worksheet.cell(row=row, column=1, value=customer.get("customerName", ""))
+            worksheet.cell(row=row, column=1, value=customer.get("customerId", ""))
+            worksheet.cell(row=row, column=2, value=customer.get("customerName", ""))
             worksheet.cell(
-                row=row, column=2, value=customer.get("shippingAddress", "")
+                row=row, column=3, value=customer.get("shippingAddress", "")
             )
-            worksheet.cell(row=row, column=3, value=customer.get("status", ""))
-            worksheet.cell(row=row, column=4, value=customer.get("tier", ""))
+            worksheet.cell(row=row, column=4, value=customer.get("status", ""))
+            worksheet.cell(row=row, column=5, value=customer.get("tier", ""))
             sales_person = customer.get("salesPerson", "")
             if isinstance(sales_person, list):
                 sales_person = ", ".join(sales_person) if sales_person else ""
-            worksheet.cell(row=row, column=5, value=sales_person)
+            worksheet.cell(row=row, column=6, value=sales_person)
             worksheet.cell(
-                row=row, column=6, value=customer.get("totalSalesCurrentMonth", 0)
+                row=row, column=7, value=customer.get("totalSalesCurrentMonth", 0)
             )
-            worksheet.cell(row=row, column=7, value=customer.get("lastBillDate", ""))
+            worksheet.cell(row=row, column=8, value=customer.get("lastBillDate", ""))
             worksheet.cell(
-                row=row, column=8, value=customer.get("averageOrderFrequencyMonthly", 0)
-            )
-            worksheet.cell(
-                row=row, column=9, value=customer.get("billingTillDateCurrentYear", 0)
+                row=row, column=9, value=customer.get("averageOrderFrequencyMonthly", 0)
             )
             worksheet.cell(
-                row=row, column=10, value=customer.get("totalSalesLastFY", 0)
+                row=row, column=10, value=customer.get("billingTillDateCurrentYear", 0)
             )
             worksheet.cell(
-                row=row, column=11, value=customer.get("totalSalesPreviousFY", 0)
+                row=row, column=11, value=customer.get("totalSalesLastFY", 0)
             )
             worksheet.cell(
-                row=row,
-                column=12,
-                value="Yes" if customer.get("hasBilledLastMonth", False) else "No",
+                row=row, column=12, value=customer.get("totalSalesPreviousFY", 0)
             )
             worksheet.cell(
                 row=row,
                 column=13,
-                value="Yes" if customer.get("hasBilledLast45Days", False) else "No",
+                value="Yes" if customer.get("hasBilledLastMonth", False) else "No",
             )
             worksheet.cell(
                 row=row,
                 column=14,
-                value="Yes" if customer.get("hasBilledLast2Months", False) else "No",
+                value="Yes" if customer.get("hasBilledLast45Days", False) else "No",
             )
             worksheet.cell(
                 row=row,
                 column=15,
+                value="Yes" if customer.get("hasBilledLast2Months", False) else "No",
+            )
+            worksheet.cell(
+                row=row,
+                column=16,
                 value="Yes" if customer.get("hasBilledLast3Months", False) else "No",
             )
             worksheet.cell(
-                row=row, column=16, value=len(customer.get("duePayments", []))
+                row=row, column=17, value=len(customer.get("duePayments", []))
             )
             worksheet.cell(
-                row=row, column=17, value=len(customer.get("notDuePayments", []))
+                row=row, column=18, value=len(customer.get("notDuePayments", []))
             )
 
         # Auto-adjust column widths
@@ -1397,6 +1399,7 @@ def download_customer_analytics_report(
         # Build combined Address & Brand Breakdown sheet
         COLS_PER_BRAND = 5
         addr_base_headers = [
+            "Customer ID",
             "Customer Name",
             "Primary Shipping Address",
             "All Shipping Addresses",
@@ -1456,21 +1459,22 @@ def download_customer_analytics_report(
             all_addrs = merged.get("allShippingAddresses", [])
             primary_addr = all_addrs[0] if all_addrs else ""
             all_addrs_str = " | ".join(a for a in all_addrs if a)
-            addr_ws.cell(row=row_idx, column=1, value=merged.get("customerName", ""))
-            addr_ws.cell(row=row_idx, column=2, value=primary_addr)
-            addr_ws.cell(row=row_idx, column=3, value=all_addrs_str)
-            addr_ws.cell(row=row_idx, column=4, value=merged.get("billingAddress", ""))
-            addr_ws.cell(row=row_idx, column=5, value=merged.get("addressCount", 1))
-            addr_ws.cell(row=row_idx, column=6, value=merged.get("status", ""))
-            addr_ws.cell(row=row_idx, column=7, value=merged.get("tier", ""))
-            addr_ws.cell(row=row_idx, column=8, value=merged.get("salesPerson", ""))
-            addr_ws.cell(row=row_idx, column=9, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
-            addr_ws.cell(row=row_idx, column=10, value=merged.get("lastBillDate", ""))
-            addr_ws.cell(row=row_idx, column=11, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
-            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
-            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("totalSalesLastFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesPreviousFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=15, value=merged.get("totalInvoiceCount", 0))
+            addr_ws.cell(row=row_idx, column=1, value=(merged.get("customerIds", [None])[0] or ""))
+            addr_ws.cell(row=row_idx, column=2, value=merged.get("customerName", ""))
+            addr_ws.cell(row=row_idx, column=3, value=primary_addr)
+            addr_ws.cell(row=row_idx, column=4, value=all_addrs_str)
+            addr_ws.cell(row=row_idx, column=5, value=merged.get("billingAddress", ""))
+            addr_ws.cell(row=row_idx, column=6, value=merged.get("addressCount", 1))
+            addr_ws.cell(row=row_idx, column=7, value=merged.get("status", ""))
+            addr_ws.cell(row=row_idx, column=8, value=merged.get("tier", ""))
+            addr_ws.cell(row=row_idx, column=9, value=merged.get("salesPerson", ""))
+            addr_ws.cell(row=row_idx, column=10, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
+            addr_ws.cell(row=row_idx, column=11, value=merged.get("lastBillDate", ""))
+            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
+            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
+            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesLastFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=15, value=round(merged.get("totalSalesPreviousFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=16, value=merged.get("totalInvoiceCount", 0))
             # Highlight rows where multiple address variants were merged
             if merged.get("addressCount", 1) > 1:
                 for col in range(1, len(addr_base_headers) + 1):
