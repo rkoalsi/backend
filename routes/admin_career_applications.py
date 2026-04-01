@@ -23,6 +23,8 @@ def get_career_applications(
     limit: int = Query(10, ge=1, description="Number of items per page"),
     career_id: Optional[str] = Query(None, description="Filter by career ID"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    date_from: Optional[str] = Query(None, description="Filter applied on >= YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="Filter applied on <= YYYY-MM-DD"),
 ):
     try:
         match_statement = {}
@@ -30,6 +32,13 @@ def get_career_applications(
             match_statement["career_id"] = ObjectId(career_id)
         if status:
             match_statement["status"] = status
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to + "T23:59:59"
+            match_statement["created_at"] = date_filter
 
         pipeline = [
             {"$match": match_statement},
@@ -60,13 +69,27 @@ def get_career_applications(
 def download_career_applications_report(
     career_id: Optional[str] = Query(None, description="Filter by career ID"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    date_from: Optional[str] = Query(None, description="Filter applied on >= YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="Filter applied on <= YYYY-MM-DD"),
+    selected_ids: Optional[str] = Query(None, description="Comma-separated application IDs to export"),
 ):
     try:
         match_statement = {}
-        if career_id:
-            match_statement["career_id"] = career_id
-        if status:
-            match_statement["status"] = status
+        if selected_ids:
+            id_list = [ObjectId(sid.strip()) for sid in selected_ids.split(",") if sid.strip()]
+            match_statement["_id"] = {"$in": id_list}
+        else:
+            if career_id:
+                match_statement["career_id"] = ObjectId(career_id)
+            if status:
+                match_statement["status"] = status
+            if date_from or date_to:
+                date_filter = {}
+                if date_from:
+                    date_filter["$gte"] = date_from
+                if date_to:
+                    date_filter["$lte"] = date_to + "T23:59:59"
+                match_statement["created_at"] = date_filter
 
         pipeline = [
             {"$match": match_statement},
@@ -82,11 +105,20 @@ def download_career_applications_report(
             for career in db.careers.find({"_id": {"$in": [ObjectId(cid) for cid in career_ids]}}, {"title": 1}):
                 career_map[str(career["_id"])] = career.get("title", "")
 
+        # Collect all unique custom question keys in order of first appearance
+        all_custom_questions = []
+        seen_questions = set()
+        for app in applications:
+            for q in (app.get("custom_answers") or {}).keys():
+                if q not in seen_questions:
+                    all_custom_questions.append(q)
+                    seen_questions.add(q)
+
         workbook = openpyxl.Workbook()
         ws = workbook.active
         ws.title = "Career Applications"
 
-        headers = [
+        base_headers = [
             "Applicant Name",
             "Email",
             "Phone",
@@ -107,6 +139,7 @@ def download_career_applications_report(
             "Status",
             "Applied On",
         ]
+        headers = base_headers + all_custom_questions
 
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
@@ -145,6 +178,10 @@ def download_career_applications_report(
                 except Exception:
                     created_at = str(created_at)
             ws.cell(row=row_idx, column=19, value=created_at)
+
+            custom_answers = app.get("custom_answers") or {}
+            for q_idx, question in enumerate(all_custom_questions):
+                ws.cell(row=row_idx, column=20 + q_idx, value=str(custom_answers.get(question, "")))
 
         # Auto-adjust column widths
         for column in ws.columns:
