@@ -891,6 +891,12 @@ def build_customer_analytics_pipeline(
     if include_all_invoices:
         project_stage["$project"]["allInvoices"] = 1
 
+    # Expose address key components so callers can build composite brand-lookup keys
+    project_stage["$project"]["addressCity"] = "$_id.city"
+    project_stage["$project"]["addressState"] = "$_id.state"
+    project_stage["$project"]["addressZip"] = "$_id.zip"
+    project_stage["$project"]["addressStreet"] = "$_id.fullStreet"
+
     pipeline.append(project_stage)
 
     # Stage 11: Sort by customer name
@@ -1188,6 +1194,15 @@ def download_customer_analytics_report(
             key = c.get("customerName", "").lower().strip()
             name_groups[key].append(c)
 
+        def _addr_key(c):
+            """Return the same (city, state, zip, street) tuple the brand pipeline uses."""
+            return (
+                c.get("addressCity", ""),
+                c.get("addressState", ""),
+                c.get("addressZip", ""),
+                c.get("addressStreet", ""),
+            )
+
         merged_rows = []
         for _name_key, group in name_groups.items():
             # Greedy address clustering: assign each item to first cluster it's similar to
@@ -1213,6 +1228,8 @@ def download_customer_analytics_report(
                     merged_rows.append({
                         "customerName": c.get("customerName", ""),
                         "customerIds": [c.get("customerId", "")] if c.get("customerId", "") else [],
+                        # (cid, addr_key) pairs used for per-location brand lookup
+                        "customerAddressKeys": [(c.get("customerId", ""), _addr_key(c))] if c.get("customerId", "") else [],
                         "allShippingAddresses": [c.get("shippingAddress", "")],
                         "billingAddress": c.get("billingAddress", ""),
                         "status": c.get("status", ""),
@@ -1234,6 +1251,11 @@ def download_customer_analytics_report(
                     merged_rows.append({
                         "customerName": cluster[0].get("customerName", ""),
                         "customerIds": [c.get("customerId", "") for c in cluster if c.get("customerId", "")],
+                        # (cid, addr_key) pairs used for per-location brand lookup
+                        "customerAddressKeys": [
+                            (c.get("customerId", ""), _addr_key(c))
+                            for c in cluster if c.get("customerId", "")
+                        ],
                         "allShippingAddresses": [c.get("shippingAddress", "") for c in cluster if c.get("shippingAddress", "")],
                         "billingAddress": cluster[0].get("billingAddress", ""),
                         "status": cluster[0].get("status", ""),
@@ -1286,6 +1308,82 @@ def download_customer_analytics_report(
                         },
                         "invoiceMonth": {
                             "$month": {"$dateFromString": {"dateString": "$date"}}
+                        },
+                        # Normalise address the same way the main pipeline does
+                        "brandNormCity": {
+                            "$switch": {
+                                "branches": [
+                                    {
+                                        "case": {
+                                            "$regexMatch": {
+                                                "input": {"$toLower": {"$ifNull": ["$shipping_address.city", ""]}},
+                                                "regex": "^(bangalore|bengaluru)$",
+                                            }
+                                        },
+                                        "then": "bengaluru",
+                                    },
+                                    {
+                                        "case": {
+                                            "$regexMatch": {
+                                                "input": {"$toLower": {"$ifNull": ["$shipping_address.city", ""]}},
+                                                "regex": "^(mumbai|bombay)$",
+                                            }
+                                        },
+                                        "then": "mumbai",
+                                    },
+                                    {
+                                        "case": {
+                                            "$regexMatch": {
+                                                "input": {"$toLower": {"$ifNull": ["$shipping_address.city", ""]}},
+                                                "regex": "^(delhi|new delhi)$",
+                                            }
+                                        },
+                                        "then": "delhi",
+                                    },
+                                ],
+                                "default": {"$toLower": {"$ifNull": ["$shipping_address.city", "unknown_city"]}},
+                            }
+                        },
+                        "brandNormState": {
+                            "$toLower": {"$trim": {"input": {"$ifNull": ["$shipping_address.state", ""]}}}
+                        },
+                        "brandNormZip": {
+                            "$replaceAll": {
+                                "input": {"$ifNull": ["$shipping_address.zip", ""]},
+                                "find": " ",
+                                "replacement": "",
+                            }
+                        },
+                        "brandNormStreet": {
+                            "$trim": {
+                                "input": {
+                                    "$replaceAll": {
+                                        "input": {
+                                            "$replaceAll": {
+                                                "input": {
+                                                    "$replaceAll": {
+                                                        "input": {
+                                                            "$toLower": {
+                                                                "$concat": [
+                                                                    {"$ifNull": ["$shipping_address.street", ""]},
+                                                                    " ",
+                                                                    {"$ifNull": ["$shipping_address.street2", ""]},
+                                                                ]
+                                                            }
+                                                        },
+                                                        "find": ",",
+                                                        "replacement": " ",
+                                                    }
+                                                },
+                                                "find": ".",
+                                                "replacement": " ",
+                                            }
+                                        },
+                                        "find": "  ",
+                                        "replacement": " ",
+                                    }
+                                }
+                            }
                         },
                     }
                 },
@@ -1346,6 +1444,11 @@ def download_customer_analytics_report(
                     "$group": {
                         "_id": {
                             "customer_id": "$customer_id",
+                            # Include address components so totals are per-location
+                            "city": "$brandNormCity",
+                            "state": "$brandNormState",
+                            "zip": "$brandNormZip",
+                            "fullStreet": "$brandNormStreet",
                             "item_id": "$line_items.item_id",
                         },
                         "currentFY": {
@@ -1379,15 +1482,24 @@ def download_customer_analytics_report(
                 },
             ]
 
-            # brand_totals[cid][brand] = {"currentFY": ..., "lastFY": ..., "previousFY": ...}
+            # brand_totals[(cid, city, state, zip, street)][brand] = {currentFY, lastFY, previousFY}
+            # Keying by (customer_id + address) ensures different locations of the same
+            # customer (same customer_id) get separate totals.
             brand_totals = defaultdict(lambda: defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0}))
             for row in db.invoices.aggregate(brand_pipeline, allowDiskUse=True):
                 cid = row["_id"]["customer_id"]
+                addr_key = (
+                    row["_id"].get("city", ""),
+                    row["_id"].get("state", ""),
+                    row["_id"].get("zip", ""),
+                    row["_id"].get("fullStreet", ""),
+                )
                 item_id = row["_id"].get("item_id", "")
                 brand = brand_map.get(item_id, "Unknown")
-                brand_totals[cid][brand]["currentFY"] += row.get("currentFY", 0)
-                brand_totals[cid][brand]["lastFY"] += row.get("lastFY", 0)
-                brand_totals[cid][brand]["previousFY"] += row.get("previousFY", 0)
+                composite_key = (cid, addr_key)
+                brand_totals[composite_key][brand]["currentFY"] += row.get("currentFY", 0)
+                brand_totals[composite_key][brand]["lastFY"] += row.get("lastFY", 0)
+                brand_totals[composite_key][brand]["previousFY"] += row.get("previousFY", 0)
 
             all_brands_set = {brand for cid_brands in brand_totals.values() for brand in cid_brands}
             if brands:
@@ -1482,11 +1594,13 @@ def download_customer_analytics_report(
 
             # Write brand breakdown columns for this merged row
             if include_brand_breakdown and brand_totals is not None:
-                # Aggregate brand totals across all customerIds in this cluster
+                # Aggregate brand totals per (customer_id, address) key so that
+                # multiple locations of the same customer_id are kept separate.
                 row_brand_totals = defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0})
-                for cid in merged.get("customerIds", []):
-                    if cid in brand_totals:
-                        for brand, totals in brand_totals[cid].items():
+                for cid, addr_key in merged.get("customerAddressKeys", []):
+                    composite_key = (cid, addr_key)
+                    if composite_key in brand_totals:
+                        for brand, totals in brand_totals[composite_key].items():
                             if brand in all_brands:
                                 row_brand_totals[brand]["currentFY"] += totals["currentFY"]
                                 row_brand_totals[brand]["lastFY"] += totals["lastFY"]
