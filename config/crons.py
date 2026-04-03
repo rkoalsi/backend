@@ -1905,8 +1905,8 @@ async def purchase_orders_cron():
 
             logger.info(f"Found {page_context.get('total', 0)} total purchase orders across {total_pages} pages")
 
-            # Step 1: Delete and reinsert first N pages (most recent purchase orders)
-            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (delete and reinsert)...")
+            # Step 1: Upsert first N pages (most recent purchase orders)
+            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (upsert)...")
 
             for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
                 logger.info(f"--- Resyncing Page {page} ---")
@@ -1926,26 +1926,16 @@ async def purchase_orders_cron():
                 page_pos = page_data["purchaseorders"]
                 logger.info(f"Page {page}: Found {len(page_pos)} purchase orders")
 
-                # Collect PO IDs from this page and delete them
+                # Collect PO IDs from this page
                 page_po_ids = []
                 for po in page_pos:
                     po_id = str(po.get("purchaseorder_id", ""))
                     if po_id:
                         page_po_ids.append(po_id)
 
-                if page_po_ids:
-                    delete_result = collection.delete_many(
-                        {"purchaseorder_id": {"$in": page_po_ids}}
-                    )
-                    total_deleted += delete_result.deleted_count
-                    logger.info(
-                        f"Deleted {delete_result.deleted_count} existing purchase orders from page {page}"
-                    )
-
                 total_processed += len(page_po_ids)
 
-                # Fetch details and reinsert
-                pos_to_insert = []
+                # Fetch details and upsert
                 batch_size = 5
                 for i in range(0, len(page_po_ids), batch_size):
                     batch_ids = page_po_ids[i : i + batch_size]
@@ -1984,36 +1974,22 @@ async def purchase_orders_cron():
 
                             if po_detail and isinstance(po_detail, dict):
                                 processed = process_purchase_order_data(po_detail)
-                                pos_to_insert.append(processed)
+                                upsert_result = collection.update_one(
+                                    {"purchaseorder_id": processed["purchaseorder_id"]},
+                                    {"$set": processed},
+                                    upsert=True,
+                                )
+                                if upsert_result.upserted_id:
+                                    total_inserted += 1
+                                else:
+                                    total_deleted += 1  # reusing counter to track updates
                             else:
                                 total_errors += 1
                         except Exception as e:
                             logger.error(f"Error processing purchase order: {e}")
                             total_errors += 1
 
-                if pos_to_insert:
-                    try:
-                        result = collection.insert_many(
-                            pos_to_insert, ordered=False
-                        )
-                        inserted = len(result.inserted_ids)
-                        total_inserted += inserted
-                        logger.info(
-                            f"Reinserted {inserted} purchase orders from page {page}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Error during bulk insert for page {page}: {e}"
-                        )
-                        for doc in pos_to_insert:
-                            try:
-                                collection.insert_one(doc)
-                                total_inserted += 1
-                            except Exception as e2:
-                                logger.error(
-                                    f"Failed to insert purchase order: {e2}"
-                                )
-                                total_errors += 1
+                logger.info(f"Page {page}: Upserted {len(page_po_ids)} purchase orders")
 
                 if page < min(RESYNC_PAGES, total_pages):
                     await asyncio.sleep(1)
