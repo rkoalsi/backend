@@ -668,7 +668,7 @@ def build_customer_analytics_pipeline(
                 },
                 "shippingAddressFormatted": {
                     "$concat": [
-                        {"$ifNull": ["$shippingAddress.street", ""]},
+                        {"$trim": {"input": {"$ifNull": ["$shippingAddress.street", ""]}, "chars": ", "}},
                         {
                             "$cond": [
                                 {"$ne": ["$shippingAddress.street2", ""]},
@@ -701,7 +701,7 @@ def build_customer_analytics_pipeline(
                 },
                 "billingAddressFormatted": {
                     "$concat": [
-                        {"$ifNull": ["$billingAddress.street", ""]},
+                        {"$trim": {"input": {"$ifNull": ["$billingAddress.street", ""]}, "chars": ", "}},
                         {
                             "$cond": [
                                 {"$ne": ["$billingAddress.street2", ""]},
