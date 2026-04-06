@@ -1759,6 +1759,10 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
 
     if not estimate_created:
         async with httpx.AsyncClient(timeout=timeout) as client:
+            # Compute current financial year string (April–March) first
+            now = datetime.now()
+            fy_start = now.year if now.month >= 4 else now.year - 1
+            fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
             y = await client.get(
                 url=ESTIMATE_URL.format(org_id=org_id)
                 + "&filter_by=Status.All&per_page=200&sort_column=estimate_number&sort_order=D",
@@ -1766,31 +1770,42 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             )
             if y.status_code != 200:
                 return {"status": "error", "message": f"{y.json().get('message','')}"}
-            last_estimate_number = str(
-                y.json()["estimates"][0]["estimate_number"]
-            ).split("/")
-            last_num = int(last_estimate_number[-1])
-            # Sync the counter up to Zoho's current value, then atomically claim the next number.
+            all_estimates = y.json().get("estimates", [])
+            # Find the last estimate for the current FY only
+            fy_estimates = [
+                e for e in all_estimates if f"/{fy_str}/" in e.get("estimate_number", "")
+            ]
+            # Use the first matching estimate (list is sorted descending by estimate_number)
+            if fy_estimates:
+                last_estimate_number = str(fy_estimates[0]["estimate_number"]).split("/")
+                last_num = int(last_estimate_number[-1])
+                num_width = len(last_estimate_number[-1])
+                prefix = last_estimate_number[0]
+            else:
+                # No estimates yet for this FY — start from 0, use defaults from most recent estimate
+                last_estimate_number = str(all_estimates[0]["estimate_number"]).split("/") if all_estimates else ["EST"]
+                last_num = 0
+                num_width = len(last_estimate_number[-1]) if len(last_estimate_number) > 1 else 4
+                prefix = last_estimate_number[0]
+            # Sync the counter up to current FY's last value, then atomically claim the next number.
+            # Per-FY counter key prevents cross-year contamination.
             # $max ensures the counter never goes backwards (handles out-of-band Zoho estimates).
             # $inc is atomic, so concurrent requests each get a unique sequential number.
+            counter_id = f"estimate_counter_{fy_str}"
             db.counters.update_one(
-                {"_id": "estimate_counter"},
+                {"_id": counter_id},
                 {"$max": {"seq": last_num}},
                 upsert=True,
             )
             counter = db.counters.find_one_and_update(
-                {"_id": "estimate_counter"},
+                {"_id": counter_id},
                 {"$inc": {"seq": 1}},
                 return_document=True,
             )
-            new_last_part = str(counter["seq"]).zfill(len(last_estimate_number[-1]))
-            # Compute current financial year string (April–March)
-            now = datetime.now()
-            fy_start = now.year if now.month >= 4 else now.year - 1
-            fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
+            new_last_part = str(counter["seq"]).zfill(num_width)
             # Reconstruct the estimate number
             new_estimate_number = (
-                f"{last_estimate_number[0]}/{fy_str}/{new_last_part}"
+                f"{prefix}/{fy_str}/{new_last_part}"
             )
             # Prepare the request payload
             payload = {
