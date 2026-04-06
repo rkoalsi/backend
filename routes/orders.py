@@ -1784,9 +1784,13 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 return_document=True,
             )
             new_last_part = str(counter["seq"]).zfill(len(last_estimate_number[-1]))
+            # Compute current financial year string (April–March)
+            now = datetime.now()
+            fy_start = now.year if now.month >= 4 else now.year - 1
+            fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
             # Reconstruct the estimate number
             new_estimate_number = (
-                f"{last_estimate_number[0]}/{last_estimate_number[1]}/{new_last_part}"
+                f"{last_estimate_number[0]}/{fy_str}/{new_last_part}"
             )
             # Prepare the request payload
             payload = {
