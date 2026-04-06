@@ -1106,7 +1106,7 @@ def download_customer_analytics_report(
                     _py_norm_city(addr.get("city", "")),
                     _py_norm_state(addr.get("state", "")),
                     _py_norm_zip(addr.get("zip", "")),
-                    _py_norm_street(addr.get("address", ""), addr.get("street2", "")),
+                    _py_norm_street(addr.get("street", ""), addr.get("street2", "")),
                 )
                 addr_match_lookup[key] = aid
 
