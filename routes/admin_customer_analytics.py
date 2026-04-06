@@ -473,6 +473,7 @@ def build_customer_analytics_pipeline(
             "customerId": {"$first": "$customer_id"},
             "customerName": {"$first": "$customer_name"},
             "shippingAddress": {"$first": "$shipping_address"},
+            "shippingAddressId": {"$first": "$shipping_address.address_id"},
             "billingAddress": {"$first": "$billing_address"},
             "salesPerson": {"$first": sales_person_logic},
             # Collect payment information
@@ -896,6 +897,7 @@ def build_customer_analytics_pipeline(
     project_stage["$project"]["addressState"] = "$_id.state"
     project_stage["$project"]["addressZip"] = "$_id.zip"
     project_stage["$project"]["addressStreet"] = "$_id.fullStreet"
+    project_stage["$project"]["shippingAddressId"] = "$shippingAddressId"
 
     pipeline.append(project_stage)
 
@@ -1060,25 +1062,32 @@ def download_customer_analytics_report(
         customers = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
 
         # Build customer address status lookup.
-        # customer_address_details uses (customer_id=MongoDB _id, address_id=Zoho address_id).
-        # invoices.customer_id is the Zoho contact_id, with no address_id on shipping_address.
-        # Strategy: match analytics rows to customers.addresses by (city, state, zip, street)
-        # to find the Zoho address_id, then look up status in customer_address_details.
+        # customer_address_details stores (customer_id=MongoDB _id, address_id=Zoho address_id).
+        # Invoices don't carry address_id, so we match the invoice shipping_address fields
+        # against customers.addresses to find the Zoho address_id.
+        # NOTE: Zoho contact addresses use field "address" for street line 1,
+        # while invoice shipping_address uses "street" — same content, different key.
 
         def _py_norm_city(city):
-            c = (city or "").lower().strip()
+            c = (city or "").lower().strip().rstrip(",. ")
             if re.match(r"^(bangalore|bengaluru)$", c):
                 return "bengaluru"
+            if re.match(r"^(bombay|mumbai)$", c):
+                return "mumbai"
             return c
 
         def _py_norm_state(s):
-            return (s or "").lower().strip()
+            s = (s or "").lower().strip().rstrip(",. ")
+            # Strip trailing zip codes that Zoho sometimes embeds in the state field
+            # e.g. "Karnataka - 570102" → "karnataka"
+            s = re.sub(r"\s*-\s*\d[\d\s]*$", "", s).strip()
+            return s
 
         def _py_norm_zip(z):
             return (z or "").replace(" ", "")
 
-        def _py_norm_street(addr, street2=""):
-            s = ((addr or "") + " " + (street2 or "")).lower()
+        def _py_norm_street(line1, line2=""):
+            s = ((line1 or "") + " " + (line2 or "")).lower()
             s = s.replace(",", " ").replace(".", " ")
             while "  " in s:
                 s = s.replace("  ", " ")
@@ -1087,8 +1096,19 @@ def download_customer_analytics_report(
         all_zoho_ids = [c.get("customerId", "") for c in customers if c.get("customerId", "")]
 
         zoho_to_mongo_id: dict = {}
-        # (mongo_id, city, state, zip, street) -> address_id
+        # (mongo_id, city, state, zip, street) -> address_id  (full match)
         addr_match_lookup: dict = {}
+        # Fallback buckets — each maps a partial key -> [address_id, ...]
+        # Only used when exactly one candidate exists (to avoid false matches)
+        addr_match_czs: dict = {}       # city + state + zip
+        addr_match_cs: dict = {}        # city + state
+        addr_match_cst: dict = {}       # city + street (ignores state/zip)
+        addr_match_no_city: dict = {}    # (mongo_id, state, zip, street) for contacts with empty city
+        addr_match_no_city_nz: dict = {} # (mongo_id, state, street) for contacts with empty city, ignoring zip
+        # (mongo_id, address_id) -> normalized street  — used for fuzzy street fallback
+        aid_to_nst: dict = {}
+        # (mongo_id, city, state, zip) -> [address_id, ...]  — same as addr_match_czs but kept for fuzzy lookup
+        # (reuse addr_match_czs)
 
         for cust_doc in customers_collection.find(
             {"contact_id": {"$in": all_zoho_ids}},
@@ -1101,14 +1121,27 @@ def download_customer_analytics_report(
                 aid = addr.get("address_id", "")
                 if not aid:
                     continue
-                key = (
-                    mongo_id,
-                    _py_norm_city(addr.get("city", "")),
-                    _py_norm_state(addr.get("state", "")),
-                    _py_norm_zip(addr.get("zip", "")),
-                    _py_norm_street(addr.get("street", ""), addr.get("street2", "")),
-                )
-                addr_match_lookup[key] = aid
+                # Zoho contact addresses use "address" for street line 1 (invoices use "street")
+                line1 = addr.get("address", "") or addr.get("street", "")
+                nc = _py_norm_city(addr.get("city", ""))
+                ns = _py_norm_state(addr.get("state", ""))
+                nz = _py_norm_zip(addr.get("zip", ""))
+                nst = _py_norm_street(line1, addr.get("street2", ""))
+                addr_match_lookup[(mongo_id, nc, ns, nz, nst)] = aid
+                for bucket, key in [
+                    (addr_match_czs, (mongo_id, nc, ns, nz)),
+                    (addr_match_cs, (mongo_id, nc, ns)),
+                    (addr_match_cst, (mongo_id, nc, nst)),  # city + street, ignores state/zip
+                ]:
+                    bucket.setdefault(key, [])
+                    if aid not in bucket[key]:
+                        bucket[key].append(aid)
+                # Special bucket: contact has no city (city may be embedded in street text)
+                if not nc:
+                    addr_match_no_city[(mongo_id, ns, nz, nst)] = aid
+                    addr_match_no_city_nz[(mongo_id, ns, nst)] = aid
+                # Store normalized street per address_id for fuzzy fallback
+                aid_to_nst[(mongo_id, aid)] = nst
 
         mongo_ids = list(zoho_to_mongo_id.values())
         # (mongo_id, address_id) -> status
@@ -1128,7 +1161,63 @@ def download_customer_analytics_report(
             mongo_id = zoho_to_mongo_id.get(zoho_id, "")
             if not mongo_id:
                 return "-"
-            aid = addr_match_lookup.get((mongo_id, city, state, zip_, street), "")
+            nc = _py_norm_city(city)
+            ns = _py_norm_state(state)
+            nz = _py_norm_zip(zip_)
+            nst = _py_norm_street(street)
+
+            # 1. Full match: city + state + zip + street
+            aid = addr_match_lookup.get((mongo_id, nc, ns, nz, nst), "")
+
+            # 2. Fallback: city + state + zip (unique address only)
+            if not aid:
+                candidates = addr_match_czs.get((mongo_id, nc, ns, nz), [])
+                if len(candidates) == 1:
+                    aid = candidates[0]
+
+            # 3. Fallback: city + street, ignoring state/zip
+            #    Handles zip mismatches (e.g. zip embedded in state on contact side)
+            if not aid and nst:
+                candidates = addr_match_cst.get((mongo_id, nc, nst), [])
+                if len(candidates) == 1:
+                    aid = candidates[0]
+
+            # 4. Fallback: city + state only (unique address only)
+            if not aid:
+                candidates = addr_match_cs.get((mongo_id, nc, ns), [])
+                if len(candidates) == 1:
+                    aid = candidates[0]
+
+            # 5. Fallback: contact has no city — city is embedded at end of street text
+            #    e.g. contact street = "...hsr layout bengaluru", city = ""
+            #    analytics street = "...hsr layout", city = "bengaluru"
+            if not aid and nc:
+                street_with_city = nst + " " + nc
+                aid = addr_match_no_city.get((mongo_id, ns, nz, street_with_city), "")
+                if not aid:
+                    aid = addr_match_no_city_nz.get((mongo_id, ns, street_with_city), "")
+
+            # 6. Fuzzy street match within the same city+state+zip bucket
+            #    Handles invoices with abbreviated/different address text vs the full contact address
+            #    e.g. invoice: "shop no-2 satvashakti pushpakunj circle kankaria"
+            #         contact: "shop no-2 ground floor satvashakti pushpakunj society opp aradhna cinema kankaria..."
+            if not aid and nst:
+                candidates = addr_match_czs.get((mongo_id, nc, ns, nz), [])
+                if candidates:
+                    best_aid, best_ratio = "", 0.0
+                    second_ratio = 0.0
+                    for cand_aid in candidates:
+                        cand_nst = aid_to_nst.get((mongo_id, cand_aid), "")
+                        ratio = SequenceMatcher(None, nst, cand_nst).ratio()
+                        if ratio > best_ratio:
+                            second_ratio = best_ratio
+                            best_ratio, best_aid = ratio, cand_aid
+                        elif ratio > second_ratio:
+                            second_ratio = ratio
+                    # Accept if best match is good enough AND clearly better than second
+                    if best_ratio >= 0.4 and (best_ratio - second_ratio) >= 0.2:
+                        aid = best_aid
+
             if not aid:
                 return "-"
             return addr_detail_lookup.get((mongo_id, aid), "-")
