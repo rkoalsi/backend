@@ -1331,7 +1331,7 @@ async def stock_cron():
         products_collection = db["products"]
 
         # Get yesterday's date
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = datetime.now().strftime("%Y-%m-%d")
         target_date = datetime.strptime(yesterday, "%Y-%m-%d")
 
         # Check if we already have data for this date
