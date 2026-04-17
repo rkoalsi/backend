@@ -625,6 +625,9 @@ def build_customer_analytics_pipeline(
                         "cond": {"$ne": ["$$this", None]},
                     }
                 },
+                "companyName": {
+                    "$ifNull": [{"$arrayElemAt": ["$customerDetails.company_name", 0]}, ""]
+                },
                 "customerStatus": {
                     "$ifNull": [
                         {"$arrayElemAt": ["$customerDetails.status", 0]},
@@ -859,6 +862,7 @@ def build_customer_analytics_pipeline(
             "_id": 0,
             "customerId": 1,
             "customerName": 1,
+            "companyName": 1,
             "shippingAddress": "$shippingAddressFormatted",
             "billingAddress": "$billingAddressFormatted",
             "status": "$customerStatus",
@@ -1241,6 +1245,7 @@ def download_customer_analytics_report(
         headers = [
             "Customer ID",
             "Customer Name",
+            "Company Name",
             "Shipping Address",
             "Status",
             "Customer Address Status",
@@ -1277,57 +1282,58 @@ def download_customer_analytics_report(
         for row, customer in enumerate(customers, 2):
             worksheet.cell(row=row, column=1, value=customer.get("customerId", ""))
             worksheet.cell(row=row, column=2, value=customer.get("customerName", ""))
+            worksheet.cell(row=row, column=3, value=customer.get("companyName", ""))
             worksheet.cell(
-                row=row, column=3, value=customer.get("shippingAddress", "")
+                row=row, column=4, value=customer.get("shippingAddress", "")
             )
-            worksheet.cell(row=row, column=4, value=customer.get("status", ""))
-            worksheet.cell(row=row, column=5, value=customer.get("_addrStatus", "-"))
-            worksheet.cell(row=row, column=6, value=customer.get("tier", ""))
+            worksheet.cell(row=row, column=5, value=customer.get("status", ""))
+            worksheet.cell(row=row, column=6, value=customer.get("_addrStatus", "-"))
+            worksheet.cell(row=row, column=7, value=customer.get("tier", ""))
             sales_person = customer.get("salesPerson", "")
             if isinstance(sales_person, list):
                 sales_person = ", ".join(sales_person) if sales_person else ""
-            worksheet.cell(row=row, column=7, value=sales_person)
+            worksheet.cell(row=row, column=8, value=sales_person)
             worksheet.cell(
-                row=row, column=8, value=customer.get("totalSalesCurrentMonth", 0)
+                row=row, column=9, value=customer.get("totalSalesCurrentMonth", 0)
             )
-            worksheet.cell(row=row, column=9, value=customer.get("lastBillDate", ""))
+            worksheet.cell(row=row, column=10, value=customer.get("lastBillDate", ""))
             worksheet.cell(
-                row=row, column=10, value=customer.get("averageOrderFrequencyMonthly", 0)
-            )
-            worksheet.cell(
-                row=row, column=11, value=customer.get("billingTillDateCurrentYear", 0)
+                row=row, column=11, value=customer.get("averageOrderFrequencyMonthly", 0)
             )
             worksheet.cell(
-                row=row, column=12, value=customer.get("totalSalesLastFY", 0)
+                row=row, column=12, value=customer.get("billingTillDateCurrentYear", 0)
             )
             worksheet.cell(
-                row=row, column=13, value=customer.get("totalSalesPreviousFY", 0)
+                row=row, column=13, value=customer.get("totalSalesLastFY", 0)
             )
             worksheet.cell(
-                row=row,
-                column=14,
-                value="Yes" if customer.get("hasBilledLastMonth", False) else "No",
+                row=row, column=14, value=customer.get("totalSalesPreviousFY", 0)
             )
             worksheet.cell(
                 row=row,
                 column=15,
-                value="Yes" if customer.get("hasBilledLast45Days", False) else "No",
+                value="Yes" if customer.get("hasBilledLastMonth", False) else "No",
             )
             worksheet.cell(
                 row=row,
                 column=16,
-                value="Yes" if customer.get("hasBilledLast2Months", False) else "No",
+                value="Yes" if customer.get("hasBilledLast45Days", False) else "No",
             )
             worksheet.cell(
                 row=row,
                 column=17,
+                value="Yes" if customer.get("hasBilledLast2Months", False) else "No",
+            )
+            worksheet.cell(
+                row=row,
+                column=18,
                 value="Yes" if customer.get("hasBilledLast3Months", False) else "No",
             )
             worksheet.cell(
-                row=row, column=18, value=len(customer.get("duePayments", []))
+                row=row, column=19, value=len(customer.get("duePayments", []))
             )
             worksheet.cell(
-                row=row, column=19, value=len(customer.get("notDuePayments", []))
+                row=row, column=20, value=len(customer.get("notDuePayments", []))
             )
 
         # Auto-adjust column widths
@@ -1402,6 +1408,7 @@ def download_customer_analytics_report(
                         sp = ", ".join(sp) if sp else ""
                     merged_rows.append({
                         "customerName": c.get("customerName", ""),
+                        "companyName": c.get("companyName", ""),
                         "customerIds": [c.get("customerId", "")] if c.get("customerId", "") else [],
                         # (cid, addr_key) pairs used for per-location brand lookup
                         "customerAddressKeys": [(c.get("customerId", ""), _addr_key(c))] if c.get("customerId", "") else [],
@@ -1426,6 +1433,7 @@ def download_customer_analytics_report(
                         sp = ", ".join(sp) if sp else ""
                     merged_rows.append({
                         "customerName": cluster[0].get("customerName", ""),
+                        "companyName": cluster[0].get("companyName", ""),
                         "customerIds": [c.get("customerId", "") for c in cluster if c.get("customerId", "")],
                         # (cid, addr_key) pairs used for per-location brand lookup
                         "customerAddressKeys": [
@@ -1690,6 +1698,7 @@ def download_customer_analytics_report(
         addr_base_headers = [
             "Customer ID",
             "Customer Name",
+            "Company Name",
             "Primary Shipping Address",
             "All Shipping Addresses",
             "Billing Address",
@@ -1751,23 +1760,24 @@ def download_customer_analytics_report(
             all_addrs_str = " | ".join(a for a in all_addrs if a)
             addr_ws.cell(row=row_idx, column=1, value=(merged.get("customerIds", [None])[0] or ""))
             addr_ws.cell(row=row_idx, column=2, value=merged.get("customerName", ""))
-            addr_ws.cell(row=row_idx, column=3, value=primary_addr)
-            addr_ws.cell(row=row_idx, column=4, value=all_addrs_str)
-            addr_ws.cell(row=row_idx, column=5, value=merged.get("billingAddress", ""))
-            addr_ws.cell(row=row_idx, column=6, value=merged.get("addressCount", 1))
-            addr_ws.cell(row=row_idx, column=7, value=merged.get("status", ""))
+            addr_ws.cell(row=row_idx, column=3, value=merged.get("companyName", ""))
+            addr_ws.cell(row=row_idx, column=4, value=primary_addr)
+            addr_ws.cell(row=row_idx, column=5, value=all_addrs_str)
+            addr_ws.cell(row=row_idx, column=6, value=merged.get("billingAddress", ""))
+            addr_ws.cell(row=row_idx, column=7, value=merged.get("addressCount", 1))
+            addr_ws.cell(row=row_idx, column=8, value=merged.get("status", ""))
             statuses_for_row = merged.get("addrStatuses", [])
             unique_statuses = list(dict.fromkeys(s for s in statuses_for_row if s and s != "-"))
-            addr_ws.cell(row=row_idx, column=8, value=" / ".join(unique_statuses) if unique_statuses else "-")
-            addr_ws.cell(row=row_idx, column=9, value=merged.get("tier", ""))
-            addr_ws.cell(row=row_idx, column=10, value=merged.get("salesPerson", ""))
-            addr_ws.cell(row=row_idx, column=11, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
-            addr_ws.cell(row=row_idx, column=12, value=merged.get("lastBillDate", ""))
-            addr_ws.cell(row=row_idx, column=13, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
-            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
-            addr_ws.cell(row=row_idx, column=15, value=round(merged.get("totalSalesLastFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=16, value=round(merged.get("totalSalesPreviousFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=17, value=merged.get("totalInvoiceCount", 0))
+            addr_ws.cell(row=row_idx, column=9, value=" / ".join(unique_statuses) if unique_statuses else "-")
+            addr_ws.cell(row=row_idx, column=10, value=merged.get("tier", ""))
+            addr_ws.cell(row=row_idx, column=11, value=merged.get("salesPerson", ""))
+            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
+            addr_ws.cell(row=row_idx, column=13, value=merged.get("lastBillDate", ""))
+            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
+            addr_ws.cell(row=row_idx, column=15, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
+            addr_ws.cell(row=row_idx, column=16, value=round(merged.get("totalSalesLastFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=17, value=round(merged.get("totalSalesPreviousFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=18, value=merged.get("totalInvoiceCount", 0))
             # Highlight rows where multiple address variants were merged
             if merged.get("addressCount", 1) > 1:
                 for col in range(1, len(addr_base_headers) + 1):
