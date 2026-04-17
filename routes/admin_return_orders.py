@@ -958,13 +958,21 @@ def download_creditnote_pdf(return_order_id: str):
             raise HTTPException(status_code=500, detail="Failed to get Zoho Books access token")
 
         headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-        response = requests.get(
-            url=CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=creditnote_id),
-            headers=headers,
-            allow_redirects=False,
-        )
+        pdf_url = f"{ZOHO_BOOKS_BASE_URL}/creditnotes/{creditnote_id}?accept=pdf&organization_id={org_id}"
+        print(f"Requesting PDF from: {pdf_url}")
+        response = requests.get(url=pdf_url, headers=headers, allow_redirects=True)
+        print(f"Zoho PDF response status: {response.status_code}, content-type: {response.headers.get('Content-Type')}")
+        if response.status_code != 200:
+            print(f"Zoho error body: {response.text[:500]}")
 
         if response.status_code == 200:
+            content_type = response.headers.get("Content-Type", "")
+            if "pdf" not in content_type:
+                print(f"Non-PDF content-type: {content_type}, body: {response.text[:500]}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Zoho returned non-PDF content: {response.text[:200]}",
+                )
             return Response(
                 content=response.content,
                 media_type="application/pdf",
@@ -975,7 +983,7 @@ def download_creditnote_pdf(return_order_id: str):
         else:
             raise HTTPException(
                 status_code=response.status_code,
-                detail=f"Failed to fetch PDF: {response.text}",
+                detail=f"Zoho error: {response.text[:200]}",
             )
 
     except HTTPException:
