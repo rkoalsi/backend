@@ -1445,6 +1445,18 @@ def get_customers_report(
     )
 
 
+@router.delete("/customers/{customer_id}")
+def delete_customer(customer_id: str):
+    try:
+        result = customers_collection.delete_one({"_id": ObjectId(customer_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        return {"message": "Customer deleted successfully"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
 @router.get("/orders")
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
