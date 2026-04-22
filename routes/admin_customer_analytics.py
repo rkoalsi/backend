@@ -1111,8 +1111,6 @@ def download_customer_analytics_report(
         addr_match_no_city_nz: dict = {} # (mongo_id, state, street) for contacts with empty city, ignoring zip
         # (mongo_id, address_id) -> normalized street  — used for fuzzy street fallback
         aid_to_nst: dict = {}
-        # (mongo_id, city, state, zip) -> [address_id, ...]  — same as addr_match_czs but kept for fuzzy lookup
-        # (reuse addr_match_czs)
 
         for cust_doc in customers_collection.find(
             {"contact_id": {"$in": all_zoho_ids}},
@@ -1180,7 +1178,6 @@ def download_customer_analytics_report(
                     aid = candidates[0]
 
             # 3. Fallback: city + street, ignoring state/zip
-            #    Handles zip mismatches (e.g. zip embedded in state on contact side)
             if not aid and nst:
                 candidates = addr_match_cst.get((mongo_id, nc, nst), [])
                 if len(candidates) == 1:
@@ -1193,8 +1190,6 @@ def download_customer_analytics_report(
                     aid = candidates[0]
 
             # 5. Fallback: contact has no city — city is embedded at end of street text
-            #    e.g. contact street = "...hsr layout bengaluru", city = ""
-            #    analytics street = "...hsr layout", city = "bengaluru"
             if not aid and nc:
                 street_with_city = nst + " " + nc
                 aid = addr_match_no_city.get((mongo_id, ns, nz, street_with_city), "")
@@ -1202,9 +1197,6 @@ def download_customer_analytics_report(
                     aid = addr_match_no_city_nz.get((mongo_id, ns, street_with_city), "")
 
             # 6. Fuzzy street match within the same city+state+zip bucket
-            #    Handles invoices with abbreviated/different address text vs the full contact address
-            #    e.g. invoice: "shop no-2 satvashakti pushpakunj circle kankaria"
-            #         contact: "shop no-2 ground floor satvashakti pushpakunj society opp aradhna cinema kankaria..."
             if not aid and nst:
                 candidates = addr_match_czs.get((mongo_id, nc, ns, nz), [])
                 if candidates:

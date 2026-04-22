@@ -1457,6 +1457,24 @@ def delete_customer(customer_id: str):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
+@router.delete("/customers/{customer_id}/address/{address_id}")
+def delete_customer_address(customer_id: str, address_id: str):
+    try:
+        result = customers_collection.update_one(
+            {"_id": ObjectId(customer_id)},
+            {"$pull": {"addresses": {"address_id": address_id}}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        db["customer_address_details"].delete_one(
+            {"customer_id": customer_id, "address_id": address_id}
+        )
+        return {"message": "Address deleted successfully"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
 @router.get("/orders")
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
