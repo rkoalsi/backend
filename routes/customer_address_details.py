@@ -4,6 +4,7 @@ from ..config.auth import JWTBearer
 from datetime import datetime
 from difflib import SequenceMatcher
 import re
+
 router = APIRouter()
 db = get_database()
 collection = db["customer_address_details"]
@@ -35,103 +36,28 @@ def _norm_street(line1: str, line2: str = "") -> str:
         s = s.replace("  ", " ")
     return s.strip()
 
-try:
-    collection.create_index([("customer_id", 1), ("address_id", 1)], unique=True)
-except Exception:
-    pass
 
-VALID_STATUSES = {"open", "closed", "warehouse"}
+def _three_fy_cutoff() -> str:
+    """Return the date string for the start of 3 financial years ago (April–March)."""
+    now = datetime.now()
+    fy_start_year = now.year if now.month >= 4 else now.year - 1
+    return f"{fy_start_year - 3}-04-01"
 
 
-@router.get("/{customer_id}/billed")
-def get_billed_addresses(customer_id: str):
+def _resolve_invoice_address_ids(addresses: list, invoices: list) -> set:
     """
-    Return a dict {address_id: bool} for each of the customer's addresses
-    indicating whether that address appears on at least one invoice.
-    Matches by shipping_address.address_id when available, then falls back
-    to city + state + zip normalization (same logic used in customer analytics).
+    Given a customer's address list and their invoices, return the set of
+    address_ids that appear as a shipping_address on at least one invoice.
+    Uses the same full multi-fallback matching as the analytics report
+    (full key → czs → cst → cs → no-city → fuzzy SequenceMatcher).
     """
-    customer = db["customers"].find_one({"_id": __import__("bson").ObjectId(customer_id)})
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    contact_id = customer.get("contact_id", "")
-    addresses = customer.get("addresses", [])
-    if not addresses or not contact_id:
-        return {"billed": {}}
-
-    invoices = list(
-        db["invoices"].find(
-            {"customer_id": contact_id},
-            {"shipping_address": 1, "_id": 0},
-        )
-    )
-
-    # Build lookup from customer addresses: (nc, ns, nz) -> address_id
-    czs_lookup: dict = {}  # (nc, ns, nz) -> address_id
-    for addr in addresses:
-        aid = addr.get("address_id", "")
-        if not aid:
-            continue
-        nc = _norm_city(addr.get("city", ""))
-        ns = _norm_state(addr.get("state", ""))
-        nz = _norm_zip(addr.get("zip", ""))
-        czs_lookup[(nc, ns, nz)] = aid
-
-    billed_ids: set = set()
-    for inv in invoices:
-        sa = inv.get("shipping_address") or {}
-        # Direct address_id match
-        aid = sa.get("address_id", "")
-        if aid:
-            billed_ids.add(aid)
-            continue
-        # Fallback: city + state + zip
-        nc = _norm_city(sa.get("city", ""))
-        ns = _norm_state(sa.get("state", ""))
-        nz = _norm_zip(sa.get("zip", ""))
-        matched = czs_lookup.get((nc, ns, nz))
-        if matched:
-            billed_ids.add(matched)
-
-    result = {addr["address_id"]: addr["address_id"] in billed_ids for addr in addresses if addr.get("address_id")}
-    return {"billed": result}
-
-
-@router.get("/{customer_id}/in_analytics")
-def get_in_analytics_addresses(customer_id: str):
-    """
-    Return a dict {address_id: bool} indicating whether each of the customer's
-    addresses appears as a shipping_address on at least one invoice.
-    Uses the same city+state+zip+street matching logic (with fuzzy fallbacks)
-    as the customer analytics report, so results match what appears in analytics.
-    """
-    from bson import ObjectId
-    customer = db["customers"].find_one({"_id": ObjectId(customer_id)})
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    contact_id = customer.get("contact_id", "")
-    addresses = customer.get("addresses", [])
-    if not addresses or not contact_id:
-        return {"in_analytics": {}}
-
-    invoices = list(
-        db["invoices"].find(
-            {"customer_id": contact_id},
-            {"shipping_address": 1, "_id": 0},
-        )
-    )
-
-    # Build matching lookup tables from the customer's known addresses.
-    # Zoho contact addresses use "address" for street line 1; invoices use "street".
-    addr_match_lookup: dict = {}    # (nc, ns, nz, nst) -> aid  (full match)
-    addr_match_czs: dict = {}       # (nc, ns, nz)       -> [aid, ...]
-    addr_match_cs: dict = {}        # (nc, ns)            -> [aid, ...]
-    addr_match_cst: dict = {}       # (nc, nst)           -> [aid, ...]
-    addr_match_no_city: dict = {}   # (ns, nz, nst)       -> aid
-    addr_match_no_city_nz: dict = {}  # (ns, nst)         -> aid
-    aid_to_nst: dict = {}           # aid -> nst
+    addr_match_lookup: dict = {}      # (nc, ns, nz, nst) -> aid
+    addr_match_czs: dict = {}         # (nc, ns, nz)       -> [aid, ...]
+    addr_match_cs: dict = {}          # (nc, ns)            -> [aid, ...]
+    addr_match_cst: dict = {}         # (nc, nst)           -> [aid, ...]
+    addr_match_no_city: dict = {}     # (ns, nz, nst)       -> aid
+    addr_match_no_city_nz: dict = {}  # (ns, nst)           -> aid
+    aid_to_nst: dict = {}             # aid -> nst
 
     for addr in addresses:
         aid = addr.get("address_id", "")
@@ -160,7 +86,6 @@ def get_in_analytics_addresses(customer_id: str):
         nc = _norm_city(sa.get("city", ""))
         ns = _norm_state(sa.get("state", ""))
         nz = _norm_zip(sa.get("zip", ""))
-        # invoices use "street" for line 1
         nst = _norm_street(sa.get("street", ""), sa.get("street2", ""))
 
         aid = addr_match_lookup.get((nc, ns, nz, nst), "")
@@ -197,15 +122,83 @@ def get_in_analytics_addresses(customer_id: str):
                     aid = best_aid
         return aid
 
-    in_analytics_ids: set = set()
+    matched_ids: set = set()
     for inv in invoices:
         sa = inv.get("shipping_address") or {}
         if not sa:
             continue
         aid = _resolve(sa)
         if aid:
-            in_analytics_ids.add(aid)
+            matched_ids.add(aid)
+    return matched_ids
 
+
+try:
+    collection.create_index([("customer_id", 1), ("address_id", 1)], unique=True)
+except Exception:
+    pass
+
+VALID_STATUSES = {"open", "closed", "warehouse"}
+
+
+@router.get("/{customer_id}/billed")
+def get_billed_addresses(customer_id: str):
+    """
+    Return a dict {address_id: bool} indicating whether each address has been
+    used as a shipping address on at least one invoice in the last 3 financial years.
+    Uses the same full street-level matching as the analytics report.
+    """
+    from bson import ObjectId
+    customer = db["customers"].find_one({"_id": ObjectId(customer_id)})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    contact_id = customer.get("contact_id", "")
+    addresses = customer.get("addresses", [])
+    if not addresses or not contact_id:
+        return {"billed": {}}
+
+    invoices = list(
+        db["invoices"].find(
+            {"customer_id": contact_id, "date": {"$gte": _three_fy_cutoff()}},
+            {"shipping_address": 1, "_id": 0},
+        )
+    )
+
+    billed_ids = _resolve_invoice_address_ids(addresses, invoices)
+    result = {
+        addr["address_id"]: addr["address_id"] in billed_ids
+        for addr in addresses
+        if addr.get("address_id")
+    }
+    return {"billed": result}
+
+
+@router.get("/{customer_id}/in_analytics")
+def get_in_analytics_addresses(customer_id: str):
+    """
+    Return a dict {address_id: bool} indicating whether each address appears
+    as a shipping_address on at least one invoice in the last 3 financial years,
+    using the same matching logic as the analytics report.
+    """
+    from bson import ObjectId
+    customer = db["customers"].find_one({"_id": ObjectId(customer_id)})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    contact_id = customer.get("contact_id", "")
+    addresses = customer.get("addresses", [])
+    if not addresses or not contact_id:
+        return {"in_analytics": {}}
+
+    invoices = list(
+        db["invoices"].find(
+            {"customer_id": contact_id, "date": {"$gte": _three_fy_cutoff()}},
+            {"shipping_address": 1, "_id": 0},
+        )
+    )
+
+    in_analytics_ids = _resolve_invoice_address_ids(addresses, invoices)
     result = {
         addr["address_id"]: addr["address_id"] in in_analytics_ids
         for addr in addresses
@@ -239,7 +232,6 @@ def upsert_address_detail(customer_id: str, address_id: str, payload: dict):
         update_fields["status"] = status
     if "notes" in payload:
         update_fields["notes"] = payload["notes"]
-    # Support arbitrary future fields passed in the payload
     reserved = {"status", "notes", "customer_id", "address_id"}
     for key, value in payload.items():
         if key not in reserved:
