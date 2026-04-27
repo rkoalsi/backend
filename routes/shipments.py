@@ -239,6 +239,22 @@ def get_shipments(
     }
 
 
+@router.delete("/{shipment_id}")
+def delete_shipment(shipment_id: str):
+    """
+    Delete a shipment by its _id.
+    """
+    try:
+        result = shipments_collection.delete_one({"_id": ObjectId(shipment_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid shipment ID")
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    return {"message": "Shipment deleted successfully"}
+
+
 @router.get("/{shipment_id}")
 def get_shipment(shipment_id: str):
     """
