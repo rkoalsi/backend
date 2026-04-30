@@ -1386,6 +1386,7 @@ async def stock_cron():
             )
 
             # Process warehouse stock - store ALL warehouses
+            # processed_items: {normalized_name: {"warehouses": {...}, "item_id": str|None}}
             processed_items = {}
 
             for item in warehouse_stock:
@@ -1394,13 +1395,15 @@ async def stock_cron():
 
                 item_name = None
                 warehouses_data = {}
+                # Zoho API returns item_id at the top level of each item
+                api_item_id = item.get("item_id") or item.get("zoho_item_id")
 
                 # Handle NEW API structure (warehouse_stock array)
                 if "warehouse_stock" in item:
                     for warehouse_entry in item["warehouse_stock"]:
                         warehouse_name = warehouse_entry.get("warehouse_name")
                         if warehouse_name:
-                            item_name = warehouse_entry.get("item_name")
+                            item_name = warehouse_entry.get("item_name") or item.get("item_name")
                             quantity = int(
                                 warehouse_entry.get("quantity_available_for_sale", 0)
                             )
@@ -1429,19 +1432,33 @@ async def stock_cron():
                     normalized_name = " ".join(item_name.split())
 
                     if normalized_name not in processed_items:
-                        processed_items[normalized_name] = {}
+                        processed_items[normalized_name] = {"warehouses": {}, "item_id": api_item_id}
+                    elif api_item_id and not processed_items[normalized_name]["item_id"]:
+                        processed_items[normalized_name]["item_id"] = api_item_id
 
                     # Merge warehouse data
                     for warehouse_name, quantity in warehouses_data.items():
-                        processed_items[normalized_name][warehouse_name] = quantity
+                        processed_items[normalized_name]["warehouses"][warehouse_name] = quantity
+
+            # Pre-build item_id lookup keyed by item_id for items missing it from API
+            # Fetch all products once to avoid N+1 lookups
+            all_product_names = list(processed_items.keys())
+            product_by_name = {}
+            for prod in products_collection.find(
+                {"$or": [{"name": {"$in": all_product_names}}, {"item_name": {"$in": all_product_names}}]},
+                {"_id": 1, "item_id": 1, "name": 1, "item_name": 1},
+            ):
+                for field in ("name", "item_name"):
+                    key = prod.get(field)
+                    if key:
+                        product_by_name[key] = prod
 
             # Prepare documents for MongoDB
             documents = []
-            for item_name, warehouses in processed_items.items():
-                # Look up product in products collection
-                product = products_collection.find_one(
-                    {"name": item_name}
-                ) or products_collection.find_one({"item_name": item_name})
+            missing_item_id_count = 0
+            for item_name, entry in processed_items.items():
+                warehouses = entry["warehouses"]
+                api_item_id = entry["item_id"]
 
                 doc = {
                     "item_name": item_name,
@@ -1450,12 +1467,22 @@ async def stock_cron():
                     "created_at": datetime.now(),
                 }
 
-                # Add product_id and zoho_item_id if product found
-                if product:
-                    doc["product_id"] = product["_id"]
-                    doc["zoho_item_id"] = product.get("item_id")
+                if api_item_id:
+                    # Best case: item_id came directly from Zoho API response
+                    doc["zoho_item_id"] = str(api_item_id)
+                else:
+                    # Fallback: look up product by name
+                    product = product_by_name.get(item_name)
+                    if product:
+                        doc["product_id"] = product["_id"]
+                        doc["zoho_item_id"] = str(product.get("item_id", "")) or None
+                    else:
+                        missing_item_id_count += 1
 
                 documents.append(doc)
+
+            if missing_item_id_count:
+                logger.warning(f"⚠️ {missing_item_id_count} items could not be matched to a product (no zoho_item_id)")
 
             if documents:
                 warehouse_stock_collection.insert_many(documents, ordered=False)
@@ -1465,8 +1492,8 @@ async def stock_cron():
 
                 # Show warehouse summary
                 all_warehouses = set()
-                for warehouses in processed_items.values():
-                    all_warehouses.update(warehouses.keys())
+                for entry in processed_items.values():
+                    all_warehouses.update(entry["warehouses"].keys())
                 logger.info(f"Warehouses tracked: {len(all_warehouses)}")
             else:
                 logger.info(f"No warehouse stock data found for {yesterday}")
