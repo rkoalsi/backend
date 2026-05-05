@@ -675,29 +675,29 @@ def build_customer_analytics_pipeline(
                         {"$trim": {"input": {"$ifNull": ["$shippingAddress.street", ""]}, "chars": ", "}},
                         {
                             "$cond": [
-                                {"$ne": ["$shippingAddress.street2", ""]},
-                                {"$concat": [", ", "$shippingAddress.street2"]},
+                                {"$and": [{"$ne": ["$shippingAddress.street2", None]}, {"$ne": ["$shippingAddress.street2", ""]}]},
+                                {"$concat": [", ", {"$ifNull": ["$shippingAddress.street2", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$shippingAddress.city", ""]},
-                                {"$concat": [", ", "$shippingAddress.city"]},
+                                {"$and": [{"$ne": ["$shippingAddress.city", None]}, {"$ne": ["$shippingAddress.city", ""]}]},
+                                {"$concat": [", ", {"$ifNull": ["$shippingAddress.city", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$shippingAddress.state", ""]},
-                                {"$concat": [", ", "$shippingAddress.state"]},
+                                {"$and": [{"$ne": ["$shippingAddress.state", None]}, {"$ne": ["$shippingAddress.state", ""]}]},
+                                {"$concat": [", ", {"$ifNull": ["$shippingAddress.state", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$shippingAddress.zip", ""]},
-                                {"$concat": [" - ", "$shippingAddress.zip"]},
+                                {"$and": [{"$ne": ["$shippingAddress.zip", None]}, {"$ne": ["$shippingAddress.zip", ""]}]},
+                                {"$concat": [" - ", {"$ifNull": ["$shippingAddress.zip", ""]}]},
                                 "",
                             ]
                         },
@@ -708,28 +708,28 @@ def build_customer_analytics_pipeline(
                         {"$trim": {"input": {"$ifNull": ["$billingAddress.street", ""]}, "chars": ", "}},
                         {
                             "$cond": [
-                                {"$ne": ["$billingAddress.street2", ""]},
+                                {"$and": [{"$ne": ["$billingAddress.street2", None]}, {"$ne": ["$billingAddress.street2", ""]}]},
                                 {"$concat": [", ", {"$ifNull": ["$billingAddress.street2", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$billingAddress.city", ""]},
+                                {"$and": [{"$ne": ["$billingAddress.city", None]}, {"$ne": ["$billingAddress.city", ""]}]},
                                 {"$concat": [", ", {"$ifNull": ["$billingAddress.city", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$billingAddress.state", ""]},
+                                {"$and": [{"$ne": ["$billingAddress.state", None]}, {"$ne": ["$billingAddress.state", ""]}]},
                                 {"$concat": [", ", {"$ifNull": ["$billingAddress.state", ""]}]},
                                 "",
                             ]
                         },
                         {
                             "$cond": [
-                                {"$ne": ["$billingAddress.zip", ""]},
+                                {"$and": [{"$ne": ["$billingAddress.zip", None]}, {"$ne": ["$billingAddress.zip", ""]}]},
                                 {"$concat": [" - ", {"$ifNull": ["$billingAddress.zip", ""]}]},
                                 "",
                             ]
