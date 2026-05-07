@@ -1,5 +1,6 @@
 import plivo
 import os
+import datetime
 from dotenv import load_dotenv
 from plivo.utils.template import Template  # Import the Template class
 
@@ -9,6 +10,11 @@ PLIVO_AUTH_ID = os.getenv("PLIVO_AUTH_ID")
 PLIVO_AUTH_TOKEN = os.getenv("PLIVO_AUTH_TOKEN")
 FROM_NUMBER = os.getenv("FROM_NUMBER")
 client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+
+
+def _get_chats_collection():
+    from .root import get_database
+    return get_database()["chats"]
 
 
 def generate_whatsapp_template(template_doc: dict, dynamic_params: dict) -> Template:
@@ -87,10 +93,8 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
         phone_str = str(to).strip()
 
         if phone_str.startswith('+'):
-            # Phone number already has country code, use as is
             dst_phone = phone_str
         else:
-            # No country code found, add +91 as default
             cleaned_phone = ''.join(char for char in phone_str if char.isdigit())
 
             if not cleaned_phone:
@@ -104,6 +108,20 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
             dst=dst_phone,
             template=generate_whatsapp_template(template_doc, params),
         )
+
+        try:
+            _get_chats_collection().insert_one({
+                "type": "outgoing",
+                "from": FROM_NUMBER,
+                "to": dst_phone,
+                "template_name": template_doc.get("name"),
+                "params": params,
+                "message_uuid": response.get("message_uuid", [None])[0] if isinstance(response, dict) else getattr(response, "message_uuid", [None])[0] if hasattr(response, "message_uuid") else None,
+                "created_at": datetime.datetime.now(),
+            })
+        except Exception as log_err:
+            print(f"Failed to log outgoing WhatsApp to chats: {log_err}")
+
         return response
     except plivo.exceptions.AuthenticationError as e:
         print("Authentication failed:", e)
