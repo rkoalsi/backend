@@ -33,6 +33,7 @@ from .contact_submissions import router as contact_submissions
 from .blog import router as blog
 from .customer_activity import router as customer_activity
 from .customer_address_details import router as customer_address_details
+from .chats import router as chats
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -90,6 +91,8 @@ router.include_router(contact_submissions, prefix="/contact_submissions", tags=[
 router.include_router(customer_activity, prefix="/customer_activity", tags=["Customer Activity"])
 
 router.include_router(customer_address_details, prefix="/customer_address_details", tags=["Customer Address Details"])
+
+router.include_router(chats, prefix="/chats", tags=["Chats"])
 
 # Public blog routes (no auth)
 router.include_router(blog, prefix="/blog", tags=["Blog"])
