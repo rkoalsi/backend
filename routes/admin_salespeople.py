@@ -127,8 +127,9 @@ async def create_salesperson(salesperson: dict):
             detail="Salesperson with this email or code already exists.",
         )
 
-    # Hash and add default password
-    salesperson["password"] = hash_password(DEFAULT_PASSWORD)
+    # Hash the provided password or fall back to the default
+    raw_password = salesperson.get("password", "").strip()
+    salesperson["password"] = hash_password(raw_password if raw_password else DEFAULT_PASSWORD)
 
     # Set default role
     salesperson["role"] = "sales_person"
@@ -251,6 +252,20 @@ def salespeople_id(salesperson_id: str, salesperson: dict):
             update_data["phone"] = int(update_data["phone"])
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Phone must be a valid number")
+
+    # Hash password if provided
+    if "password" in update_data:
+        raw_password = update_data["password"].strip()
+        if not raw_password:
+            del update_data["password"]
+        else:
+            update_data["password"] = hash_password(raw_password)
+
+    # Sync first_name/last_name when name changes
+    if "name" in update_data:
+        name_parts = update_data["name"].strip().split()
+        update_data["first_name"] = name_parts[0] if name_parts else ""
+        update_data["last_name"] = name_parts[-1] if len(name_parts) > 1 else ""
 
     # Perform the update
     result = db.users.update_one(
