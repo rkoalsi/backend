@@ -640,6 +640,12 @@ def build_customer_analytics_pipeline(
                         "unknown",
                     ]
                 },
+                "whatsappGroup": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$customerDetails.cf_whatsapp_group", 0]},
+                        "",
+                    ]
+                },
                 "salesPerson": {
                     "$ifNull": [
                         {"$arrayElemAt": ["$customerDetails.cf_sales_person", 0]},
@@ -882,6 +888,7 @@ def build_customer_analytics_pipeline(
             "totalSalesLastFY": {"$round": ["$totalSalesLastFY", 2]},
             "totalSalesPreviousFY": {"$round": ["$totalSalesPreviousFY", 2]},
             "salesPerson": 1,
+            "whatsappGroup": 1,
             "hasBilledLastMonth": 1,
             "hasBilledLast45Days": 1,
             "hasBilledLast2Months": 1,
@@ -1255,6 +1262,7 @@ def download_customer_analytics_report(
             "Billed Last 3 Months",
             "Due Payments Count",
             "Not Due Payments Count",
+            "Whatsapp Group",
         ]
 
         # Apply header styling
@@ -1327,6 +1335,7 @@ def download_customer_analytics_report(
             worksheet.cell(
                 row=row, column=20, value=len(customer.get("notDuePayments", []))
             )
+            worksheet.cell(row=row, column=21, value=customer.get("whatsappGroup", ""))
 
         # Auto-adjust column widths
         for column in worksheet.columns:
@@ -1410,6 +1419,7 @@ def download_customer_analytics_report(
                         "status": c.get("status", ""),
                         "tier": c.get("tier", ""),
                         "salesPerson": sp,
+                        "whatsappGroup": c.get("whatsappGroup", ""),
                         "totalSalesCurrentMonth": c.get("totalSalesCurrentMonth", 0),
                         "lastBillDate": c.get("lastBillDate", ""),
                         "averageOrderFrequencyMonthly": c.get("averageOrderFrequencyMonthly", 0),
@@ -1438,6 +1448,7 @@ def download_customer_analytics_report(
                         "status": cluster[0].get("status", ""),
                         "tier": cluster[0].get("tier", ""),
                         "salesPerson": sp,
+                        "whatsappGroup": cluster[0].get("whatsappGroup", ""),
                         "totalSalesCurrentMonth": sum(c.get("totalSalesCurrentMonth", 0) for c in cluster),
                         "lastBillDate": max((c.get("lastBillDate", "") for c in cluster), default=""),
                         "averageOrderFrequencyMonthly": round(sum(c.get("averageOrderFrequencyMonthly", 0) for c in cluster), 2),
@@ -1706,6 +1717,7 @@ def download_customer_analytics_report(
             "Total Sales Last FY",
             "Total Sales Previous FY",
             "Total Invoice Count",
+            "Whatsapp Group",
         ]
         brand_col_headers = []
         if include_brand_breakdown:
@@ -1770,6 +1782,7 @@ def download_customer_analytics_report(
             addr_ws.cell(row=row_idx, column=16, value=round(merged.get("totalSalesLastFY", 0), 2))
             addr_ws.cell(row=row_idx, column=17, value=round(merged.get("totalSalesPreviousFY", 0), 2))
             addr_ws.cell(row=row_idx, column=18, value=merged.get("totalInvoiceCount", 0))
+            addr_ws.cell(row=row_idx, column=19, value=merged.get("whatsappGroup", ""))
             # Highlight rows where multiple address variants were merged
             if merged.get("addressCount", 1) > 1:
                 for col in range(1, len(addr_base_headers) + 1):
