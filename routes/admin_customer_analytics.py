@@ -1222,7 +1222,7 @@ def download_customer_analytics_report(
                         aid = best_aid
 
             if not aid:
-                return "-"
+                return "closed"
             return addr_detail_lookup.get((mongo_id, aid), "-")
 
         # Pre-compute status on each customer row so merged-row building can use it
