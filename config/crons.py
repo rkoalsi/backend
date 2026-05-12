@@ -1634,12 +1634,13 @@ async def items_cron():
                     f"Page {page}: {len(new_item_ids)} new, {len(existing_item_ids)} existing"
                 )
 
-                if not new_item_ids:
+                all_ids_to_fetch = new_item_ids + existing_item_ids
+                if not all_ids_to_fetch:
                     continue
 
-                # Fetch details for new items concurrently
+                # Fetch details for all items concurrently
                 detail_tasks = []
-                for inv_id in new_item_ids:
+                for inv_id in all_ids_to_fetch:
                     detail_url = (
                         f"https://www.zohoapis.com/books/v3/items/{inv_id}?"
                         f"organization_id={org_id}"
@@ -1657,21 +1658,30 @@ async def items_cron():
                     return_exceptions=True,
                 )
 
+                new_item_id_set = set(new_item_ids)
                 items_to_insert = []
                 for i, result in enumerate(detail_results):
+                    inv_id = all_ids_to_fetch[i]
                     try:
                         if isinstance(result, Exception):
                             logger.error(
-                                f"Error fetching item {new_item_ids[i]}: {result}"
+                                f"Error fetching item {inv_id}: {result}"
                             )
                             total_errors += 1
                             continue
 
                         if result and "item" in result:
                             processed_item = process_item_data(result["item"])
-                            items_to_insert.append(processed_item)
+                            if inv_id in new_item_id_set:
+                                items_to_insert.append(processed_item)
+                            else:
+                                collection.update_one(
+                                    {"item_id": inv_id},
+                                    {"$set": processed_item},
+                                )
+                                total_updated += 1
                     except Exception as e:
-                        logger.error(f"Error processing item {new_item_ids[i]}: {e}")
+                        logger.error(f"Error processing item {inv_id}: {e}")
                         total_errors += 1
 
                 if items_to_insert:
@@ -1699,7 +1709,7 @@ async def items_cron():
 
             logger.info(f"Items sync completed!")
             logger.info(
-                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Updated {total_updated}, Errors {total_errors}"
             )
 
             send_slack_notification(
@@ -1708,6 +1718,7 @@ async def items_cron():
                 details={
                     "processed": total_processed,
                     "inserted": total_inserted,
+                    "updated": total_updated,
                     "pages": total_pages,
                     "duration": duration,
                 },
