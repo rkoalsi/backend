@@ -1166,44 +1166,40 @@ def download_customer_analytics_report(
                 addr_detail_lookup[(cid, aid)] = st
 
         def _resolve_status(zoho_id, city, state, zip_, street):
-            """Look up address status for one analytics row."""
+            """Look up address status for one analytics row.
+            Returns (status, addr_exists_in_customers) where addr_exists_in_customers
+            is True only when the invoice address is an exact match to an entry in
+            customers.addresses (no fuzzy matching or fallbacks).
+            """
             mongo_id = zoho_to_mongo_id.get(zoho_id, "")
             if not mongo_id:
-                return "-"
+                return "-", False
             nc = _py_norm_city(city)
             ns = _py_norm_state(state)
             nz = _py_norm_zip(zip_)
             nst = _py_norm_street(street)
 
-            # 1. Full match: city + state + zip + street
             aid = addr_match_lookup.get((mongo_id, nc, ns, nz, nst), "")
+            addr_exists = bool(aid)  # captured before fallbacks — exact match only
 
-            # 2. Fallback: city + state + zip (unique address only)
+            # fallbacks below are used only to resolve the display status column
             if not aid:
                 candidates = addr_match_czs.get((mongo_id, nc, ns, nz), [])
                 if len(candidates) == 1:
                     aid = candidates[0]
-
-            # 3. Fallback: city + street, ignoring state/zip
             if not aid and nst:
                 candidates = addr_match_cst.get((mongo_id, nc, nst), [])
                 if len(candidates) == 1:
                     aid = candidates[0]
-
-            # 4. Fallback: city + state only (unique address only)
             if not aid:
                 candidates = addr_match_cs.get((mongo_id, nc, ns), [])
                 if len(candidates) == 1:
                     aid = candidates[0]
-
-            # 5. Fallback: contact has no city — city is embedded at end of street text
             if not aid and nc:
                 street_with_city = nst + " " + nc
                 aid = addr_match_no_city.get((mongo_id, ns, nz, street_with_city), "")
                 if not aid:
                     aid = addr_match_no_city_nz.get((mongo_id, ns, street_with_city), "")
-
-            # 6. Fuzzy street match within the same city+state+zip bucket
             if not aid and nst:
                 candidates = addr_match_czs.get((mongo_id, nc, ns, nz), [])
                 if candidates:
@@ -1217,35 +1213,42 @@ def download_customer_analytics_report(
                             best_ratio, best_aid = ratio, cand_aid
                         elif ratio > second_ratio:
                             second_ratio = ratio
-                    # Accept if best match is good enough AND clearly better than second
                     if best_ratio >= 0.4 and (best_ratio - second_ratio) >= 0.2:
                         aid = best_aid
 
             if not aid:
-                return "closed"
-            return addr_detail_lookup.get((mongo_id, aid), "-")
+                return "closed", addr_exists
+            return addr_detail_lookup.get((mongo_id, aid), "-"), addr_exists
 
         # Pre-compute status on each customer row so merged-row building can use it
         for c in customers:
-            c["_addrStatus"] = _resolve_status(
+            status, addr_found = _resolve_status(
                 c.get("customerId", ""),
                 c.get("addressCity", ""),
                 c.get("addressState", ""),
                 c.get("addressZip", ""),
                 c.get("addressStreet", ""),
             )
+            c["_addrStatus"] = status
+            c["_addrFoundInCustomers"] = addr_found
 
         # Create Excel file
         workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        worksheet.title = "Customer Analytics Report"
 
-        # Define headers
-        headers = [
+        # Apply header styling (shared)
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(
+            start_color="366092", end_color="366092", fill_type="solid"
+        )
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        # Define headers for the two analytics sheets
+        analytics_headers = [
             "Customer ID",
             "Customer Name",
             "Company Name",
             "Shipping Address",
+            "Billing Address",
             "Status",
             "Customer Address Status",
             "Tier",
@@ -1265,92 +1268,60 @@ def download_customer_analytics_report(
             "Whatsapp Group",
         ]
 
-        # Apply header styling
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(
-            start_color="366092", end_color="366092", fill_type="solid"
-        )
-        header_alignment = Alignment(horizontal="center", vertical="center")
+        def _write_analytics_rows(ws, rows):
+            for col, header in enumerate(analytics_headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+            for row_idx, customer in enumerate(rows, 2):
+                ws.cell(row=row_idx, column=1, value=customer.get("customerId", ""))
+                ws.cell(row=row_idx, column=2, value=customer.get("customerName", ""))
+                ws.cell(row=row_idx, column=3, value=customer.get("companyName", ""))
+                ws.cell(row=row_idx, column=4, value=customer.get("shippingAddress", ""))
+                ws.cell(row=row_idx, column=5, value=customer.get("billingAddress", ""))
+                ws.cell(row=row_idx, column=6, value=customer.get("status", ""))
+                ws.cell(row=row_idx, column=7, value=customer.get("_addrStatus", "-"))
+                ws.cell(row=row_idx, column=8, value=customer.get("tier", ""))
+                sales_person = customer.get("salesPerson", "")
+                if isinstance(sales_person, list):
+                    sales_person = ", ".join(sales_person) if sales_person else ""
+                ws.cell(row=row_idx, column=9, value=sales_person)
+                ws.cell(row=row_idx, column=10, value=customer.get("totalSalesCurrentMonth", 0))
+                ws.cell(row=row_idx, column=11, value=customer.get("lastBillDate", ""))
+                ws.cell(row=row_idx, column=12, value=customer.get("averageOrderFrequencyMonthly", 0))
+                ws.cell(row=row_idx, column=13, value=customer.get("billingTillDateCurrentYear", 0))
+                ws.cell(row=row_idx, column=14, value=customer.get("totalSalesLastFY", 0))
+                ws.cell(row=row_idx, column=15, value=customer.get("totalSalesPreviousFY", 0))
+                ws.cell(row=row_idx, column=16, value="Yes" if customer.get("hasBilledLastMonth", False) else "No")
+                ws.cell(row=row_idx, column=17, value="Yes" if customer.get("hasBilledLast45Days", False) else "No")
+                ws.cell(row=row_idx, column=18, value="Yes" if customer.get("hasBilledLast2Months", False) else "No")
+                ws.cell(row=row_idx, column=19, value="Yes" if customer.get("hasBilledLast3Months", False) else "No")
+                ws.cell(row=row_idx, column=20, value=len(customer.get("duePayments", [])))
+                ws.cell(row=row_idx, column=21, value=len(customer.get("notDuePayments", [])))
+                ws.cell(row=row_idx, column=22, value=customer.get("whatsappGroup", ""))
+            for column in ws.columns:
+                max_length = 0
+                column_letter = get_column_letter(column[0].column)
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
 
-        for col, header in enumerate(headers, 1):
-            cell = worksheet.cell(row=1, column=col, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
+        # Split customers: Sheet 1 = address exists in customers collection,
+        # Sheet 2 = invoice address not present in customers.addresses array
+        registered_customers = [c for c in customers if c.get("_addrFoundInCustomers", False)]
+        unregistered_customers = [c for c in customers if not c.get("_addrFoundInCustomers", False)]
 
-        # Add data rows
-        for row, customer in enumerate(customers, 2):
-            worksheet.cell(row=row, column=1, value=customer.get("customerId", ""))
-            worksheet.cell(row=row, column=2, value=customer.get("customerName", ""))
-            worksheet.cell(row=row, column=3, value=customer.get("companyName", ""))
-            worksheet.cell(
-                row=row, column=4, value=customer.get("shippingAddress", "")
-            )
-            worksheet.cell(row=row, column=5, value=customer.get("status", ""))
-            worksheet.cell(row=row, column=6, value=customer.get("_addrStatus", "-"))
-            worksheet.cell(row=row, column=7, value=customer.get("tier", ""))
-            sales_person = customer.get("salesPerson", "")
-            if isinstance(sales_person, list):
-                sales_person = ", ".join(sales_person) if sales_person else ""
-            worksheet.cell(row=row, column=8, value=sales_person)
-            worksheet.cell(
-                row=row, column=9, value=customer.get("totalSalesCurrentMonth", 0)
-            )
-            worksheet.cell(row=row, column=10, value=customer.get("lastBillDate", ""))
-            worksheet.cell(
-                row=row, column=11, value=customer.get("averageOrderFrequencyMonthly", 0)
-            )
-            worksheet.cell(
-                row=row, column=12, value=customer.get("billingTillDateCurrentYear", 0)
-            )
-            worksheet.cell(
-                row=row, column=13, value=customer.get("totalSalesLastFY", 0)
-            )
-            worksheet.cell(
-                row=row, column=14, value=customer.get("totalSalesPreviousFY", 0)
-            )
-            worksheet.cell(
-                row=row,
-                column=15,
-                value="Yes" if customer.get("hasBilledLastMonth", False) else "No",
-            )
-            worksheet.cell(
-                row=row,
-                column=16,
-                value="Yes" if customer.get("hasBilledLast45Days", False) else "No",
-            )
-            worksheet.cell(
-                row=row,
-                column=17,
-                value="Yes" if customer.get("hasBilledLast2Months", False) else "No",
-            )
-            worksheet.cell(
-                row=row,
-                column=18,
-                value="Yes" if customer.get("hasBilledLast3Months", False) else "No",
-            )
-            worksheet.cell(
-                row=row, column=19, value=len(customer.get("duePayments", []))
-            )
-            worksheet.cell(
-                row=row, column=20, value=len(customer.get("notDuePayments", []))
-            )
-            worksheet.cell(row=row, column=21, value=customer.get("whatsappGroup", ""))
+        worksheet = workbook.active
+        worksheet.title = "Registered Addresses"
+        _write_analytics_rows(worksheet, registered_customers)
 
-        # Auto-adjust column widths
-        for column in worksheet.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
-
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-
-            adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
-            worksheet.column_dimensions[column_letter].width = adjusted_width
+        unregistered_ws = workbook.create_sheet("Unregistered Addresses")
+        _write_analytics_rows(unregistered_ws, unregistered_customers)
 
         # Add Customer Address Summary sheet — fuzzy-group same customer/similar address rows
         def _normalize_addr(addr):
