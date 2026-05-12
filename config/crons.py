@@ -1620,12 +1620,17 @@ async def items_cron():
                 # Collect item IDs that need detail fetching
                 new_item_ids = []
                 existing_item_ids = []
+                page_item_ids = [str(item["item_id"]) for item in page_items]
+                total_processed += len(page_item_ids)
 
-                for item in page_items:
-                    inv_id = str(item["item_id"])
-                    total_processed += 1
-                    existing_doc = collection.find_one({"item_id": inv_id}, {"_id": 1})
-                    if not existing_doc:
+                existing_docs_cursor = collection.find(
+                    {"item_id": {"$in": page_item_ids}},
+                    {"_id": 0},
+                )
+                existing_docs_map = {doc["item_id"]: doc for doc in existing_docs_cursor}
+
+                for inv_id in page_item_ids:
+                    if inv_id not in existing_docs_map:
                         new_item_ids.append(inv_id)
                     else:
                         existing_item_ids.append(inv_id)
@@ -1675,11 +1680,18 @@ async def items_cron():
                             if inv_id in new_item_id_set:
                                 items_to_insert.append(processed_item)
                             else:
-                                collection.update_one(
-                                    {"item_id": inv_id},
-                                    {"$set": processed_item},
-                                )
-                                total_updated += 1
+                                existing_doc = existing_docs_map.get(inv_id, {})
+                                diff = {
+                                    k: v
+                                    for k, v in processed_item.items()
+                                    if existing_doc.get(k) != v
+                                }
+                                if diff:
+                                    collection.update_one(
+                                        {"item_id": inv_id},
+                                        {"$set": diff},
+                                    )
+                                    total_updated += 1
                     except Exception as e:
                         logger.error(f"Error processing item {inv_id}: {e}")
                         total_errors += 1
