@@ -151,114 +151,72 @@ def parse_datetime(value):
         return datetime.datetime.now()
 
 
-brands = {
-    "zippy": "Zippy Paws",
-    "waggie": "Waggie Wag",
-    "fofos": "FOFOS",
-    "truelove": "Truelove",
-    "barkbutler": "Barkbutler",
-    "dogfest": "Dogfest",
-    "catfest": "Catfest",
-    "dux": "Dux",
-    "squeeezys": "Squeeezys",
-    "joyser": "Joyser",
-}
-
-
-def extract_brand_from_product(product_name):
-    """Extract brand name from product name."""
-    words = product_name.split()
-    if not words:
-        return ""
-
-    if words[0].lower() in brands.keys():
-        return brands[words[0].lower()]
-
 
 def create_special_margins_for_new_product(
     product_id: str, product_name: str, brand_name: str
 ):
     """
     Background task to create special margins for a new product based on existing brand margins.
+    Queries by the stored brand field directly instead of inferring brand from product names.
+    Uses the most common (mode) margin for that brand per customer as the tiebreaker.
     """
     try:
-        # MongoDB connection (you might want to use your existing db connection)
-
         print(
             f"Creating special margins for new product: {product_name} (Brand: {brand_name})"
         )
 
-        # Get all existing special margins to find customers with this brand
-        existing_margins = list(
-            db.special_margins.find({}, {"customer_id": 1, "name": 1, "margin": 1})
+        # Find all customers that already have margins for this brand using the brand field.
+        existing_brand_margins = list(
+            db.special_margins.find(
+                {"brand": brand_name},
+                {"customer_id": 1, "margin": 1}
+            )
         )
 
-        # Group by customer and extract brand margins
-        customer_brand_margins = defaultdict(dict)
+        if not existing_brand_margins:
+            print(f"No customers have margins for brand '{brand_name}', nothing to do")
+            return
 
-        for margin_doc in existing_margins:
-            customer_id = str(margin_doc.get("customer_id"))
-            product_name_in_margin = str(margin_doc.get("name", ""))
-            margin_value = margin_doc.get("margin")
-
-            if customer_id and margin_value is not None:
-                # Extract brand from the product name in special margins
-                brand_from_margin = extract_brand_from_product(product_name_in_margin)
-
-                # If this customer doesn't have this brand margin yet, add it
-                if (
-                    brand_from_margin
-                    and brand_from_margin not in customer_brand_margins[customer_id]
-                ):
-                    customer_brand_margins[customer_id][
-                        brand_from_margin
-                    ] = margin_value
-
-        # Check if any customers have margins for this brand
-        customers_with_brand_margins = []
-        for customer_id, brand_margins in customer_brand_margins.items():
-            if brand_name in brand_margins:
-                customers_with_brand_margins.append(
-                    {
-                        "customer_id": customer_id,
-                        "margin": brand_margins[brand_name],
-                    }
-                )
+        # Group margins by customer and pick the mode (most common) margin per customer.
+        customer_margins = defaultdict(list)
+        for doc in existing_brand_margins:
+            cid = doc.get("customer_id")
+            margin = doc.get("margin")
+            if cid and margin is not None:
+                customer_margins[cid].append(margin)
 
         print(
-            f"Found {len(customers_with_brand_margins)} customers with margins for brand '{brand_name}'"
+            f"Found {len(customer_margins)} customers with margins for brand '{brand_name}'"
         )
 
-        # Create special margins for the new product
+        product_obj_id = ObjectId(product_id)
+        now = datetime.datetime.now()
         special_margins_to_insert = []
 
-        for customer_data in customers_with_brand_margins:
-            customer_id = customer_data["customer_id"]
-            margin = customer_data["margin"]
+        for customer_id, margins in customer_margins.items():
+            # Pick the most common margin for this brand; first alphabetically on tie.
+            margin = max(set(margins), key=margins.count)
 
-            # Check if this customer-product combination already exists
             existing_special_margin = db.special_margins.find_one(
-                {
-                    "customer_id": ObjectId(customer_id),
-                    "product_id": ObjectId(product_id),
-                }
+                {"customer_id": customer_id, "product_id": product_obj_id}
             )
 
             if not existing_special_margin:
                 special_margins_to_insert.append(
                     {
-                        "customer_id": ObjectId(customer_id),
-                        "product_id": ObjectId(product_id),
+                        "customer_id": customer_id,
+                        "product_id": product_obj_id,
                         "margin": margin,
                         "name": product_name,
-                        "updated_at": datetime.datetime.now(),
+                        "brand": brand_name,
+                        "created_at": now,
+                        "updated_at": now,
                     }
                 )
                 print(
-                    f"Will create special margin for customer {customer_id}: {product_name} with margin {margin}"
+                    f"Will create special margin for customer {customer_id}: {product_name} @ {margin}"
                 )
 
-        # Bulk insert special margins
         if special_margins_to_insert:
             result = db.special_margins.insert_many(special_margins_to_insert)
             print(
@@ -357,7 +315,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 params = {
                     "name": person["name"],
                     "item_name": item.get("name", ""),
-                    "brand": brands.get(brand_name.lower(), brand_name.capitalize()),
+                    "brand": brand_name,
                 }
                 send_whatsapp(
                     to=person["phone"],
