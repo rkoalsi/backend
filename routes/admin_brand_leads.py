@@ -4,6 +4,9 @@ from fastapi import (
     Query,
 )
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
+from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
 from dotenv import load_dotenv
 
@@ -11,6 +14,34 @@ load_dotenv()
 router = APIRouter()
 db = get_database()
 brand_leads_collection = db["brand_leads"]
+
+
+class UpdateBrandLeadRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+@router.patch("/{lead_id}")
+def update_brand_lead(lead_id: str, body: UpdateBrandLeadRequest):
+    try:
+        update_fields = {}
+        if body.notes is not None:
+            update_fields["notes"] = body.notes
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        result = brand_leads_collection.update_one(
+            {"_id": ObjectId(lead_id)},
+            {"$set": update_fields},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Lead not found")
+
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @router.get("")
