@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Application Update</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f4f7fa;
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+    .email-container {
+      max-width: 600px;
+      margin: 20px auto;
+      background-color: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      border: 1px solid #dde3ea;
+    }
+    .header {
+      background: linear-gradient(135deg, #2B4864, #172335);
+      color: #ffffff;
+      padding: 28px 30px;
+      text-align: center;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .status-banner {
+      background-color: #e8f5e9;
+      border-top: 4px solid #4CAF50;
+      padding: 16px 20px;
+      text-align: center;
+    }
+    .status-banner p {
+      margin: 0;
+      color: #2e7d32;
+      font-weight: 600;
+      font-size: 16px;
+    }
+    .content {
+      padding: 32px 36px;
+      color: #333333;
+      line-height: 1.7;
+    }
+    .content p {
+      margin: 0 0 16px 0;
+      font-size: 15px;
+    }
+    .highlight {
+      color: #2B4864;
+      font-weight: 600;
+    }
+    .next-steps {
+      background-color: #f0f4f8;
+      border-left: 4px solid #4CAF50;
+      border-radius: 4px;
+      padding: 14px 18px;
+      margin: 20px 0;
+    }
+    .next-steps p {
+      margin: 0;
+      font-size: 14px;
+      color: #333;
+    }
+    .footer {
+      background-color: #f5f7fa;
+      color: #777777;
+      text-align: center;
+      padding: 20px 30px;
+      font-size: 12px;
+      border-top: 1px solid #e0e0e0;
+    }
+    .footer p {
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    <div class="header">
+      <h1>Application Update</h1>
+    </div>
+    <div class="status-banner">
+      <p>&#10003; Congratulations! Your application has been accepted.</p>
+    </div>
+    <div class="content">
+      <p>Hi <span class="highlight">{applicant_name}</span>,</p>
+      <p>We are delighted to inform you that your application for <span class="highlight">{role_title}</span> at Pupscribe has been accepted!</p>
+      <div class="next-steps">
+        <p>Our team will be in touch with you shortly to discuss the next steps in the hiring process. Please keep an eye on your email and phone for further communication.</p>
+      </div>
+      <p>We look forward to having you on board and are excited about the possibility of you joining our team.</p>
+      <p>Congratulations once again!</p>
+    </div>
+    <div class="footer">
+      <p>Thanks,<br><strong>The Pupscribe Team</strong></p>
+      <p style="margin-top: 10px;">&copy; 2026 Pupscribe. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>

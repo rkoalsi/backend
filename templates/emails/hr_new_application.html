@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New Job Application</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f4f7fa;
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+    .email-container {
+      max-width: 600px;
+      margin: 20px auto;
+      background-color: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+      border: 1px solid #dde3ea;
+    }
+    .header {
+      background: linear-gradient(135deg, #2B4864, #172335);
+      color: #ffffff;
+      padding: 28px 30px;
+      text-align: center;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .content {
+      padding: 32px 36px;
+      color: #333333;
+      line-height: 1.7;
+    }
+    .content p {
+      margin: 0 0 14px 0;
+      font-size: 15px;
+    }
+    .applicant-card {
+      background-color: #f0f4f8;
+      border-radius: 6px;
+      padding: 18px 20px;
+      margin: 20px 0;
+      border: 1px solid #dde3ea;
+    }
+    .applicant-card .field {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .applicant-card .field:last-child {
+      margin-bottom: 0;
+    }
+    .field-label {
+      color: #2B4864;
+      font-weight: 600;
+      min-width: 80px;
+    }
+    .field-value {
+      color: #333333;
+    }
+    .button {
+      display: inline-block;
+      background: linear-gradient(135deg, #2B4864, #172335);
+      color: #ffffff;
+      padding: 12px 24px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+    .footer {
+      background-color: #f5f7fa;
+      color: #777777;
+      text-align: center;
+      padding: 20px 30px;
+      font-size: 12px;
+      border-top: 1px solid #e0e0e0;
+    }
+    .footer p {
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    <div class="header">
+      <h1>New Job Application</h1>
+    </div>
+    <div class="content">
+      <p>A new application has been submitted on the Order Form.</p>
+      <div class="applicant-card">
+        <div class="field">
+          <span class="field-label">Applicant:</span>
+          <span class="field-value">{applicant_name}</span>
+        </div>
+        <div class="field">
+          <span class="field-label">Role:</span>
+          <span class="field-value">{role_title}</span>
+        </div>
+      </div>
+      <p>Please log in to the admin panel to review the application and take action.</p>
+      <a href="{admin_url}" class="button">Go to Admin Panel</a>
+    </div>
+    <div class="footer">
+      <p>Thanks,<br><strong>The Pupscribe Team</strong></p>
+      <p style="margin-top: 10px;">&copy; 2026 Pupscribe. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>

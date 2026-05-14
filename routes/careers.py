@@ -3,6 +3,7 @@ import re
 import time
 import random
 import boto3
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
@@ -11,6 +12,16 @@ from ..config.whatsapp import send_whatsapp
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
 from typing import Optional
+
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "emails"
+
+
+def render_template(template_name: str, **kwargs) -> str:
+    template_path = TEMPLATES_DIR / template_name
+    html = template_path.read_text(encoding="utf-8")
+    for key, value in kwargs.items():
+        html = html.replace("{" + key + "}", str(value))
+    return html
 
 router = APIRouter()
 db = get_database()
@@ -381,19 +392,11 @@ async def apply_for_career(
             role_title = career.get("title", "the position")
             applicant_name = full_name.strip()
 
-            # Confirmation email to applicant
-            applicant_html = f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #333;">Application Received</h2>
-                <p>Hi {applicant_name},</p>
-                <p>Thank you for applying for <strong>{role_title}</strong> at Pupscribe. We have received your application and our team will review it shortly.</p>
-                <p>We will get back to you if your profile matches our requirements.</p>
-                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-                <p style="color: #999; font-size: 12px;">
-                    Thanks,<br>The Pupscribe Team
-                </p>
-            </div>
-            """
+            applicant_html = render_template(
+                "applicant_received.html",
+                applicant_name=applicant_name,
+                role_title=role_title,
+            )
             background_tasks.add_task(
                 send_career_email,
                 [email.strip().lower()],
@@ -401,23 +404,16 @@ async def apply_for_career(
                 applicant_html,
             )
 
-            # Notification email to HR users
             hr_users = list(db.users.find({"role": "hr", "status": "active"}, {"email": 1}))
             hr_emails = [u["email"] for u in hr_users if u.get("email")]
             if hr_emails:
-                hr_html = f"""
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <h2 style="color: #333;">New Job Application</h2>
-                    <p>A new application has been submitted on the Order Form.</p>
-                    <p><strong>Applicant:</strong> {applicant_name}</p>
-                    <p><strong>Role:</strong> {role_title}</p>
-                    <p>Please log in to the admin panel to review the application.</p>
-                    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-                    <p style="color: #999; font-size: 12px;">
-                        Thanks,<br>The Pupscribe Team
-                    </p>
-                </div>
-                """
+                admin_url = os.getenv("ADMIN_URL", "https://order.pupscribe.in/admin/career_applications")
+                hr_html = render_template(
+                    "hr_new_application.html",
+                    applicant_name=applicant_name,
+                    role_title=role_title,
+                    admin_url=admin_url,
+                )
                 background_tasks.add_task(
                     send_career_email,
                     hr_emails,
