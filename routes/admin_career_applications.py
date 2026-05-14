@@ -1,3 +1,6 @@
+import os
+import requests
+from pathlib import Path
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -12,6 +15,29 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
+
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "emails"
+
+
+def _render_template(template_name: str, **kwargs) -> str:
+    html = (TEMPLATES_DIR / template_name).read_text(encoding="utf-8")
+    for key, value in kwargs.items():
+        html = html.replace("{" + key + "}", str(value))
+    return html
+
+
+def _send_career_email(to: list, subject: str, html: str):
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
+        "Content-Type": "application/json",
+    }
+    requests.post(url, headers=headers, json={
+        "from": "no-reply@no-reply.pupscribe.in",
+        "to": to,
+        "subject": subject,
+        "html": html,
+    })
 
 router = APIRouter()
 db = get_database()
@@ -207,6 +233,56 @@ def download_career_applications_report(
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/{application_id}/send-status-email")
+def send_status_email(application_id: str):
+    try:
+        try:
+            obj_id = ObjectId(application_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid application_id format")
+
+        app = db.career_applications.find_one({"_id": obj_id})
+        if not app:
+            raise HTTPException(status_code=404, detail="Application not found")
+
+        status = app.get("status", "pending")
+        if status not in ("accepted", "rejected"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can only send status email for accepted or rejected applications, current status: {status}",
+            )
+
+        career = db.careers.find_one({"_id": app.get("career_id")}, {"title": 1})
+        role_title = career.get("title", "the position") if career else "the position"
+        applicant_name = app.get("applicant_name", "Applicant")
+        applicant_email = app.get("applicant_email")
+
+        if not applicant_email:
+            raise HTTPException(status_code=400, detail="Applicant email not found")
+
+        template_name = "applicant_accepted.html" if status == "accepted" else "applicant_rejected.html"
+        html = _render_template(template_name, applicant_name=applicant_name, role_title=role_title)
+        subject = (
+            f"Congratulations! Your Application for {role_title} - Accepted"
+            if status == "accepted"
+            else f"Update on Your Application for {role_title}"
+        )
+
+        _send_career_email([applicant_email], subject, html)
+
+        db.career_applications.update_one(
+            {"_id": obj_id},
+            {"$set": {"status_email_sent": True, "status_email_sent_at": datetime.utcnow().isoformat()}},
+        )
+
+        return {"success": True, "message": f"{status.capitalize()} email sent to {applicant_email}"}
+
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
