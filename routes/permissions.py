@@ -420,10 +420,35 @@ def check_user_edit_permissions(
     payload_data = payload.get("data", {})
     current_user_role = payload_data.get("role", "")
     current_user_id = str(payload.get("user_id", ""))
-    
+
     # Handle both string and list roles
     if isinstance(current_user_role, list):
         current_user_role = current_user_role[0] if current_user_role else ""
-    
+
     result = permission_service.can_edit_user(user_id, current_user_role, current_user_id)
     return result
+
+
+@router.get("/admin/all-permissions")
+def get_all_permissions(_ = Depends(require_admin_role)):
+    """Get all permission documents (admin only)"""
+    permissions = permission_service.get_all_menu_items()
+    permissions.sort(key=lambda x: x.get("order", 0))
+    return {"permissions": permissions}
+
+
+@router.put("/admin/permission/{item_id}")
+def update_permission_roles(
+    item_id: str,
+    permission_data: dict,
+    _ = Depends(require_admin_role)
+):
+    """Update a permission document's allowed_roles (admin only)"""
+    allowed_fields = {"allowed_roles", "is_active", "order"}
+    filtered = {k: v for k, v in permission_data.items() if k in allowed_fields}
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    success = permission_service.update_menu_item(item_id, filtered)
+    if not success:
+        raise HTTPException(status_code=404, detail="Permission not found")
+    return {"message": "Permission updated successfully"}
