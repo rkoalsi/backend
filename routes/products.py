@@ -56,6 +56,13 @@ def get_product_counts():
         ]
 
         counts = list(db.products.aggregate(pipeline))
+
+        hidden_brands = {
+            doc["name"]
+            for doc in db.brands.find({"hidden": True}, {"name": 1})
+            if doc.get("name")
+        }
+
         # Format counts into a nested dict: { brand: { category: count, ... }, ... }
         result = {}
         for item in counts:
@@ -64,6 +71,8 @@ def get_product_counts():
             if not group_id.get("brand") or not group_id.get("category"):
                 continue
             brand = group_id["brand"]
+            if brand in hidden_brands:
+                continue
             category = group_id["category"]
             if brand not in result:
                 result[brand] = {}
@@ -109,7 +118,8 @@ def get_all_brands():
                 )
 
                 if brand_doc:
-                    # Create brand object with name and image
+                    if brand_doc.get("hidden"):
+                        continue
                     brand = {
                         "brand": brand_name,
                         "image": brand_doc.get("image_url"),
@@ -117,7 +127,6 @@ def get_all_brands():
                         "description": brand_doc.get("description"),
                     }
                 else:
-                    # If no brand document found, just include the name
                     brand = {
                         "brand": brand_name,
                         "image": None,

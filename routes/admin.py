@@ -2985,7 +2985,7 @@ async def update_brand_secondary_image(file: UploadFile = File(...), brand_name:
 async def update_brand(brand_id: str, payload: dict):
     from bson import ObjectId
 
-    allowed_fields = {"description", "status"}
+    allowed_fields = {"description", "status", "hidden"}
     update_data = {k: v for k, v in payload.items() if k in allowed_fields}
 
     if not update_data:
