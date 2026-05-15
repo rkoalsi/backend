@@ -161,7 +161,7 @@ async def create_daily_visit(
     result = db.daily_visits.insert_one(daily_visit)
 
     # Retrieve users and template for sending a WhatsApp message (update these queries as needed)
-    user_obj = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    user_obj = db.users.find_one({"email": "barksalesamit@gmail.com"})
     created_by_user = db.users.find_one({"_id": ObjectId(created_by)})
     template = db.templates.find_one({"name": "create_daily_visit"})
 
@@ -517,7 +517,7 @@ async def update_daily_visit_update(
         ist_dt = utc_dt.astimezone(ist_timezone)
         updated_daily_visit["created_at"] = ist_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    user_obj = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    user_obj = db.users.find_one({"email": "barksalesamit@gmail.com"})
     created_by_user = db.users.find_one(
         {"_id": ObjectId(daily_visit.get("created_by", ""))}
     )

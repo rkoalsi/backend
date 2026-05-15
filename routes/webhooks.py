@@ -944,7 +944,7 @@ def handle_invoice(data: dict):
                 )
             # Do not schedule emails for salespeople since at least one is forbidden
             return
-        sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+        sales_admin = db.users.find_one({"email": "barksalesamit@gmail.com"})
         sales_admin_phone = sales_admin.get("phone")
         sales_admin_name = sales_admin.get("name")
         for sp in all_salespeople:
@@ -1357,7 +1357,7 @@ def handle_accepted_estimate(data: dict):
             dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
         )
         to2 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "crmbarksales@gmail.com"}))
+            dict(db.users.find_one({"email": "barksalesamit@gmail.com"}))
         )
 
         for to in [to1, to2]:
