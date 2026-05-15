@@ -11,16 +11,16 @@ from .helpers import get_access_token
 from passlib.hash import bcrypt
 
 
-
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt."""
     return bcrypt.hash(password)
+
 
 load_dotenv()
 router = APIRouter()
 org_id = os.getenv("ORG_ID")
 DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD")
-ZOHO_SALESPERSONS_URL = f"https://www.zohoapis.com/books/v3/salespersons?organization_id={org_id}"
+ZOHO_SALESPERSONS_URL = f"https://www.zohoapis.com/books/v3/salespersons"
 db = get_database()
 products_collection = db["products"]
 customers_collection = db["customers"]
@@ -45,11 +45,18 @@ def home():
     if codes:
         for code in codes:
             escaped_code = re.escape(code)
-            or_conditions.extend([
-                {"cf_sales_person": code},
-                {"cf_sales_person": {"$elemMatch": {"$eq": code}}},
-                {"cf_sales_person": {"$regex": f"(^\\s*|,\\s*){escaped_code}(\\s*,|\\s*$)", "$options": "i"}},
-            ])
+            or_conditions.extend(
+                [
+                    {"cf_sales_person": code},
+                    {"cf_sales_person": {"$elemMatch": {"$eq": code}}},
+                    {
+                        "cf_sales_person": {
+                            "$regex": f"(^\\s*|,\\s*){escaped_code}(\\s*,|\\s*$)",
+                            "$options": "i",
+                        }
+                    },
+                ]
+            )
 
     # 3. Single query for all 'active' customers that are either:
     #    - "Defaulter"
@@ -129,7 +136,9 @@ async def create_salesperson(salesperson: dict):
 
     # Hash the provided password or fall back to the default
     raw_password = salesperson.get("password", "").strip()
-    salesperson["password"] = hash_password(raw_password if raw_password else DEFAULT_PASSWORD)
+    salesperson["password"] = hash_password(
+        raw_password if raw_password else DEFAULT_PASSWORD
+    )
 
     # Set default role
     salesperson["role"] = "sales_person"
@@ -157,15 +166,18 @@ def get_zoho_salespersons():
     try:
         access_token = get_access_token("books")
         if not access_token:
-            raise HTTPException(status_code=500, detail="Failed to get Zoho access token")
+            raise HTTPException(
+                status_code=500, detail="Failed to get Zoho access token"
+            )
 
         headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-        response = requests.get(ZOHO_SALESPERSONS_URL, headers=headers)
+        params = {"organization_id": org_id}
+        response = requests.get(ZOHO_SALESPERSONS_URL, params=params, headers=headers)
 
         if response.status_code != 200:
             raise HTTPException(
                 status_code=response.status_code,
-                detail=f"Zoho API error: {response.text}"
+                detail=f"Zoho API error: {response.text}",
             )
 
         data = response.json()
@@ -184,12 +196,118 @@ def get_zoho_salespersons():
             if sp.get("is_active") in [True, "true", "True"]
         ]
 
-        print(f"Total salespersons from Zoho: {len(salespersons)}, Active: {len(active_salespersons)}")
+        print(
+            f"Total salespersons from Zoho: {len(salespersons)}, Active: {len(active_salespersons)}"
+        )
 
         return {"salespersons": active_salespersons}
 
     except requests.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
+
+
+@router.post("/zoho/salesperson")
+def create_zoho_salespersons(salesperson: dict):
+    """
+    Create salesperson on Zoho Books API.
+    """
+    try:
+        access_token = get_access_token("books")
+        if not access_token:
+            raise HTTPException(
+                status_code=500, detail="Failed to get Zoho access token"
+            )
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        params = {"organization_id": org_id}
+        body = {"salesperson_name": salesperson.get("name"), "email": salesperson.get("email")}
+        response = requests.post(
+            ZOHO_SALESPERSONS_URL, params=params, json=body, headers=headers
+        )
+
+        data = response.json()
+        print(json.dumps(data, indent=4))
+
+        if response.status_code not in [200, 201] and data.get("code") != 0:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Zoho API error: {response.text}",
+            )
+
+        # Zoho create endpoint returns {"salespersons": {...}} (plural, but object not list)
+        created = data.get("salespersons") or {}
+        return {
+            "salesperson": {
+                "salesperson_id": created.get("salesperson_id"),
+                "salesperson_name": created.get("salesperson_name"),
+                "email": created.get("salesperson_email", ""),
+            }
+        }
+
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
+
+
+@router.delete("/zoho/salesperson/{zoho_sales_person_id}")
+def delete_zoho_salespersons(zoho_sales_person_id: str):
+    """
+    Delete salesperson on Zoho Books API.
+    """
+    try:
+        access_token = get_access_token("books")
+        if not access_token:
+            raise HTTPException(
+                status_code=500, detail="Failed to get Zoho access token"
+            )
+
+        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+        params = {
+            "organization_id": org_id,
+        }
+        response = requests.delete(
+            f"{ZOHO_SALESPERSONS_URL}/{zoho_sales_person_id}",
+            params=params,
+            headers=headers,
+        )
+
+        data = response.json()
+        print(json.dumps(data, indent=4))
+
+        if response.status_code not in [200, 201] and data.get("code") != 0:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Zoho API error: {response.text}",
+            )
+
+        return {"message": data.get("message", "Salesperson deleted from Zoho")}
+
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
+
+
+@router.delete("/{salesperson_id}")
+def delete_salesperson(salesperson_id: str):
+    user = db.users.find_one({"_id": ObjectId(salesperson_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="Sales Person not found")
+
+    zoho_id = user.get("salesperson_id")
+    if zoho_id:
+        try:
+            access_token = get_access_token("books")
+            if access_token:
+                headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
+                params = {"organization_id": org_id}
+                requests.delete(
+                    f"{ZOHO_SALESPERSONS_URL}/{zoho_id}",
+                    params=params,
+                    headers=headers,
+                )
+        except Exception as e:
+            print(f"Zoho delete failed (continuing with DB delete): {e}")
+
+    db.users.delete_one({"_id": ObjectId(salesperson_id)})
+    return {"message": "Sales Person Deleted"}
 
 
 @router.get("/{salesperson_id}")
