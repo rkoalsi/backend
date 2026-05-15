@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -10,9 +10,34 @@ import os
 import requests
 import logging
 import datetime as dt
+import boto3
+import time
+import re
+from gstin_validator.core import validate_gstin as _validate_gstin_checksum
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# S3 configuration
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_REGION = os.getenv("S3_REGION")
+
+_GSTIN_PATTERN = re.compile(r"^(\d{2})([A-Z]{5}\d{4}[A-Z])(\d)([A-Z])([0-9A-Z])$")
+
+ALLOWED_DOC_TYPES = {"gst_certificate", "pan_card", "aadhar"}
+
+
+def validate_gstin_full(gst_number: str) -> dict:
+    """Validate GSTIN format via regex then verify checksum digit."""
+    gst_number = gst_number.strip().upper()
+    if not _GSTIN_PATTERN.match(gst_number):
+        return {"valid": False, "error": "Invalid GSTIN format"}
+    if not _validate_gstin_checksum(gst_number):
+        return {"valid": False, "error": "Invalid GSTIN checksum digit"}
+    return {"valid": True}
+
 
 # Zoho configuration from environment variables
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -57,6 +82,10 @@ class CustomerCreationRequest(BaseModel):
     gst_treatment: Optional[str] = None
     pincode: Optional[str] = None
     in_ex: Optional[str] = None
+    # Document upload URLs
+    gst_certificate_url: Optional[str] = None
+    pan_card_url: Optional[str] = None
+    aadhar_url: Optional[str] = None
 
 
 class CommentCreate(BaseModel):
@@ -836,6 +865,12 @@ async def create_customer_request(
 ):
     """Create a new customer creation request"""
     try:
+        # Validate GSTIN if provided
+        if request_data.gst_no:
+            result = validate_gstin_full(request_data.gst_no)
+            if not result["valid"]:
+                raise HTTPException(status_code=422, detail=f"GSTIN validation failed: {result['error']}")
+
         db = get_database()
 
         # Extract user data from JWT payload (nested under "data" key)
@@ -885,6 +920,9 @@ async def create_customer_request(
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
             "pincode": request_data.pincode,
+            "gst_certificate_url": request_data.gst_certificate_url,
+            "pan_card_url": request_data.pan_card_url,
+            "aadhar_url": request_data.aadhar_url,
             "created_by": user_id,
             "created_by_name": created_by_name,
             "created_at": datetime.now(),
@@ -931,6 +969,73 @@ async def create_customer_request(
     except Exception as e:
         print(f"Error creating customer request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _get_s3_client():
+    return boto3.client(
+        "s3",
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+    )
+
+
+@router.post("/upload-document")
+async def upload_customer_document(
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a customer document (GST certificate, PAN card, or Aadhaar) to S3."""
+    if doc_type not in ALLOWED_DOC_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid doc_type. Must be one of: {', '.join(ALLOWED_DOC_TYPES)}",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+    timestamp = int(time.time())
+    s3_key = f"customer_documents/{doc_type}/{timestamp}{ext}"
+
+    try:
+        s3 = _get_s3_client()
+        s3.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=content,
+            ContentType=file.content_type or "application/octet-stream",
+            ACL="public-read",
+        )
+    except Exception as e:
+        logger.error(f"S3 upload error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload document to S3")
+
+    url = f"https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{s3_key}"
+    return {"url": url, "key": s3_key}
+
+
+@router.delete("/document")
+async def delete_customer_document(
+    key: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a previously uploaded customer document from S3."""
+    if not key.startswith("customer_documents/"):
+        raise HTTPException(status_code=400, detail="Invalid document key")
+
+    try:
+        s3 = _get_s3_client()
+        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
+    except Exception as e:
+        logger.error(f"S3 delete error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document from S3")
+
+    return {"message": "Document deleted successfully"}
+
 
 @router.get("/")
 async def get_customer_requests(
@@ -1532,6 +1637,9 @@ async def update_customer_request(
             "gst_treatment": request_data.gst_treatment,
             "pincode": request_data.pincode,
             "in_ex": request_data.in_ex,
+            "gst_certificate_url": request_data.gst_certificate_url,
+            "pan_card_url": request_data.pan_card_url,
+            "aadhar_url": request_data.aadhar_url,
             "updated_at": datetime.now(),
             "updated_by": user_id,
         }
