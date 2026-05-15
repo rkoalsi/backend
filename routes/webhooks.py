@@ -1716,6 +1716,237 @@ def handle_customer_payment(data: dict):
         print("Payment ID not found. Webhook Received")
 
 
+def handle_delete_estimate(data: dict):
+    estimate = data.get("estimate") or {}
+    estimate_id = estimate.get("estimate_id", "")
+    if estimate_id:
+        result = db.estimates.delete_one({"estimate_id": estimate_id})
+        print(f"Deleted estimate {estimate_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No estimate_id found in delete webhook")
+
+
+def handle_delete_invoice(data: dict):
+    invoice = data.get("invoice") or {}
+    invoice_id = invoice.get("invoice_id", "")
+    if invoice_id:
+        result = db.invoices.delete_one({"invoice_id": invoice_id})
+        print(f"Deleted invoice {invoice_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No invoice_id found in delete webhook")
+
+
+def handle_delete_customer_payment(data: dict):
+    payment = data.get("payment") or {}
+    payment_id = payment.get("payment_id", "")
+    if payment_id:
+        result = db.customer_payments.delete_one({"payment_id": payment_id})
+        print(f"Deleted customer payment {payment_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No payment_id found in delete webhook")
+
+
+def handle_delete_sales_order(data: dict):
+    salesorder = data.get("salesorder") or {}
+    salesorder_id = salesorder.get("salesorder_id", "")
+    if salesorder_id:
+        result = db.sales_orders.delete_one({"salesorder_id": salesorder_id})
+        print(f"Deleted sales order {salesorder_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No salesorder_id found in delete webhook")
+
+
+def handle_delete_package(data: dict):
+    package = data.get("package") or {}
+    package_id = package.get("package_id", "")
+    if package_id:
+        result = db.packages.delete_one({"package_id": package_id})
+        print(f"Deleted package {package_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No package_id found in delete webhook")
+
+
+def handle_delete_assembly(data: dict):
+    assembly = data.get("bundle") or data.get("assembly") or {}
+    bundle_id = assembly.get("bundle_id", "")
+    if bundle_id:
+        result = db.assemblies.delete_one({"bundle_id": bundle_id})
+        print(f"Deleted assembly {bundle_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No bundle_id found in delete webhook")
+
+
+def handle_delete_bill(data: dict):
+    bill = data.get("bill") or {}
+    bill_id = bill.get("bill_id", "")
+    if bill_id:
+        result = db.bills.delete_one({"bill_id": bill_id})
+        print(f"Deleted bill {bill_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No bill_id found in delete webhook")
+
+
+def handle_delete_purchase_order(data: dict):
+    purchaseorder = data.get("purchaseorder") or {}
+    purchaseorder_number = purchaseorder.get("purchaseorder_number", "")
+    if purchaseorder_number:
+        result = db.purchase_orders.delete_one({"purchaseorder_number": purchaseorder_number})
+        print(f"Deleted purchase order {purchaseorder_number}: {result.deleted_count} document(s) removed")
+    else:
+        print("No purchaseorder_number found in delete webhook")
+
+
+def handle_delete_item(data: dict):
+    item = data.get("item") or {}
+    item_id = item.get("item_id", "")
+    if item_id:
+        result = db.products.delete_one({"item_id": item_id})
+        print(f"Deleted item {item_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No item_id found in delete webhook")
+
+
+def handle_delete_vendor(data: dict):
+    contact = data.get("contact") or {}
+    contact_id = contact.get("contact_id", "")
+    if contact_id:
+        result = db.vendors.delete_one({"contact_id": contact_id})
+        print(f"Deleted vendor {contact_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No contact_id found in vendor delete webhook")
+
+
+def handle_delete_customer(data: dict):
+    contact = data.get("contact") or {}
+    contact_id = contact.get("contact_id", "")
+    if contact_id:
+        result = db.customers.delete_one({"contact_id": contact_id})
+        print(f"Deleted customer {contact_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No contact_id found in customer delete webhook")
+
+
+def handle_delete_credit_note(data: dict):
+    creditnote = data.get("creditnote") or {}
+    creditnote_id = creditnote.get("creditnote_id", "")
+    if creditnote_id:
+        result = db.credit_notes.delete_one({"creditnote_id": creditnote_id})
+        print(f"Deleted credit note {creditnote_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No creditnote_id found in delete webhook")
+
+
+def handle_sales_order(data: dict):
+    salesorder = data.get("salesorder")
+    if not salesorder:
+        print("No sales order data found in webhook")
+        return
+
+    salesorder_id = str(salesorder.get("salesorder_id", ""))
+    if not salesorder_id:
+        print("Sales Order ID not found. Webhook Received")
+        return
+
+    existing = db.sales_orders.find_one({"salesorder_id": salesorder_id})
+    sorted_data = sort_dict_keys(salesorder)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'shipment_date',
+        'delivery_date', 'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.sales_orders.update_one({"salesorder_id": salesorder_id}, {"$set": sorted_data})
+        print(f"Updated sales order with salesorder_id {salesorder_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.sales_orders.insert_one(sorted_data)
+        print(f"Created new sales order with salesorder_id {salesorder_id}")
+
+
+def handle_assembly(data: dict):
+    assembly = data.get("bundle") or data.get("assembly")
+    if not assembly:
+        print("No assembly data found in webhook")
+        return
+
+    bundle_id = str(assembly.get("bundle_id", ""))
+    if not bundle_id:
+        print("Bundle/Assembly ID not found. Webhook Received")
+        return
+
+    existing = db.assemblies.find_one({"bundle_id": bundle_id})
+    sorted_data = sort_dict_keys(assembly)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time',
+        'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.assemblies.update_one({"bundle_id": bundle_id}, {"$set": sorted_data})
+        print(f"Updated assembly with bundle_id {bundle_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.assemblies.insert_one(sorted_data)
+        print(f"Created new assembly with bundle_id {bundle_id}")
+
+
+def handle_package(data: dict):
+    package = data.get("package")
+    if not package:
+        print("No package data found in webhook")
+        return
+
+    package_id = str(package.get("package_id", ""))
+    if not package_id:
+        print("Package ID not found. Webhook Received")
+        return
+
+    existing = db.packages.find_one({"package_id": package_id})
+    sorted_data = sort_dict_keys(package)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'shipment_date',
+        'delivery_date', 'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.packages.update_one({"package_id": package_id}, {"$set": sorted_data})
+        print(f"Updated package with package_id {package_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.packages.insert_one(sorted_data)
+        print(f"Created new package with package_id {package_id}")
+
+
 @router.post("/estimate")
 def estimate(data: dict):
     handle_estimate(data)
@@ -1947,3 +2178,93 @@ async def vendor_webhook(request: Request):
     except Exception as e:
         print(f"Error processing vendor webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/delete_estimate")
+def delete_estimate(data: dict):
+    handle_delete_estimate(data)
+    return "Delete Estimate Webhook Received Successfully"
+
+
+@router.post("/delete_invoice")
+def delete_invoice(data: dict):
+    handle_delete_invoice(data)
+    return "Delete Invoice Webhook Received Successfully"
+
+
+@router.post("/delete_customer_payment")
+def delete_customer_payment(data: dict):
+    handle_delete_customer_payment(data)
+    return "Delete Customer Payment Webhook Received Successfully"
+
+
+@router.post("/delete_sales_order")
+def delete_sales_order(data: dict):
+    handle_delete_sales_order(data)
+    return "Delete Sales Order Webhook Received Successfully"
+
+
+@router.post("/delete_package")
+def delete_package(data: dict):
+    handle_delete_package(data)
+    return "Delete Package Webhook Received Successfully"
+
+
+@router.post("/delete_assembly")
+def delete_assembly(data: dict):
+    handle_delete_assembly(data)
+    return "Delete Assembly Webhook Received Successfully"
+
+
+@router.post("/delete_bill")
+def delete_bill(data: dict):
+    handle_delete_bill(data)
+    return "Delete Bill Webhook Received Successfully"
+
+
+@router.post("/delete_purchase_order")
+def delete_purchase_order(data: dict):
+    handle_delete_purchase_order(data)
+    return "Delete Purchase Order Webhook Received Successfully"
+
+
+@router.post("/delete_item")
+def delete_item(data: dict):
+    handle_delete_item(data)
+    return "Delete Item Webhook Received Successfully"
+
+
+@router.post("/delete_vendor")
+def delete_vendor(data: dict):
+    handle_delete_vendor(data)
+    return "Delete Vendor Webhook Received Successfully"
+
+
+@router.post("/delete_customer")
+def delete_customer(data: dict):
+    handle_delete_customer(data)
+    return "Delete Customer Webhook Received Successfully"
+
+
+@router.post("/delete_credit_note")
+def delete_credit_note(data: dict):
+    handle_delete_credit_note(data)
+    return "Delete Credit Note Webhook Received Successfully"
+
+
+@router.post("/sales_order")
+def sales_order(data: dict):
+    handle_sales_order(data)
+    return "Sales Order Webhook Received Successfully"
+
+
+@router.post("/assembly")
+def assembly(data: dict):
+    handle_assembly(data)
+    return "Assembly Webhook Received Successfully"
+
+
+@router.post("/package")
+def package(data: dict):
+    handle_package(data)
+    return "Package Webhook Received Successfully"
