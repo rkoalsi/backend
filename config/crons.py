@@ -1684,7 +1684,7 @@ async def items_cron():
                                 diff = {
                                     k: v
                                     for k, v in processed_item.items()
-                                    if existing_doc.get(k) != v
+                                    if existing_doc.get(k) != v and k != "status"
                                 }
                                 if diff:
                                     collection.update_one(
