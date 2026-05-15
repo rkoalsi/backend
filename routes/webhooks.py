@@ -1716,6 +1716,43 @@ def handle_customer_payment(data: dict):
         print("Payment ID not found. Webhook Received")
 
 
+def handle_bill(data: dict):
+    bill = data.get("bill")
+    if not bill:
+        print("No bill data found in webhook")
+        return
+
+    bill_id = str(bill.get("bill_id", ""))
+    if not bill_id:
+        print("Bill ID not found. Webhook Received")
+        return
+
+    existing = db.bills.find_one({"bill_id": bill_id})
+    sorted_data = sort_dict_keys(bill)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'due_date',
+        'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.bills.update_one({"bill_id": bill_id}, {"$set": sorted_data})
+        print(f"Updated bill with bill_id {bill_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.bills.insert_one(sorted_data)
+        print(f"Created new bill with bill_id {bill_id}")
+
+
 def handle_delete_estimate(data: dict):
     estimate = data.get("estimate") or {}
     estimate_id = estimate.get("estimate_id", "")
@@ -2178,6 +2215,12 @@ async def vendor_webhook(request: Request):
     except Exception as e:
         print(f"Error processing vendor webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/bill")
+def bill(data: dict):
+    handle_bill(data)
+    return "Bill Webhook Received Successfully"
 
 
 @router.post("/delete_estimate")
