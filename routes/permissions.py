@@ -6,7 +6,7 @@ from pymongo import MongoClient
 from functools import lru_cache
 from ..config.root import get_database
 from ..config.auth import JWT_SECRET_KEY
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from bson import ObjectId
 
 db = get_database()
@@ -26,6 +26,13 @@ class UserUpdateModel(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None
     status: Optional[str] = None
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def coerce_phone_to_str(cls, v):
+        if v is not None:
+            return str(v)
+        return v
 
 
 class PermissionService:
