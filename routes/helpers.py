@@ -461,7 +461,7 @@ def notify_office_coordinator_and_sales_admins(db, template, params):
     office_coordinator = db.users.find_one(
         {"email": "pupscribeoffcoordinator@gmail.com"}
     )
-    sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    sales_admin = db.users.find_one({"email": "barksalesamit@gmail.com"})
     for person in [office_coordinator, sales_admin]:
         phone = person.get("phone")
         name = person.get("first_name")
@@ -473,7 +473,7 @@ def notify_office_coordinator_and_sales_admins(db, template, params):
 
 
 def notify_sales_admin(db, template, params):
-    sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+    sales_admin = db.users.find_one({"email": "barksalesamit@gmail.com"})
     phone = sales_admin.get("phone")
     name = sales_admin.get("first_name")
     template_doc = {**template}
