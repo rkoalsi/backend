@@ -1763,6 +1763,55 @@ def handle_delete_estimate(data: dict):
         print("No estimate_id found in delete webhook")
 
 
+def handle_transfer_order(data: dict):
+    transfer_order = data.get("transferorder") or data.get("transfer_order") or {}
+    transfer_order_id = str(transfer_order.get("transfer_order_id", ""))
+    if not transfer_order_id:
+        print("No transfer_order_id found in webhook")
+        return
+
+    exists = serialize_mongo_document(
+        db.transfer_orders.find_one({"transfer_order_id": transfer_order_id})
+    )
+
+    sorted_to = sort_dict_keys(transfer_order)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = ["created_time", "date", "last_modified_time"]
+    for field in datetime_fields:
+        if field in sorted_to and sorted_to[field]:
+            parsed_dt = parse_datetime(sorted_to[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_to[field] = parsed_dt
+
+    if not exists:
+        sorted_to["created_at"] = sorted_to.get("created_time", current_time)
+        sorted_to["updated_at"] = current_time
+        db.transfer_orders.insert_one(sorted_to)
+        print(f"Created new transfer order {transfer_order_id}")
+    else:
+        sorted_to["updated_at"] = current_time
+        if "created_at" not in sorted_to and "created_at" in exists:
+            sorted_to["created_at"] = exists["created_at"]
+        elif "created_at" not in sorted_to:
+            sorted_to["created_at"] = sorted_to.get("created_time", current_time)
+        db.transfer_orders.update_one(
+            {"transfer_order_id": transfer_order_id},
+            {"$set": sorted_to},
+        )
+        print(f"Updated transfer order {transfer_order_id}")
+
+
+def handle_delete_transfer_order(data: dict):
+    transfer_order = data.get("transferorder") or data.get("transfer_order") or {}
+    transfer_order_id = str(transfer_order.get("transfer_order_id", ""))
+    if transfer_order_id:
+        result = db.transfer_orders.delete_one({"transfer_order_id": transfer_order_id})
+        print(f"Deleted transfer order {transfer_order_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No transfer_order_id found in delete webhook")
+
+
 def handle_delete_invoice(data: dict):
     invoice = data.get("invoice") or {}
     invoice_id = invoice.get("invoice_id", "")
@@ -2275,6 +2324,18 @@ def delete_purchase_order(data: dict):
 def delete_item(data: dict):
     handle_delete_item(data)
     return "Delete Item Webhook Received Successfully"
+
+
+@router.post("/transfer_order")
+def transfer_order(data: dict):
+    handle_transfer_order(data)
+    return "Transfer Order Webhook Received Successfully"
+
+
+@router.post("/delete_transfer_order")
+def delete_transfer_order(data: dict):
+    handle_delete_transfer_order(data)
+    return "Delete Transfer Order Webhook Received Successfully"
 
 
 @router.post("/delete_vendor")

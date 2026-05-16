@@ -404,6 +404,41 @@ def process_shipment_data(shipment_data):
     return sort_dict_recursively(shipment_data)
 
 
+def process_transfer_order_data(transfer_order_data):
+    """Process transfer order data to ensure proper formatting and datetime conversion."""
+    transfer_order_data["transfer_order_id"] = str(transfer_order_data.get("transfer_order_id", ""))
+
+    datetime_fields = [
+        "created_time",
+        "date",
+        "last_modified_time",
+        "created_time_formatted",
+        "last_modified_time_formatted",
+    ]
+
+    for field in datetime_fields:
+        if field in transfer_order_data and transfer_order_data[field]:
+            datetime_value = parse_datetime_field(transfer_order_data[field])
+            if isinstance(datetime_value, datetime):
+                transfer_order_data[field] = datetime_value
+
+    if "created_time" in transfer_order_data:
+        transfer_order_data["created_at"] = transfer_order_data.get("created_time")
+    elif "date" in transfer_order_data:
+        date_val = parse_datetime_field(transfer_order_data["date"])
+        if isinstance(date_val, datetime):
+            transfer_order_data["created_at"] = date_val
+        else:
+            transfer_order_data["created_at"] = transfer_order_data["date"]
+
+    if "created_at" not in transfer_order_data:
+        logger.warning(
+            f"No created_at field for transfer order {transfer_order_data.get('transfer_order_id')}"
+        )
+
+    return sort_dict_recursively(transfer_order_data)
+
+
 def process_estimate_data(estimate_data):
     """Process estimate data to ensure proper formatting and datetime conversion."""
     estimate_data["estimate_id"] = str(estimate_data["estimate_id"])
@@ -1742,6 +1777,156 @@ async def items_cron():
         send_slack_notification("Items Cron Error", success=False, error_msg=str(e))
 
 
+async def transfer_orders_cron():
+    """Cron job for syncing recent transfer orders from the last 2 pages of Zoho Inventory."""
+    logger.info("Starting transfer orders sync (last 2 pages)...")
+    start_time = time.time()
+    all_new_transfer_orders = []
+    new_transfer_order_ids = []
+
+    try:
+        db = get_database()
+        collection = db["transfer_orders"]
+
+        async with ZohoAPIClient("inventory") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages first
+            first_page_url = (
+                f"https://www.zohoapis.com/inventory/v1/transferorders?"
+                f"page=1&per_page=200&"
+                f"organization_id={org_id}"
+            )
+            first_data = await api_client.make_request(first_page_url)
+            if not first_data:
+                logger.error("Failed to get response from transfer orders API")
+                return
+
+            page_context = first_data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            logger.info(f"Total transfer order pages: {total_pages}")
+
+            # Fetch the last 2 pages (most recent data)
+            pages_to_fetch = list(range(max(1, total_pages - 1), total_pages + 1))
+            logger.info(f"Fetching pages: {pages_to_fetch}")
+
+            for page in pages_to_fetch:
+                logger.info(f"Fetching transfer orders page {page}/{total_pages}...")
+
+                if page == 1 and first_data:
+                    page_data = first_data
+                else:
+                    page_url = (
+                        f"https://www.zohoapis.com/inventory/v1/transferorders?"
+                        f"page={page}&per_page=200&"
+                        f"organization_id={org_id}"
+                    )
+                    page_data = await api_client.make_request(page_url)
+
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                page_transfer_orders = (
+                    page_data.get("transferorders")
+                    or page_data.get("transferorder")
+                    or page_data.get("transfer_orders")
+                    or page_data.get("transfer_order")
+                    or []
+                )
+
+                if not page_transfer_orders:
+                    logger.info(f"No transfer orders found on page {page}")
+                    continue
+
+                logger.info(f"Found {len(page_transfer_orders)} transfer orders on page {page}")
+
+                page_ids = [str(to["transfer_order_id"]) for to in page_transfer_orders if to.get("transfer_order_id")]
+
+                existing_ids = set()
+                existing_docs = collection.find(
+                    {"transfer_order_id": {"$in": page_ids}},
+                    {"transfer_order_id": 1},
+                )
+                for doc in existing_docs:
+                    existing_ids.add(doc["transfer_order_id"])
+
+                for to_id in page_ids:
+                    if to_id not in existing_ids:
+                        new_transfer_order_ids.append(to_id)
+
+                logger.info(f"Page {page}: {len(page_ids) - len([i for i in page_ids if i in existing_ids])} new transfer orders found")
+
+            if not new_transfer_order_ids:
+                logger.info("No new transfer orders found in last 2 pages")
+            else:
+                logger.info(f"Fetching details for {len(new_transfer_order_ids)} new transfer orders...")
+
+                detail_tasks = []
+                for to_id in new_transfer_order_ids:
+                    detail_url = (
+                        f"https://www.zohoapis.com/inventory/v1/transferorders/{to_id}?"
+                        f"organization_id={org_id}"
+                    )
+                    detail_tasks.append(api_client.make_request(detail_url))
+
+                semaphore = asyncio.Semaphore(3)
+
+                async def fetch_detail_with_semaphore(task):
+                    async with semaphore:
+                        return await task
+
+                detail_results = await asyncio.gather(
+                    *[fetch_detail_with_semaphore(task) for task in detail_tasks],
+                    return_exceptions=True,
+                )
+
+                for i, result in enumerate(detail_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(f"Error fetching transfer order {new_transfer_order_ids[i]}: {result}")
+                            continue
+
+                        if not result:
+                            continue
+
+                        to_data = (
+                            result.get("transferorder")
+                            or result.get("transfer_order")
+                        )
+                        if isinstance(to_data, list):
+                            to_data = to_data[0] if to_data else None
+
+                        if to_data:
+                            processed = process_transfer_order_data(to_data)
+                            all_new_transfer_orders.append(processed)
+                    except Exception as e:
+                        logger.error(f"Error processing transfer order {new_transfer_order_ids[i]}: {e}")
+
+                if all_new_transfer_orders:
+                    collection.insert_many(all_new_transfer_orders, ordered=False)
+                    logger.info(f"Inserted {len(all_new_transfer_orders)} new transfer orders")
+                else:
+                    logger.info("No new transfer orders to insert after processing")
+
+        duration = time.time() - start_time
+        send_slack_notification(
+            "Transfer Orders Cron",
+            success=True,
+            details={
+                "processed": len(all_new_transfer_orders),
+                "duration": duration,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error in transfer orders sync: {e}")
+        send_slack_notification(
+            "Transfer Orders Cron Error", success=False, error_msg=str(e)
+        )
+
+
 async def bills_cron():
     """Cron job for syncing bills from Zoho Books - fetch last 2 pages, delete and reinsert."""
     logger.info("Starting daily bills sync...")
@@ -2544,6 +2729,19 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added customer_payments_cron job")
+
+        scheduler_instance.add_job(
+            transfer_orders_cron,
+            "cron",
+            hour=17,
+            minute=30,
+            id="transfer_orders_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added transfer_orders_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
