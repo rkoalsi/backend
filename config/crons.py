@@ -1783,6 +1783,7 @@ async def transfer_orders_cron():
     start_time = time.time()
     all_new_transfer_orders = []
     new_transfer_order_ids = []
+    total_checked = 0
 
     try:
         db = get_database()
@@ -1844,6 +1845,7 @@ async def transfer_orders_cron():
                 logger.info(f"Found {len(page_transfer_orders)} transfer orders on page {page}")
 
                 page_ids = [str(to["transfer_order_id"]) for to in page_transfer_orders if to.get("transfer_order_id")]
+                total_checked += len(page_ids)
 
                 existing_ids = set()
                 existing_docs = collection.find(
@@ -1916,7 +1918,8 @@ async def transfer_orders_cron():
             "Transfer Orders Cron",
             success=True,
             details={
-                "processed": len(all_new_transfer_orders),
+                "processed": total_checked,
+                "inserted": len(all_new_transfer_orders),
                 "duration": duration,
             },
         )
@@ -2575,6 +2578,9 @@ async def customer_payments_cron():
 
                     if new_payment_ids:
                         await fetch_and_insert_payment_ids(new_payment_ids, upsert=False)
+                    else:
+                        logger.info(f"Page {page}: All records already exist, stopping early")
+                        break
 
                     if page > RESYNC_PAGES + 1:
                         await asyncio.sleep(1)
