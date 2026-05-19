@@ -1475,13 +1475,10 @@ def handle_shipment(data: dict):
         shipment.get("salesorder_number", "") if len(invoices) == 0 else ""
     )
     customer_name = shipment.get("customer_name", "")
-    tracking_number = shipment.get("reference_number", "")
-    tracking_partner = shipment.get("carrier", "")
+    tracking_partner = shipment.get("carrier", "delivery_method")
+    tracking_url = shipment.get("tracking_link", "")
+    tracking_number = shipment.get("reference_number", "tracking_number")
 
-    delivery_partner = serialize_mongo_document(
-        dict(db["delivery_partners"].find_one({"name": tracking_partner}))
-    )
-    tracking_url = delivery_partner.get("tracking_url", "")
     invoice = None
     if invoice_number != "":
         invoice = serialize_mongo_document(
@@ -1561,7 +1558,7 @@ def handle_shipment(data: dict):
                 ),
                 "carrier_name": tracking_partner,
                 "delivery_date": delivery_date,
-                "awb_no": shipment.get("tracking_number", ""),
+                "awb_no": tracking_url,
             }
         else:
             template = serialize_mongo_document(
