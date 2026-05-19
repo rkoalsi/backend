@@ -1516,6 +1516,9 @@ def handle_shipment(data: dict):
         sales_admin_4 = serialize_mongo_document(
             dict(db.users.find_one({"email": "hitesh@barkbutler.in"}))
         )
+        company_number = serialize_mongo_document(
+            dict(db.users.find_one({"role": "company_number"}))
+        )
         all_salespeople = set()
         print("Custom Field Invoice Sales Person", invoice_sales_person)
         print("Invoice Sales Person", salesperson)
@@ -1574,11 +1577,11 @@ def handle_shipment(data: dict):
                 "tracking_number": tracking_number,
                 "button_url": button_url,
             }
-        valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4]
+        valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4, company_number]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
-            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4]:
+            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4, company_number]:
                 phone = str(person.get("phone"))
                 print("if", phone)
                 if phone:  # Validate phone exists and is not empty
