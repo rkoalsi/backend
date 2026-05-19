@@ -30,7 +30,6 @@ from .admin_potential_customers import router as admin_potential_customers_route
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
 from .webhooks import update_stock_lock, run_update_stock
-from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
@@ -776,8 +775,7 @@ def get_misc_stats(start_of_today_ist):
         
         # General counts
         general_counts_future = executor.submit(lambda: {
-            "delivery_partners": db["delivery_partners"].count_documents({}),
-            "return_orders": db["return_orders"].count_documents({}),
+"return_orders": db["return_orders"].count_documents({}),
             "brands": db["brands"].count_documents({}),
             "external_links": db["external_links"].count_documents({}),
             "permissions":db["permissions"].count_documents({"is_active":True}),
@@ -3241,12 +3239,6 @@ router.include_router(
     admin_targeted_customers_router,
     prefix="/targeted_customers",
     tags=["Admin Targeted Customers"],
-    dependencies=[Depends(JWTBearer())],
-)
-router.include_router(
-    admin_delivery_partners_router,
-    prefix="/delivery_partners",
-    tags=["Admin Delivery Partners"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
