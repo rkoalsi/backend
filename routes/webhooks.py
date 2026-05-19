@@ -1559,6 +1559,7 @@ def handle_shipment(data: dict):
                 "carrier_name": tracking_partner,
                 "delivery_date": delivery_date,
                 "awb_no": tracking_url,
+                "customer_name":customer_name,
             }
         else:
             template = serialize_mongo_document(
