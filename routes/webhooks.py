@@ -244,7 +244,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "item_name": item_name,
                     "unit": item.get("unit", "pcs"),
                     "brand": brand_name,
-                    "status": item.get("status", "inactive"),
+                    "status": item.get("status", "active"),
                     "is_combo_product": item.get("is_combo_product", False),
                     "rate": item.get("rate", 1),
                     "item_tax_preferences": item.get("item_tax_preferences", []),
