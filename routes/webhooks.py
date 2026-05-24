@@ -1349,18 +1349,19 @@ def handle_accepted_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_number = estimate.get("estimate_number", "")
     if estimate_id != "":
-        template = serialize_mongo_document(
-            dict(db.templates.find_one({"name": "accepted_estimate"}))
-        )
+        template_doc = db.templates.find_one({"name": "accepted_estimate"})
+        if not template_doc:
+            print("Template 'accepted_estimate' not found, skipping notification")
+            return
+        template = serialize_mongo_document(dict(template_doc))
 
-        to1 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
-        )
-        to2 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "barksalesamit@gmail.com"}))
-        )
-
-        for to in [to1, to2]:
+        notify_emails = ["pupscribeinvoicee@gmail.com", "barksalesamit@gmail.com"]
+        for email in notify_emails:
+            user_doc = db.users.find_one({"email": email})
+            if not user_doc:
+                print(f"User {email} not found, skipping WhatsApp for accepted_estimate")
+                continue
+            to = serialize_mongo_document(dict(user_doc))
             params = {"name": to.get("first_name"), "estimate_number": estimate_number}
             send_whatsapp(to.get("phone"), {**template}, {**params})
     else:
@@ -1394,21 +1395,22 @@ def handle_draft_invoice(data: dict):
     invoice_id = invoice.get("invoice_id", "")
     invoice_number = invoice.get("invoice_number", "")
     if invoice_id != "":
-        member1 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
-        )
-        member2 = serialize_mongo_document(
-            dict(db.users.find_one({"designation": "Customer Care"}))
-        )
+        template_doc = db.templates.find_one({"name": "draft_invoice"})
+        if not template_doc:
+            print("Template 'draft_invoice' not found, skipping notification")
+            return
+        template = serialize_mongo_document(dict(template_doc))
 
-        template = serialize_mongo_document(
-            dict(db.templates.find_one({"name": "draft_invoice"}))
-        )
-        for person in [member1, member2]:
-            params = {
-                "name": person.get("first_name"),
-                "invoice_number": invoice_number,
-            }
+        recipients = []
+        for query in [{"email": "barkbutleracc@gmail.com"}, {"designation": "Customer Care"}]:
+            user_doc = db.users.find_one(query)
+            if user_doc:
+                recipients.append(serialize_mongo_document(dict(user_doc)))
+            else:
+                print(f"User matching {query} not found, skipping draft_invoice WhatsApp")
+
+        for person in recipients:
+            params = {"name": person.get("first_name"), "invoice_number": invoice_number}
             send_whatsapp(person.get("phone"), {**template}, {**params})
     else:
         print("Invoice Does Not Exist. Webhook Received")
@@ -1501,21 +1503,19 @@ def handle_shipment(data: dict):
         salesperson = invoice.get("salesperson_name", "")
         button_url = f"{invoice.get('_id')}"
 
-        sales_admin_1 = serialize_mongo_document(
-            dict(db.users.find_one({"designation": "Customer Care"}))
-        )
-        sales_admin_2 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeoffcoordinator@gmail.com"}))
-        )
-        sales_admin_3 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "events@barkbutler.in"}))
-        )
-        sales_admin_4 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "hitesh@barkbutler.in"}))
-        )
-        company_number = serialize_mongo_document(
-            dict(db.users.find_one({"role": "company_number"}))
-        )
+        def _safe_user(query: dict) -> dict:
+            """Fetch a user safely; returns an empty dict if not found."""
+            doc = db.users.find_one(query)
+            if not doc:
+                print(f"Shipment notification: user not found for query {query}")
+                return {}
+            return serialize_mongo_document(dict(doc))
+
+        sales_admin_1 = _safe_user({"designation": "Customer Care"})
+        sales_admin_2 = _safe_user({"email": "pupscribeoffcoordinator@gmail.com"})
+        sales_admin_3 = _safe_user({"email": "events@barkbutler.in"})
+        sales_admin_4 = _safe_user({"email": "hitesh@barkbutler.in"})
+        company_number = _safe_user({"role": "company_number"})
         all_salespeople = set()
         print("Custom Field Invoice Sales Person", invoice_sales_person)
         print("Invoice Sales Person", salesperson)

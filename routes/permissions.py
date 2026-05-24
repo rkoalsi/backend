@@ -167,16 +167,17 @@ class PermissionService:
         """Get all users (admin and sales_admin only)"""
         try:
             users_docs = list(self.users_collection.find({}).sort("name", 1))
-            # Convert ObjectId to string and add permissions for each user
+            # Convert ObjectId to string, add permissions, and strip secrets
             for doc in users_docs:
                 if '_id' in doc:
                     doc['_id'] = str(doc['_id'])
-                
+                # Issue 12: never expose password hashes
+                doc.pop("password", None)
                 # Get user permissions based on role
                 user_role = doc.get('role', '')
                 user_roles = [user_role] if user_role else []
                 doc['permissions'] = self.get_user_menu_items(user_roles)
-                
+
             return users_docs
         except Exception as e:
             print(f"Error fetching all users: {e}")
@@ -371,7 +372,7 @@ def get_user_permissions(credentials: HTTPAuthorizationCredentials = Depends(sec
     dashboard_sections = permission_service.get_user_dashboard_sections(user_roles)
 
     return {
-        "user_id": str(payload.get("user_id")),
+        "user_id": str(payload_data.get("_id", "")),
         "roles": user_roles,
         "menu_items": menu_items,
         "dashboard_sections": dashboard_sections,
@@ -396,7 +397,7 @@ def update_user(
     """Update user information with role-based restrictions"""
     payload_data = payload.get("data", {})
     current_user_role = payload_data.get("role", "")
-    current_user_id = str(payload.get("user_id", ""))
+    current_user_id = str(payload.get("data", {}).get("_id", ""))
     
     # Handle both string and list roles
     if isinstance(current_user_role, list):
@@ -426,7 +427,7 @@ def check_user_edit_permissions(
     """Check if current user can edit target user"""
     payload_data = payload.get("data", {})
     current_user_role = payload_data.get("role", "")
-    current_user_id = str(payload.get("user_id", ""))
+    current_user_id = str(payload.get("data", {}).get("_id", ""))
 
     # Handle both string and list roles
     if isinstance(current_user_role, list):
@@ -459,3 +460,37 @@ def update_permission_roles(
     if not success:
         raise HTTPException(status_code=404, detail="Permission not found")
     return {"message": "Permission updated successfully"}
+
+
+# Issue 11: this endpoint was called by Auth.tsx but did not exist
+@router.post("/check-permission")
+def check_permission(
+    permission_data: dict,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """Check whether the authenticated user holds a given permission resource."""
+    payload = decode_token(credentials)
+    payload_data = payload.get("data", {})
+    user_roles = payload_data.get("role", [])
+    if isinstance(user_roles, str):
+        user_roles = [user_roles]
+
+    resource = permission_data.get("resource")
+    action = permission_data.get("action", "read")
+
+    if not resource:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="resource is required"
+        )
+
+    permission_doc = permissions_collection.find_one({
+        "id": resource,
+        "is_active": True,
+        "allowed_roles": {"$in": user_roles},
+    })
+
+    return {
+        "has_permission": permission_doc is not None,
+        "resource": resource,
+        "action": action,
+    }
