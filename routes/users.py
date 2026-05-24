@@ -1,50 +1,68 @@
-from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request, Response
 from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import JWTBearer
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
-import os
+from bson.objectid import ObjectId
+import os, time
+from collections import defaultdict
 
 router = APIRouter()
 
 db = get_database()
 
-
-# Define constants for password reset
-PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = 60  # Token valid for 1 hour
-
-RESET_EMAIL_SENDER = os.getenv("RESET_EMAIL_SENDER")
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = os.getenv("SMTP_PORT")
-SMTP_USERNAME = os.getenv("SMTP_USERNAME")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL")
-# Password hashing setup
+# ── Constants ─────────────────────────────────────────────────────────────────
+# Issue 7: reduced from 7 days → 24 hours
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = 60
 
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM")
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440 * 7
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL")
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-db = get_database()
 users_collection = db["users"]
 password_resets_collection = db["password_resets"]
 
 
-def verify_password(plain_password, hashed_password):
-    return bcrypt.verify(plain_password, hashed_password)
+# ── Issue 9: simple in-memory rate limiter (no extra dependencies) ─────────────
+class _RateLimiter:
+    """Per-key sliding-window rate limiter backed by in-process memory.
+    Fine for single-process deployments; swap for Redis if you scale out."""
+
+    def __init__(self, max_attempts: int, window_seconds: int):
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._log: dict[str, list[float]] = defaultdict(list)
+
+    def is_limited(self, key: str) -> bool:
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        log = self._log[key]
+        # evict stale entries
+        self._log[key] = [t for t in log if t > cutoff]
+        if len(self._log[key]) >= self.max_attempts:
+            return True
+        self._log[key].append(now)
+        return False
 
 
-def hash_password(password):
+_login_limiter = _RateLimiter(max_attempts=5, window_seconds=300)       # 5 / 5 min
+_reset_limiter = _RateLimiter(max_attempts=3, window_seconds=3600)       # 3 / 1 hr
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.verify(plain, hashed)
+
+
+def hash_password(password: str) -> str:
     return bcrypt.hash(password)
 
 
-def find_user_by_email(email: str):
-    user = db.users.find_one({"email": email})
-    return True if user else False
+def find_user_by_email(email: str) -> bool:
+    return db.users.find_one({"email": email}) is not None
 
 
 def authenticate_user(email: str, password: str):
@@ -54,25 +72,48 @@ def authenticate_user(email: str, password: str):
     return serialize_mongo_document(user)
 
 
-def create_access_token(data: dict, expires_delta: timedelta = None):
+def _minimal_payload(user: dict) -> dict:
+    """Issue 6: store only what downstream code actually needs.
+    Keeps the existing {"data": {...}} envelope so permissions.py stays compatible."""
+    return {
+        "_id": str(user["_id"]),
+        "email": user.get("email", ""),
+        "role": user.get("role", ""),
+        "customer_id": user.get("customer_id"),
+        "name": user.get("name", ""),
+    }
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    to_encode.update({"exp": expire})
+    to_encode["exp"] = expire
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def send_reset_email(to_email: str, reset_link: str):
-    """Simple HTTP-based email sending."""
-    import requests
-    
+def _set_auth_cookie(response: Response, token: str) -> None:
+    """Issue 8: write the token into an HttpOnly cookie so JS cannot read it."""
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,       # no JS access
+        secure=os.getenv("ENVIRONMENT", "development") == "production",
+        samesite="lax",      # protects against CSRF while allowing same-site nav
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
+
+def send_reset_email(to_email: str, reset_link: str) -> bool:
+    import requests as req_lib
+
     url = "https://api.resend.com/emails"
     headers = {
         "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    
     data = {
         "from": "no-reply@no-reply.pupscribe.in",
         "to": [to_email],
@@ -82,39 +123,32 @@ def send_reset_email(to_email: str, reset_link: str):
                 <h2 style="color: #333;">Password Reset Request</h2>
                 <p>You requested a password reset for your Order Form account.</p>
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="{reset_link}" 
-                       style="background-color: #007bff; color: white; padding: 12px 30px; 
+                    <a href="{reset_link}"
+                       style="background-color: #007bff; color: white; padding: 12px 30px;
                               text-decoration: none; border-radius: 5px; display: inline-block;">
                         Reset Your Password
                     </a>
                 </div>
                 <p style="color: #666; font-size: 14px;">
                     If you did not request this reset, please ignore this email.
-                    This link will expire in 24 hours.
+                    This link will expire in 1 hour.
                 </p>
                 <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-                <p style="color: #999; font-size: 12px;">
-                    Thanks,<br>The Pupscribe Team
-                </p>
+                <p style="color: #999; font-size: 12px;">Thanks,<br>The Pupscribe Team</p>
             </div>
-            """
+        """,
     }
-    
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=10)
-        response.raise_for_status()
-        
-        result = response.json()
-        print(f"✅ Email sent! ID: {result.get('id')}")
+        r = req_lib.post(url, headers=headers, json=data, timeout=10)
+        r.raise_for_status()
+        print(f"✅ Reset email sent: {r.json().get('id')}")
         return True
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ HTTP request failed: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"Response: {e.response.text}")
+    except req_lib.exceptions.RequestException as e:
+        print(f"❌ Reset email failed: {e}")
         return False
-    
-# Pydantic models
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -125,7 +159,6 @@ class UserLogin(BaseModel):
     password: str
 
 
-# Pydantic models for password reset
 class PasswordResetRequest(BaseModel):
     email: EmailStr
 
@@ -135,23 +168,24 @@ class PasswordResetConfirm(BaseModel):
     new_password: str
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 @router.post("/register")
-async def register_user(user: dict):
-    # Check if user already exists
-    existing_user = find_user_by_email(user.get("email", ""))
-    if existing_user:
+async def register_user(user: UserCreate, response: Response):
+    if find_user_by_email(user.email):
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # Hash the password
-    hashed_password = hash_password(user.get("password"))
-
-    # Insert user into the database
-    user_data = {"email": user.get("email", ""), "password": hashed_password}
-    result = users_collection.insert_one(user_data)
+    hashed = hash_password(user.password)
+    result = users_collection.insert_one(
+        {"email": user.email, "password": hashed, "role": "customer"}
+    )
     if not result:
         raise HTTPException(status_code=400, detail="Error inserting user in database")
 
-    access_token = create_access_token(data={"data": user["email"]})
+    # Issue 6: minimal payload
+    token_payload = {"_id": str(result.inserted_id), "email": user.email, "role": "customer", "customer_id": None, "name": None}
+    access_token = create_access_token(data={"data": token_payload})
+    _set_auth_cookie(response, access_token)
     return {
         "message": "User registered successfully",
         "user_id": str(result.inserted_id),
@@ -160,128 +194,167 @@ async def register_user(user: dict):
 
 
 @router.post("/login")
-async def login_user(user: UserLogin, request: Request, background_tasks: BackgroundTasks):
-    # Find user by email
-    user = authenticate_user(user.email, user.password)
-    if not user:
+async def login_user(
+    user: UserLogin,
+    response: Response,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    # Issue 9: rate-limit by IP
+    client_ip = request.client.host if request.client else "unknown"
+    if _login_limiter.is_limited(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please wait 5 minutes before trying again.",
+        )
+
+    authenticated = authenticate_user(user.email, user.password)
+    if not authenticated:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token = create_access_token(data={"data": user})
+
+    # Issue 6: minimal JWT payload
+    access_token = create_access_token(data={"data": _minimal_payload(authenticated)})
+
+    # Issue 8: write HttpOnly cookie
+    _set_auth_cookie(response, access_token)
 
     # Log login activity for customer accounts
-    if user.get("customer_id"):
+    if authenticated.get("customer_id"):
         from .customer_activity import log_activity, extract_client_info
+
         ip, ua = extract_client_info(request)
         customer_name = (
-            user.get("contact_name")
-            or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            authenticated.get("contact_name")
+            or f"{authenticated.get('first_name', '')} {authenticated.get('last_name', '')}".strip()
         )
         background_tasks.add_task(
             log_activity,
             action="login",
             category="auth",
-            user_id=user.get("_id"),
-            customer_id=user.get("customer_id"),
+            user_id=authenticated.get("_id"),
+            customer_id=authenticated.get("customer_id"),
             customer_name=customer_name,
-            email=user.get("email"),
+            email=authenticated.get("email"),
             metadata={},
             ip_address=ip,
             user_agent=ua,
         )
 
+    # Return the token in the body as well for clients that prefer header-based auth
     return {
         "message": "Login successful",
-        "user_id": user["_id"],
-        "user": user,
+        "user_id": authenticated["_id"],
+        "user": authenticated,
         "access_token": access_token,
     }
 
 
+@router.post("/logout")
+async def logout(response: Response):
+    """Issue 8: clear the auth cookie server-side."""
+    response.delete_cookie(key="access_token", path="/")
+    return {"message": "Logged out successfully"}
+
+
 @router.get("/me")
-async def read_users_me(token: str = Depends(oauth2_scheme)):
+async def read_users_me(token: str = Depends(JWTBearer())):
+    """Return fresh user data from the database for the authenticated caller."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("data")
-        if email is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication",
-            )
-        return {"email": email}
     except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user_data = payload.get("data", {})
+
+    # Support both new minimal payload (dict with _id) and legacy payload (email string)
+    if isinstance(user_data, dict):
+        user_id = user_data.get("_id")
+    else:
+        # Old token: data == email string — look up by email
+        user = db.users.find_one({"email": user_data})
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+        user = serialize_mongo_document(user)
+        user.pop("password", None)
+        return {"user": user}
+
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+
+    # Guard against stale/malformed _id values (e.g. "undefined" from old sessions)
+    try:
+        obj_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+
+    user = db.users.find_one({"_id": obj_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user = serialize_mongo_document(user)
+    user.pop("password", None)
+    return {"user": user}
 
 
-# Endpoint to request password reset
 @router.post("/forgot_password")
 async def forgot_password(
-    request: PasswordResetRequest, background_tasks: BackgroundTasks
+    request: Request,
+    body: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
 ):
-    user = db.users.find_one({"email": request.email})
+    # Issue 9: rate-limit password-reset requests by IP
+    client_ip = request.client.host if request.client else "unknown"
+    if _reset_limiter.is_limited(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many reset requests. Please wait before trying again.",
+        )
+
+    user = db.users.find_one({"email": body.email})
+    # Generic message prevents email enumeration
     if not user:
-        # To prevent email enumeration, respond with a generic message
         return {"message": "If the email exists, a reset link has been sent."}
 
-    # Generate a reset token
     reset_token = create_access_token(
-        data={"email": request.email},
+        data={"email": body.email},
         expires_delta=timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
     )
-
-    # Store the reset token in the database
-    reset_entry = {
-        "email": request.email,
-        "token": reset_token,
-        "expires_at": datetime.utcnow()
-        + timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
-    }
-    password_resets_collection.insert_one(reset_entry)
-
-    # Create the reset link
+    password_resets_collection.insert_one(
+        {
+            "email": body.email,
+            "token": reset_token,
+            "expires_at": datetime.utcnow() + timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
+        }
+    )
     reset_link = f"{FRONTEND_RESET_URL}?token={reset_token}"
-
-    # Send the reset email in the background
-    background_tasks.add_task(send_reset_email, request.email, reset_link)
-
+    background_tasks.add_task(send_reset_email, body.email, reset_link)
     return {"message": "If the email exists, a reset link has been sent."}
 
 
-# Endpoint to reset the password
 @router.post("/reset_password")
 async def reset_password(confirm: PasswordResetConfirm):
     try:
-        # Decode the token to get the email
         payload = jwt.decode(confirm.token, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("email")
-        if email is None:
+        if not email:
             raise HTTPException(status_code=400, detail="Invalid token")
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid token")
 
-    # Retrieve the reset entry from the database
     reset_entry = password_resets_collection.find_one(
         {"token": confirm.token, "email": email}
     )
     if not reset_entry:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
-
     if reset_entry["expires_at"] < datetime.utcnow():
-        # Token has expired
         password_resets_collection.delete_one({"_id": reset_entry["_id"]})
         raise HTTPException(status_code=400, detail="Token has expired")
 
-    # Hash the new password
-    hashed_password = hash_password(confirm.new_password)
-
-    # Update the user's password in the database
-    db.users.update_one({"email": email}, {"$set": {"password": hashed_password}})
-
-    # Remove the used reset token
+    db.users.update_one(
+        {"email": email}, {"$set": {"password": hash_password(confirm.new_password)}}
+    )
     password_resets_collection.delete_one({"_id": reset_entry["_id"]})
-
     return {"message": "Password has been reset successfully"}
