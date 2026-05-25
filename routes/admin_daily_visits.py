@@ -273,6 +273,43 @@ async def delete_reply(daily_visit_id: str, comment_id: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.get("/salespeople")
+async def get_daily_visit_salespeople():
+    """
+    Return distinct salespeople (name + _id) who have created daily visits.
+    Used to populate the salesperson filter dropdown.
+    """
+    try:
+        pipeline = [
+            {
+                "$lookup": {
+                    "from": "users",
+                    "localField": "created_by",
+                    "foreignField": "_id",
+                    "as": "user_info",
+                }
+            },
+            {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": False}},
+            {
+                "$group": {
+                    "_id": "$user_info._id",
+                    "name": {"$first": "$user_info.name"},
+                }
+            },
+            {"$sort": {"name": 1}},
+        ]
+        results = list(db.daily_visits.aggregate(pipeline))
+        salespeople = [
+            {"_id": str(r["_id"]), "name": r.get("name", "N/A")}
+            for r in results
+            if r.get("name")
+        ]
+        return JSONResponse(status_code=200, content={"salespeople": salespeople})
+    except Exception as e:
+        print(str(e))
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.get("")
 async def get_daily_visits(request: Request):
     page = int(request.query_params.get("page", 0))
@@ -281,6 +318,7 @@ async def get_daily_visits(request: Request):
     # Get date filter parameters
     start_date = request.query_params.get("start_date")
     end_date = request.query_params.get("end_date")
+    salesperson_name = request.query_params.get("salesperson_name")
 
     # Initialize filter condition
     filter_condition = {}
@@ -298,6 +336,17 @@ async def get_daily_visits(request: Request):
             # Convert string to datetime and set to end of day (23:59:59)
             end_datetime = datetime.datetime.strptime(end_date, "%Y-%m-%d")
             filter_condition["created_at"]["$lt"] = end_datetime
+
+    # Add salesperson filter if provided (look up by name)
+    if salesperson_name:
+        matched_users = list(
+            db.users.find(
+                {"name": {"$regex": salesperson_name, "$options": "i"}},
+                {"_id": 1},
+            )
+        )
+        user_ids = [u["_id"] for u in matched_users]
+        filter_condition["created_by"] = {"$in": user_ids}
 
     pipeline = [
         {"$match": filter_condition},
@@ -448,6 +497,7 @@ def get_daily_visits_report(request: Request):
     # Get date filter parameters from query
     start_date = request.query_params.get("start_date")
     end_date = request.query_params.get("end_date")
+    salesperson_name = request.query_params.get("salesperson_name")
 
     # Base query
     match_query = {}
@@ -465,6 +515,17 @@ def get_daily_visits_report(request: Request):
             # Convert string to datetime and set to end of day (23:59:59)
             end_datetime = datetime.datetime.strptime(end_date, "%Y-%m-%d")
             match_query["created_at"]["$lt"] = end_datetime
+
+    # Add salesperson filter if provided (look up by name)
+    if salesperson_name:
+        matched_users = list(
+            db.users.find(
+                {"name": {"$regex": salesperson_name, "$options": "i"}},
+                {"_id": 1},
+            )
+        )
+        user_ids = [u["_id"] for u in matched_users]
+        match_query["created_by"] = {"$in": user_ids}
 
     # Start with match stage if we have date filters
     query = []
@@ -679,8 +740,11 @@ def get_daily_visits_report(request: Request):
     wb.save(stream)
     stream.seek(0)
 
-    # Add date range to filename if dates are selected
+    # Add date range and salesperson to filename if filters are active
     filename = "daily_visits_report"
+    if salesperson_name:
+        safe_name = salesperson_name.replace(" ", "_")
+        filename += f"_{safe_name}"
     if start_date and end_date:
         filename += f"_{start_date}_to_{end_date}"
     elif start_date:
