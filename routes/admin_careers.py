@@ -124,6 +124,13 @@ def permanent_delete_career(career_id: str):
         if not doc:
             raise HTTPException(status_code=404, detail="Career not found")
 
+        application_count = db.career_applications.count_documents({"career_id": obj_id})
+        if application_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete this career — {application_count} application(s) have been submitted for this role.",
+            )
+
         db.careers.delete_one({"_id": obj_id})
         return {"detail": "Career deleted permanently"}
     except HTTPException:

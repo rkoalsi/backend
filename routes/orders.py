@@ -3,7 +3,7 @@ from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket, re, io
@@ -18,7 +18,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from pymongo import DESCENDING, ASCENDING
 from pathlib import Path
 from collections import defaultdict
 
@@ -134,8 +133,8 @@ def create_order(order: dict, collection: Collection) -> str:
             for item in products
         ]
     order["created_by"] = ObjectId(order.get("created_by", ""))
-    order["created_at"] = datetime.utcnow()
-    order["updated_at"] = datetime.utcnow()
+    order["created_at"] = datetime.now()
+    order["updated_at"] = datetime.now()
 
     # Insert the document into MongoDB
     result = collection.insert_one(order)
@@ -220,7 +219,7 @@ def update_order(
     order_collection: Collection,
     customer_collection: Collection,
 ):
-    order_update["updated_at"] = datetime.utcnow()
+    order_update["updated_at"] = datetime.now()
     if "created_by" in order_update:
         order_update["created_by"] = ObjectId(order_update.get("created_by"))
     # Handle customer updates
@@ -402,13 +401,27 @@ def validate_order(order_id: str):
 
 # Create a new order
 @router.post("/")
-def create_new_order(order: dict):
+def create_new_order(order: dict, request: Request, background_tasks: BackgroundTasks):
     """
     Create a new order with raw dictionary data.
     """
     try:
         order_id = create_order(order, orders_collection)
         order["_id"] = order_id  # Add the generated ID back to the response
+
+        created_by = order.get("created_by")
+        if created_by:
+            from .customer_activity import log_order_activity_for_user, extract_client_info
+            ip, ua = extract_client_info(request)
+            background_tasks.add_task(
+                log_order_activity_for_user,
+                action="create_order",
+                user_id=str(created_by),
+                metadata={"order_id": str(order_id)},
+                ip_address=ip,
+                user_agent=ua,
+            )
+
         return serialize_mongo_document(order)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1645,7 +1658,7 @@ def clear_order_cart(order_id: str):
 
 # Finalise an order (Create Estimate)
 @router.post("/finalise")
-async def finalise(order_dict: dict):
+async def finalise(order_dict: dict, request: Request, background_tasks: BackgroundTasks):
     """
     finalise an existing order
     """
@@ -1671,6 +1684,27 @@ async def finalise(order_dict: dict):
     created_by = order.get("created_by")
     user = users_collection.find_one({"_id": ObjectId(created_by)})
     reference_number = order.get("reference_number", "")
+
+    # Log finalize activity for customer accounts
+    if user and user.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+        ip, ua = extract_client_info(request)
+        customer_name = (
+            user.get("contact_name")
+            or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        )
+        background_tasks.add_task(
+            log_activity,
+            action="finalize_order",
+            category="orders",
+            user_id=str(user["_id"]),
+            customer_id=user.get("customer_id"),
+            customer_name=customer_name,
+            email=user.get("email"),
+            metadata={"order_id": order_id, "status": status},
+            ip_address=ip,
+            user_agent=ua,
+        )
     # Fetch SPecial Margins
     customer_id = order.get("customer_id")
     special_margins_cursor = db.special_margins.find(
@@ -1725,6 +1759,10 @@ async def finalise(order_dict: dict):
 
     if not estimate_created:
         async with httpx.AsyncClient(timeout=timeout) as client:
+            # Compute current financial year string (April–March) first
+            now = datetime.now()
+            fy_start = now.year if now.month >= 4 else now.year - 1
+            fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
             y = await client.get(
                 url=ESTIMATE_URL.format(org_id=org_id)
                 + "&filter_by=Status.All&per_page=200&sort_column=estimate_number&sort_order=D",
@@ -1732,15 +1770,42 @@ async def finalise(order_dict: dict):
             )
             if y.status_code != 200:
                 return {"status": "error", "message": f"{y.json().get('message','')}"}
-            last_estimate_number = str(
-                y.json()["estimates"][0]["estimate_number"]
-            ).split("/")
-            new_last_part = str(int(last_estimate_number[-1]) + 1).zfill(
-                len(last_estimate_number[-1])
+            all_estimates = y.json().get("estimates", [])
+            # Find the last estimate for the current FY only
+            fy_estimates = [
+                e for e in all_estimates if f"/{fy_str}/" in e.get("estimate_number", "")
+            ]
+            # Use the first matching estimate (list is sorted descending by estimate_number)
+            if fy_estimates:
+                last_estimate_number = str(fy_estimates[0]["estimate_number"]).split("/")
+                last_num = int(last_estimate_number[-1])
+                num_width = len(last_estimate_number[-1])
+                prefix = last_estimate_number[0]
+            else:
+                # No estimates yet for this FY — start from 0, use defaults from most recent estimate
+                last_estimate_number = str(all_estimates[0]["estimate_number"]).split("/") if all_estimates else ["EST"]
+                last_num = 0
+                num_width = len(last_estimate_number[-1]) if len(last_estimate_number) > 1 else 4
+                prefix = last_estimate_number[0]
+            # Sync the counter up to current FY's last value, then atomically claim the next number.
+            # Per-FY counter key prevents cross-year contamination.
+            # $max ensures the counter never goes backwards (handles out-of-band Zoho estimates).
+            # $inc is atomic, so concurrent requests each get a unique sequential number.
+            counter_id = f"estimate_counter_{fy_str}"
+            db.counters.update_one(
+                {"_id": counter_id},
+                {"$max": {"seq": last_num}},
+                upsert=True,
             )
+            counter = db.counters.find_one_and_update(
+                {"_id": counter_id},
+                {"$inc": {"seq": 1}},
+                return_document=True,
+            )
+            new_last_part = str(counter["seq"]).zfill(num_width)
             # Reconstruct the estimate number
             new_estimate_number = (
-                f"{last_estimate_number[0]}/{last_estimate_number[1]}/{new_last_part}"
+                f"{prefix}/{fy_str}/{new_last_part}"
             )
             # Prepare the request payload
             payload = {
@@ -2035,7 +2100,7 @@ async def clear_sheet(order_id: str):
             {
                 "$set": {
                     "spreadsheet_created": False,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now()
                 },
                 "$unset": {
                     "spreadsheet_url": "",

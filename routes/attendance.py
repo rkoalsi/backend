@@ -142,8 +142,8 @@ def in_and_out(request: Request):
                 employee_id = str(employee["_id"])
                 employee_name = employee["name"]
                 employee_number = employee["employee_number"]
-                device_id = employee.get("device_id", "Unknown")
-                device = device_collection.find_one({"_id": ObjectId(device_id)})
+                device_id = employee.get("device_id")
+                device = device_collection.find_one({"_id": ObjectId(device_id)}) if device_id and len(str(device_id)) == 24 else None
                 print(f"Employee ID: {employee_id}, Name: {employee_name}")
 
                 # Check if employee has already swiped in today
@@ -175,7 +175,7 @@ def in_and_out(request: Request):
                     "swipe_datetime": swipe_datetime,
                     "device_name": (
                         ObjectId(device_id)
-                        if isinstance(device_id, str) and len(device_id) == 24
+                        if device_id and isinstance(device_id, str) and len(device_id) == 24
                         else device_id
                     ),
                     "created_at": datetime.now(),
@@ -185,7 +185,7 @@ def in_and_out(request: Request):
 
                 # Send to GreyTHR
                 success, message = send_attendance_to_greythr(
-                    door=device.get("name"),
+                    door=device.get("name") if device else "Unknown",
                     employee_number=employee_number,
                     is_in=is_check_in,
                     swipe_datetime_str=swipe_datetime_str,

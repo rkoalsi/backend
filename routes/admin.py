@@ -30,7 +30,6 @@ from .admin_potential_customers import router as admin_potential_customers_route
 from .admin_expected_reorders import router as admin_expected_reorders_router
 from .admin_targeted_customers import router as admin_targeted_customers_router
 from .webhooks import update_stock_lock, run_update_stock
-from .admin_delivery_partners import router as admin_delivery_partners_router
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
@@ -42,6 +41,7 @@ from .admin_users import router as admin_users_router
 from .admin_careers import router as admin_careers_router
 from .admin_career_applications import router as admin_career_applications_router
 from .admin_contact_leads import router as admin_contact_submissions_router
+from .admin_chats import router as admin_chats_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -775,8 +775,7 @@ def get_misc_stats(start_of_today_ist):
         
         # General counts
         general_counts_future = executor.submit(lambda: {
-            "delivery_partners": db["delivery_partners"].count_documents({}),
-            "return_orders": db["return_orders"].count_documents({}),
+"return_orders": db["return_orders"].count_documents({}),
             "brands": db["brands"].count_documents({}),
             "external_links": db["external_links"].count_documents({}),
             "permissions":db["permissions"].count_documents({"is_active":True}),
@@ -1443,6 +1442,36 @@ def get_customers_report(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=customers_report.xlsx"},
     )
+
+
+@router.delete("/customers/{customer_id}")
+def delete_customer(customer_id: str):
+    try:
+        result = customers_collection.delete_one({"_id": ObjectId(customer_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        return {"message": "Customer deleted successfully"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.delete("/customers/{customer_id}/address/{address_id}")
+def delete_customer_address(customer_id: str, address_id: str):
+    try:
+        result = customers_collection.update_one(
+            {"_id": ObjectId(customer_id)},
+            {"$pull": {"addresses": {"address_id": address_id}}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        db["customer_address_details"].delete_one(
+            {"customer_id": customer_id, "address_id": address_id}
+        )
+        return {"message": "Address deleted successfully"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 @router.get("/orders")
@@ -2890,6 +2919,90 @@ async def update_brand_image(file: UploadFile = File(...), brand_name: str = For
         print(f"Database update error for brand '{brand_name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
 
+
+@router.put("/brands/secondary_image")
+async def update_brand_secondary_image(file: UploadFile = File(...), brand_name: str = Form(...)):
+    if not brand_name or not brand_name.strip():
+        raise HTTPException(status_code=400, detail="Brand name is required")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    brand_name = brand_name.strip()
+
+    S3_URL_BASE = os.getenv("S3_URL")
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+
+    if not s3_client or not S3_BUCKET_NAME or not S3_URL_BASE:
+        raise HTTPException(status_code=500, detail="S3 configuration missing or failed to initialize.")
+
+    file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else "jpg"
+    ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "svg", "webp", "gif"}
+
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    try:
+        file_content = await file.read()
+        if len(file_content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
+
+    image_s3_key = f"brands/{slugify(brand_name.lower())}_secondary.{file_extension}"
+
+    try:
+        s3_client.upload_fileobj(
+            io.BytesIO(file_content),
+            S3_BUCKET_NAME,
+            image_s3_key,
+            ExtraArgs={"ACL": "public-read", "ContentType": file.content_type},
+        )
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {e.response['Error']['Code']}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to upload image to S3")
+
+    new_image_url = f"{S3_URL_BASE}/brands/{slugify(brand_name.lower())}_secondary.{file_extension}"
+
+    try:
+        db.brands.update_one(
+            {"name": brand_name},
+            {"$set": {"secondary_image_url": new_image_url}},
+        )
+        return {"message": f"Brand secondary image updated for '{brand_name}'.", "secondary_image_url": new_image_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update database: {e}")
+
+
+@router.put("/brands/{brand_id}")
+async def update_brand(brand_id: str, payload: dict):
+    from bson import ObjectId
+
+    allowed_fields = {"description", "status", "hidden"}
+    update_data = {k: v for k, v in payload.items() if k in allowed_fields}
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    try:
+        result = db.brands.update_one(
+            {"_id": ObjectId(brand_id)},
+            {"$set": update_data},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Brand not found")
+        return {"message": "Brand updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update brand: {e}")
+
+
 @router.put("/products/{product_id}")
 async def update_product(
     product_id: str,
@@ -3129,12 +3242,6 @@ router.include_router(
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
-    admin_delivery_partners_router,
-    prefix="/delivery_partners",
-    tags=["Admin Delivery Partners"],
-    dependencies=[Depends(JWTBearer())],
-)
-router.include_router(
     admin_return_orders_router,
     prefix="/return_orders",
     tags=["Admin Return Orders"],
@@ -3198,5 +3305,11 @@ router.include_router(
     admin_contact_submissions_router,
     prefix="/contact_submissions",
     tags=["Admin Contact Submissions"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_chats_router,
+    prefix="/chats",
+    tags=["Admin Chats"],
     dependencies=[Depends(JWTBearer())],
 )

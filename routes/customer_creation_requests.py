@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -10,9 +10,34 @@ import os
 import requests
 import logging
 import datetime as dt
+import boto3
+import time
+import re
+from gstin_validator.core import validate_gstin as _validate_gstin_checksum
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# S3 configuration
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_REGION = os.getenv("S3_REGION")
+
+_GSTIN_PATTERN = re.compile(r"^(\d{2})([A-Z]{5}\d{4}[A-Z])(\d)([A-Z])([0-9A-Z])$")
+
+ALLOWED_DOC_TYPES = {"gst_certificate", "pan_card", "aadhar"}
+
+
+def validate_gstin_full(gst_number: str) -> dict:
+    """Validate GSTIN format via regex then verify checksum digit."""
+    gst_number = gst_number.strip().upper()
+    if not _GSTIN_PATTERN.match(gst_number):
+        return {"valid": False, "error": "Invalid GSTIN format"}
+    if not _validate_gstin_checksum(gst_number):
+        return {"valid": False, "error": "Invalid GSTIN checksum digit"}
+    return {"valid": True}
+
 
 # Zoho configuration from environment variables
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -57,6 +82,10 @@ class CustomerCreationRequest(BaseModel):
     gst_treatment: Optional[str] = None
     pincode: Optional[str] = None
     in_ex: Optional[str] = None
+    # Document upload URLs
+    gst_certificate_url: Optional[str] = None
+    pan_card_url: Optional[str] = None
+    aadhar_url: Optional[str] = None
 
 
 class CommentCreate(BaseModel):
@@ -608,12 +637,25 @@ def create_zoho_contact(
     }
 
     # Build the contact payload according to Zoho Books API
+    payment_terms_label = customer_data.get("payment_terms", "")
+    payment_terms_days_map = {
+        "Due On Receipt": 0,
+        "Upfront": 0,
+        "Immediate": 0,
+        "Net 15": 15,
+        "Net 30": 30,
+        "Net 45": 45,
+        "Net 60": 60,
+    }
+    payment_terms_days = payment_terms_days_map.get(payment_terms_label, 0)
+
     contact_payload = {
         "contact_name": customer_data.get("shop_name", ""),
         "company_name": customer_data.get("shop_name", ""),
         "contact_type": "customer",
         "customer_sub_type": "business",
-        "payment_terms_label": customer_data.get("payment_terms", ""),
+        "payment_terms": payment_terms_days,
+        "payment_terms_label": payment_terms_label,
     }
 
     # Add custom fields
@@ -823,6 +865,12 @@ async def create_customer_request(
 ):
     """Create a new customer creation request"""
     try:
+        # Validate GSTIN if provided
+        if request_data.gst_no:
+            result = validate_gstin_full(request_data.gst_no)
+            if not result["valid"]:
+                raise HTTPException(status_code=422, detail=f"GSTIN validation failed: {result['error']}")
+
         db = get_database()
 
         # Extract user data from JWT payload (nested under "data" key)
@@ -872,6 +920,9 @@ async def create_customer_request(
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
             "pincode": request_data.pincode,
+            "gst_certificate_url": request_data.gst_certificate_url,
+            "pan_card_url": request_data.pan_card_url,
+            "aadhar_url": request_data.aadhar_url,
             "created_by": user_id,
             "created_by_name": created_by_name,
             "created_at": datetime.now(),
@@ -920,6 +971,72 @@ async def create_customer_request(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _get_s3_client():
+    return boto3.client(
+        "s3",
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+    )
+
+
+@router.post("/upload-document")
+async def upload_customer_document(
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a customer document (GST certificate, PAN card, or Aadhaar) to S3."""
+    if doc_type not in ALLOWED_DOC_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid doc_type. Must be one of: {', '.join(ALLOWED_DOC_TYPES)}",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+    timestamp = int(time.time())
+    s3_key = f"customer_documents/{doc_type}/{timestamp}{ext}"
+
+    try:
+        s3 = _get_s3_client()
+        s3.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=content,
+            ContentType=file.content_type or "application/octet-stream",
+            ACL="public-read",
+        )
+    except Exception as e:
+        logger.error(f"S3 upload error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload document to S3")
+
+    url = f"https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{s3_key}"
+    return {"url": url, "key": s3_key}
+
+
+@router.delete("/document")
+async def delete_customer_document(
+    key: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a previously uploaded customer document from S3."""
+    if not key.startswith("customer_documents/"):
+        raise HTTPException(status_code=400, detail="Invalid document key")
+
+    try:
+        s3 = _get_s3_client()
+        s3.delete_object(Bucket=S3_BUCKET_NAME, Key=key)
+    except Exception as e:
+        logger.error(f"S3 delete error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document from S3")
+
+    return {"message": "Document deleted successfully"}
+
+
 @router.get("/")
 async def get_customer_requests(
     current_user: dict = Depends(get_current_user),
@@ -931,18 +1048,14 @@ async def get_customer_requests(
     try:
         db = get_database()
 
-        # Extract user data from JWT payload (nested under "data" key)
         user_data = current_user.get("data", {})
 
-        # Get user_id as ObjectId
         user_id = user_data.get("_id")
         if isinstance(user_id, str):
             user_id = ObjectId(user_id)
 
-        # Build filter
         filter_query = {}
 
-        # If user is sales_person, only show their own requests
         user_role = user_data.get("role", "")
         if user_role == "sales_person":
             filter_query["created_by"] = user_id
@@ -950,21 +1063,51 @@ async def get_customer_requests(
         if status:
             filter_query["status"] = status
 
-        # Calculate skip value
         skip = (page - 1) * limit
 
-        # Get total count
         total_count = db.customer_creation_requests.count_documents(filter_query)
 
-        # Get requests sorted by latest first
-        requests = list(
-            db.customer_creation_requests.find(filter_query)
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(limit)
-        )
+        pipeline = [
+            {"$match": filter_query},
 
-        # Serialize the results
+            # Lookup customers collection
+            {
+                "$lookup": {
+                    "from": "customers",
+                    "localField": "zoho_contact_id",
+                    "foreignField": "contact_id",
+                    "as": "customer_data",
+                }
+            },
+
+            # Flatten customer_data
+            {
+                "$unwind": {
+                    "path": "$customer_data",
+                    "preserveNullAndEmptyArrays": True
+                }
+            },
+
+            # Conditionally populate company_name
+            {
+                "$addFields": {
+                    "zoho_customer_name": {
+                        "$cond": [
+                            {"$eq": ["$status", "created_on_zoho"]},
+                            "$customer_data.company_name",
+                            "$company_name",
+                        ]
+                    }
+                }
+            },
+
+            {"$sort": {"created_at": -1}},
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+
+        requests = list(db.customer_creation_requests.aggregate(pipeline))
+
         serialized_requests = [serialize_mongo_document(req) for req in requests]
 
         return {
@@ -977,7 +1120,6 @@ async def get_customer_requests(
     except Exception as e:
         print(f"Error fetching customer requests: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.put("/{request_id}/status")
 async def update_request_status(
@@ -1495,6 +1637,9 @@ async def update_customer_request(
             "gst_treatment": request_data.gst_treatment,
             "pincode": request_data.pincode,
             "in_ex": request_data.in_ex,
+            "gst_certificate_url": request_data.gst_certificate_url,
+            "pan_card_url": request_data.pan_card_url,
+            "aadhar_url": request_data.aadhar_url,
             "updated_at": datetime.now(),
             "updated_by": user_id,
         }

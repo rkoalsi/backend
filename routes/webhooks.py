@@ -151,114 +151,72 @@ def parse_datetime(value):
         return datetime.datetime.now()
 
 
-brands = {
-    "zippy": "Zippy Paws",
-    "waggie": "Waggie Wag",
-    "fofos": "FOFOS",
-    "truelove": "Truelove",
-    "barkbutler": "Barkbutler",
-    "dogfest": "Dogfest",
-    "catfest": "Catfest",
-    "dux": "Dux",
-    "squeeezys": "Squeeezys",
-    "joyser": "Joyser",
-}
-
-
-def extract_brand_from_product(product_name):
-    """Extract brand name from product name."""
-    words = product_name.split()
-    if not words:
-        return ""
-
-    if words[0].lower() in brands.keys():
-        return brands[words[0].lower()]
-
 
 def create_special_margins_for_new_product(
     product_id: str, product_name: str, brand_name: str
 ):
     """
     Background task to create special margins for a new product based on existing brand margins.
+    Queries by the stored brand field directly instead of inferring brand from product names.
+    Uses the most common (mode) margin for that brand per customer as the tiebreaker.
     """
     try:
-        # MongoDB connection (you might want to use your existing db connection)
-
         print(
             f"Creating special margins for new product: {product_name} (Brand: {brand_name})"
         )
 
-        # Get all existing special margins to find customers with this brand
-        existing_margins = list(
-            db.special_margins.find({}, {"customer_id": 1, "name": 1, "margin": 1})
+        # Find all customers that already have margins for this brand using the brand field.
+        existing_brand_margins = list(
+            db.special_margins.find(
+                {"brand": brand_name},
+                {"customer_id": 1, "margin": 1}
+            )
         )
 
-        # Group by customer and extract brand margins
-        customer_brand_margins = defaultdict(dict)
+        if not existing_brand_margins:
+            print(f"No customers have margins for brand '{brand_name}', nothing to do")
+            return
 
-        for margin_doc in existing_margins:
-            customer_id = str(margin_doc.get("customer_id"))
-            product_name_in_margin = str(margin_doc.get("name", ""))
-            margin_value = margin_doc.get("margin")
-
-            if customer_id and margin_value is not None:
-                # Extract brand from the product name in special margins
-                brand_from_margin = extract_brand_from_product(product_name_in_margin)
-
-                # If this customer doesn't have this brand margin yet, add it
-                if (
-                    brand_from_margin
-                    and brand_from_margin not in customer_brand_margins[customer_id]
-                ):
-                    customer_brand_margins[customer_id][
-                        brand_from_margin
-                    ] = margin_value
-
-        # Check if any customers have margins for this brand
-        customers_with_brand_margins = []
-        for customer_id, brand_margins in customer_brand_margins.items():
-            if brand_name in brand_margins:
-                customers_with_brand_margins.append(
-                    {
-                        "customer_id": customer_id,
-                        "margin": brand_margins[brand_name],
-                    }
-                )
+        # Group margins by customer and pick the mode (most common) margin per customer.
+        customer_margins = defaultdict(list)
+        for doc in existing_brand_margins:
+            cid = doc.get("customer_id")
+            margin = doc.get("margin")
+            if cid and margin is not None:
+                customer_margins[cid].append(margin)
 
         print(
-            f"Found {len(customers_with_brand_margins)} customers with margins for brand '{brand_name}'"
+            f"Found {len(customer_margins)} customers with margins for brand '{brand_name}'"
         )
 
-        # Create special margins for the new product
+        product_obj_id = ObjectId(product_id)
+        now = datetime.datetime.now()
         special_margins_to_insert = []
 
-        for customer_data in customers_with_brand_margins:
-            customer_id = customer_data["customer_id"]
-            margin = customer_data["margin"]
+        for customer_id, margins in customer_margins.items():
+            # Pick the most common margin for this brand; first alphabetically on tie.
+            margin = max(set(margins), key=margins.count)
 
-            # Check if this customer-product combination already exists
             existing_special_margin = db.special_margins.find_one(
-                {
-                    "customer_id": ObjectId(customer_id),
-                    "product_id": ObjectId(product_id),
-                }
+                {"customer_id": customer_id, "product_id": product_obj_id}
             )
 
             if not existing_special_margin:
                 special_margins_to_insert.append(
                     {
-                        "customer_id": ObjectId(customer_id),
-                        "product_id": ObjectId(product_id),
+                        "customer_id": customer_id,
+                        "product_id": product_obj_id,
                         "margin": margin,
                         "name": product_name,
-                        "updated_at": datetime.datetime.now(),
+                        "brand": brand_name,
+                        "created_at": now,
+                        "updated_at": now,
                     }
                 )
                 print(
-                    f"Will create special margin for customer {customer_id}: {product_name} with margin {margin}"
+                    f"Will create special margin for customer {customer_id}: {product_name} @ {margin}"
                 )
 
-        # Bulk insert special margins
         if special_margins_to_insert:
             result = db.special_margins.insert_many(special_margins_to_insert)
             print(
@@ -286,7 +244,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     "item_name": item_name,
                     "unit": item.get("unit", "pcs"),
                     "brand": brand_name,
-                    "status": item.get("status", "inactive"),
+                    "status": item.get("status", "active"),
                     "is_combo_product": item.get("is_combo_product", False),
                     "rate": item.get("rate", 1),
                     "item_tax_preferences": item.get("item_tax_preferences", []),
@@ -357,7 +315,7 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                 params = {
                     "name": person["name"],
                     "item_name": item.get("name", ""),
-                    "brand": brands.get(brand_name.lower(), brand_name.capitalize()),
+                    "brand": brand_name,
                 }
                 send_whatsapp(
                     to=person["phone"],
@@ -507,15 +465,16 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             return []
     else:
         # If no complete date provided, use current date logic
+        _now = datetime.datetime.now()
         if month is None:
-            month = now.month
+            month = _now.month
         if year is None:
-            year = now.year
+            year = _now.year
 
         if day is None:
-            if month == now.month and year == now.year:
+            if month == _now.month and year == _now.year:
                 # Current month - use current day
-                day = now.day
+                day = _now.day
             else:
                 # Previous month - use last day of that month
                 day = monthrange(year, month)[1]
@@ -617,7 +576,6 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
         if not isinstance(item, dict):
             print(f"Skipping item {item} because it is not a dictionary")
             continue
-
         # Handle new API structure with "warehouse_stock" array
         if "warehouse_stock" in item:
             for warehouse_entry in item["warehouse_stock"]:
@@ -986,7 +944,7 @@ def handle_invoice(data: dict):
                 )
             # Do not schedule emails for salespeople since at least one is forbidden
             return
-        sales_admin = db.users.find_one({"email": "crmbarksales@gmail.com"})
+        sales_admin = db.users.find_one({"email": "barksalesamit@gmail.com"})
         sales_admin_phone = sales_admin.get("phone")
         sales_admin_name = sales_admin.get("name")
         for sp in all_salespeople:
@@ -1391,18 +1349,19 @@ def handle_accepted_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_number = estimate.get("estimate_number", "")
     if estimate_id != "":
-        template = serialize_mongo_document(
-            dict(db.templates.find_one({"name": "accepted_estimate"}))
-        )
+        template_doc = db.templates.find_one({"name": "accepted_estimate"})
+        if not template_doc:
+            print("Template 'accepted_estimate' not found, skipping notification")
+            return
+        template = serialize_mongo_document(dict(template_doc))
 
-        to1 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeinvoicee@gmail.com"}))
-        )
-        to2 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "crmbarksales@gmail.com"}))
-        )
-
-        for to in [to1, to2]:
+        notify_emails = ["pupscribeinvoicee@gmail.com", "barksalesamit@gmail.com"]
+        for email in notify_emails:
+            user_doc = db.users.find_one({"email": email})
+            if not user_doc:
+                print(f"User {email} not found, skipping WhatsApp for accepted_estimate")
+                continue
+            to = serialize_mongo_document(dict(user_doc))
             params = {"name": to.get("first_name"), "estimate_number": estimate_number}
             send_whatsapp(to.get("phone"), {**template}, {**params})
     else:
@@ -1436,21 +1395,22 @@ def handle_draft_invoice(data: dict):
     invoice_id = invoice.get("invoice_id", "")
     invoice_number = invoice.get("invoice_number", "")
     if invoice_id != "":
-        member1 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "barkbutleracc@gmail.com"}))
-        )
-        member2 = serialize_mongo_document(
-            dict(db.users.find_one({"designation": "Customer Care"}))
-        )
+        template_doc = db.templates.find_one({"name": "draft_invoice"})
+        if not template_doc:
+            print("Template 'draft_invoice' not found, skipping notification")
+            return
+        template = serialize_mongo_document(dict(template_doc))
 
-        template = serialize_mongo_document(
-            dict(db.templates.find_one({"name": "draft_invoice"}))
-        )
-        for person in [member1, member2]:
-            params = {
-                "name": person.get("first_name"),
-                "invoice_number": invoice_number,
-            }
+        recipients = []
+        for query in [{"email": "barkbutleracc@gmail.com"}, {"designation": "Customer Care"}]:
+            user_doc = db.users.find_one(query)
+            if user_doc:
+                recipients.append(serialize_mongo_document(dict(user_doc)))
+            else:
+                print(f"User matching {query} not found, skipping draft_invoice WhatsApp")
+
+        for person in recipients:
+            params = {"name": person.get("first_name"), "invoice_number": invoice_number}
             send_whatsapp(person.get("phone"), {**template}, {**params})
     else:
         print("Invoice Does Not Exist. Webhook Received")
@@ -1517,13 +1477,10 @@ def handle_shipment(data: dict):
         shipment.get("salesorder_number", "") if len(invoices) == 0 else ""
     )
     customer_name = shipment.get("customer_name", "")
-    tracking_number = shipment.get("reference_number", "")
-    tracking_partner = shipment.get("carrier", "")
+    tracking_partner = shipment.get("carrier", "delivery_method")
+    tracking_url = shipment.get("tracking_link", "")
+    tracking_number = shipment.get("reference_number", "tracking_number")
 
-    delivery_partner = serialize_mongo_document(
-        dict(db["delivery_partners"].find_one({"name": tracking_partner}))
-    )
-    tracking_url = delivery_partner.get("tracking_url", "")
     invoice = None
     if invoice_number != "":
         invoice = serialize_mongo_document(
@@ -1546,18 +1503,19 @@ def handle_shipment(data: dict):
         salesperson = invoice.get("salesperson_name", "")
         button_url = f"{invoice.get('_id')}"
 
-        sales_admin_1 = serialize_mongo_document(
-            dict(db.users.find_one({"designation": "Customer Care"}))
-        )
-        sales_admin_2 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "pupscribeoffcoordinator@gmail.com"}))
-        )
-        sales_admin_3 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "events@barkbutler.in"}))
-        )
-        sales_admin_4 = serialize_mongo_document(
-            dict(db.users.find_one({"email": "hitesh@barkbutler.in"}))
-        )
+        def _safe_user(query: dict) -> dict:
+            """Fetch a user safely; returns an empty dict if not found."""
+            doc = db.users.find_one(query)
+            if not doc:
+                print(f"Shipment notification: user not found for query {query}")
+                return {}
+            return serialize_mongo_document(dict(doc))
+
+        sales_admin_1 = _safe_user({"designation": "Customer Care"})
+        sales_admin_2 = _safe_user({"email": "pupscribeoffcoordinator@gmail.com"})
+        sales_admin_3 = _safe_user({"email": "events@barkbutler.in"})
+        sales_admin_4 = _safe_user({"email": "hitesh@barkbutler.in"})
+        company_number = _safe_user({"role": "company_number"})
         all_salespeople = set()
         print("Custom Field Invoice Sales Person", invoice_sales_person)
         print("Invoice Sales Person", salesperson)
@@ -1600,7 +1558,8 @@ def handle_shipment(data: dict):
                 ),
                 "carrier_name": tracking_partner,
                 "delivery_date": delivery_date,
-                "awb_no": shipment.get("tracking_number", ""),
+                "awb_no": tracking_url,
+                "customer_name":customer_name,
             }
         else:
             template = serialize_mongo_document(
@@ -1616,11 +1575,11 @@ def handle_shipment(data: dict):
                 "tracking_number": tracking_number,
                 "button_url": button_url,
             }
-        valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4]
+        valid_salespeople = [sales_admin_1, sales_admin_2, sales_admin_4, company_number]
 
         if any(is_forbidden(sp.strip()) for sp in all_salespeople):
             # Send to admin users
-            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4]:
+            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4, company_number]:
                 phone = str(person.get("phone"))
                 print("if", phone)
                 if phone:  # Validate phone exists and is not empty
@@ -1756,6 +1715,323 @@ def handle_customer_payment(data: dict):
             print(f"Created new customer payment with payment_id {payment_id}")
     else:
         print("Payment ID not found. Webhook Received")
+
+
+def handle_bill(data: dict):
+    bill = data.get("bill")
+    if not bill:
+        print("No bill data found in webhook")
+        return
+
+    bill_id = str(bill.get("bill_id", ""))
+    if not bill_id:
+        print("Bill ID not found. Webhook Received")
+        return
+
+    existing = db.bills.find_one({"bill_id": bill_id})
+    sorted_data = sort_dict_keys(bill)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'due_date',
+        'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.bills.update_one({"bill_id": bill_id}, {"$set": sorted_data})
+        print(f"Updated bill with bill_id {bill_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.bills.insert_one(sorted_data)
+        print(f"Created new bill with bill_id {bill_id}")
+
+
+def handle_delete_estimate(data: dict):
+    estimate = data.get("estimate") or {}
+    estimate_id = estimate.get("estimate_id", "")
+    if estimate_id:
+        result = db.estimates.delete_one({"estimate_id": estimate_id})
+        print(f"Deleted estimate {estimate_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No estimate_id found in delete webhook")
+
+
+def handle_transfer_order(data: dict):
+    transfer_order = data.get("transferorder") or data.get("transfer_order") or {}
+    transfer_order_id = str(transfer_order.get("transfer_order_id", ""))
+    if not transfer_order_id:
+        print("No transfer_order_id found in webhook")
+        return
+
+    exists = serialize_mongo_document(
+        db.transfer_orders.find_one({"transfer_order_id": transfer_order_id})
+    )
+
+    sorted_to = sort_dict_keys(transfer_order)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = ["created_time", "date", "last_modified_time"]
+    for field in datetime_fields:
+        if field in sorted_to and sorted_to[field]:
+            parsed_dt = parse_datetime(sorted_to[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_to[field] = parsed_dt
+
+    if not exists:
+        sorted_to["created_at"] = sorted_to.get("created_time", current_time)
+        sorted_to["updated_at"] = current_time
+        db.transfer_orders.insert_one(sorted_to)
+        print(f"Created new transfer order {transfer_order_id}")
+    else:
+        sorted_to["updated_at"] = current_time
+        if "created_at" not in sorted_to and "created_at" in exists:
+            sorted_to["created_at"] = exists["created_at"]
+        elif "created_at" not in sorted_to:
+            sorted_to["created_at"] = sorted_to.get("created_time", current_time)
+        db.transfer_orders.update_one(
+            {"transfer_order_id": transfer_order_id},
+            {"$set": sorted_to},
+        )
+        print(f"Updated transfer order {transfer_order_id}")
+
+
+def handle_delete_transfer_order(data: dict):
+    transfer_order = data.get("transferorder") or data.get("transfer_order") or {}
+    transfer_order_id = str(transfer_order.get("transfer_order_id", ""))
+    if transfer_order_id:
+        result = db.transfer_orders.delete_one({"transfer_order_id": transfer_order_id})
+        print(f"Deleted transfer order {transfer_order_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No transfer_order_id found in delete webhook")
+
+
+def handle_delete_invoice(data: dict):
+    invoice = data.get("invoice") or {}
+    invoice_id = invoice.get("invoice_id", "")
+    if invoice_id:
+        result = db.invoices.delete_one({"invoice_id": invoice_id})
+        print(f"Deleted invoice {invoice_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No invoice_id found in delete webhook")
+
+
+def handle_delete_customer_payment(data: dict):
+    payment = data.get("payment") or {}
+    payment_id = payment.get("payment_id", "")
+    if payment_id:
+        result = db.customer_payments.delete_one({"payment_id": payment_id})
+        print(f"Deleted customer payment {payment_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No payment_id found in delete webhook")
+
+
+def handle_delete_sales_order(data: dict):
+    salesorder = data.get("salesorder") or {}
+    salesorder_id = salesorder.get("salesorder_id", "")
+    if salesorder_id:
+        result = db.sales_orders.delete_one({"salesorder_id": salesorder_id})
+        print(f"Deleted sales order {salesorder_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No salesorder_id found in delete webhook")
+
+
+def handle_delete_package(data: dict):
+    package = data.get("package") or {}
+    package_id = package.get("package_id", "")
+    if package_id:
+        result = db.packages.delete_one({"package_id": package_id})
+        print(f"Deleted package {package_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No package_id found in delete webhook")
+
+
+def handle_delete_assembly(data: dict):
+    assembly = data.get("bundle") or data.get("assembly") or {}
+    bundle_id = assembly.get("bundle_id", "")
+    if bundle_id:
+        result = db.assemblies.delete_one({"bundle_id": bundle_id})
+        print(f"Deleted assembly {bundle_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No bundle_id found in delete webhook")
+
+
+def handle_delete_bill(data: dict):
+    bill = data.get("bill") or {}
+    bill_id = bill.get("bill_id", "")
+    if bill_id:
+        result = db.bills.delete_one({"bill_id": bill_id})
+        print(f"Deleted bill {bill_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No bill_id found in delete webhook")
+
+
+def handle_delete_purchase_order(data: dict):
+    purchaseorder = data.get("purchaseorder") or {}
+    purchaseorder_number = purchaseorder.get("purchaseorder_number", "")
+    if purchaseorder_number:
+        result = db.purchase_orders.delete_one({"purchaseorder_number": purchaseorder_number})
+        print(f"Deleted purchase order {purchaseorder_number}: {result.deleted_count} document(s) removed")
+    else:
+        print("No purchaseorder_number found in delete webhook")
+
+
+def handle_delete_item(data: dict):
+    item = data.get("item") or {}
+    item_id = item.get("item_id", "")
+    if item_id:
+        result = db.products.delete_one({"item_id": item_id})
+        print(f"Deleted item {item_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No item_id found in delete webhook")
+
+
+def handle_delete_vendor(data: dict):
+    contact = data.get("contact") or {}
+    contact_id = contact.get("contact_id", "")
+    if contact_id:
+        result = db.vendors.delete_one({"contact_id": contact_id})
+        print(f"Deleted vendor {contact_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No contact_id found in vendor delete webhook")
+
+
+def handle_delete_customer(data: dict):
+    contact = data.get("contact") or {}
+    contact_id = contact.get("contact_id", "")
+    if contact_id:
+        result = db.customers.delete_one({"contact_id": contact_id})
+        print(f"Deleted customer {contact_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No contact_id found in customer delete webhook")
+
+
+def handle_delete_credit_note(data: dict):
+    creditnote = data.get("creditnote") or {}
+    creditnote_id = creditnote.get("creditnote_id", "")
+    if creditnote_id:
+        result = db.credit_notes.delete_one({"creditnote_id": creditnote_id})
+        print(f"Deleted credit note {creditnote_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No creditnote_id found in delete webhook")
+
+
+def handle_sales_order(data: dict):
+    salesorder = data.get("salesorder")
+    if not salesorder:
+        print("No sales order data found in webhook")
+        return
+
+    salesorder_id = str(salesorder.get("salesorder_id", ""))
+    if not salesorder_id:
+        print("Sales Order ID not found. Webhook Received")
+        return
+
+    existing = db.sales_orders.find_one({"salesorder_id": salesorder_id})
+    sorted_data = sort_dict_keys(salesorder)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'shipment_date',
+        'delivery_date', 'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.sales_orders.update_one({"salesorder_id": salesorder_id}, {"$set": sorted_data})
+        print(f"Updated sales order with salesorder_id {salesorder_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.sales_orders.insert_one(sorted_data)
+        print(f"Created new sales order with salesorder_id {salesorder_id}")
+
+
+def handle_assembly(data: dict):
+    assembly = data.get("bundle") or data.get("assembly")
+    if not assembly:
+        print("No assembly data found in webhook")
+        return
+
+    bundle_id = str(assembly.get("bundle_id", ""))
+    if not bundle_id:
+        print("Bundle/Assembly ID not found. Webhook Received")
+        return
+
+    existing = db.assemblies.find_one({"bundle_id": bundle_id})
+    sorted_data = sort_dict_keys(assembly)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time',
+        'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.assemblies.update_one({"bundle_id": bundle_id}, {"$set": sorted_data})
+        print(f"Updated assembly with bundle_id {bundle_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.assemblies.insert_one(sorted_data)
+        print(f"Created new assembly with bundle_id {bundle_id}")
+
+
+def handle_package(data: dict):
+    package = data.get("package")
+    if not package:
+        print("No package data found in webhook")
+        return
+
+    package_id = str(package.get("package_id", ""))
+    if not package_id:
+        print("Package ID not found. Webhook Received")
+        return
+
+    existing = db.packages.find_one({"package_id": package_id})
+    sorted_data = sort_dict_keys(package)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = [
+        'created_time', 'date', 'last_modified_time', 'shipment_date',
+        'delivery_date', 'created_time_formatted', 'last_modified_time_formatted',
+    ]
+    for field in datetime_fields:
+        if field in sorted_data and sorted_data[field]:
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    if existing:
+        sorted_data["updated_at"] = current_time
+        sorted_data["created_at"] = existing.get("created_at", sorted_data.get("created_time", current_time))
+        db.packages.update_one({"package_id": package_id}, {"$set": sorted_data})
+        print(f"Updated package with package_id {package_id}")
+    else:
+        sorted_data["created_at"] = sorted_data.get("created_time", current_time)
+        sorted_data["updated_at"] = current_time
+        db.packages.insert_one(sorted_data)
+        print(f"Created new package with package_id {package_id}")
 
 
 @router.post("/estimate")
@@ -1989,3 +2265,111 @@ async def vendor_webhook(request: Request):
     except Exception as e:
         print(f"Error processing vendor webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/bill")
+def bill(data: dict):
+    handle_bill(data)
+    return "Bill Webhook Received Successfully"
+
+
+@router.post("/delete_estimate")
+def delete_estimate(data: dict):
+    handle_delete_estimate(data)
+    return "Delete Estimate Webhook Received Successfully"
+
+
+@router.post("/delete_invoice")
+def delete_invoice(data: dict):
+    handle_delete_invoice(data)
+    return "Delete Invoice Webhook Received Successfully"
+
+
+@router.post("/delete_customer_payment")
+def delete_customer_payment(data: dict):
+    handle_delete_customer_payment(data)
+    return "Delete Customer Payment Webhook Received Successfully"
+
+
+@router.post("/delete_sales_order")
+def delete_sales_order(data: dict):
+    handle_delete_sales_order(data)
+    return "Delete Sales Order Webhook Received Successfully"
+
+
+@router.post("/delete_package")
+def delete_package(data: dict):
+    handle_delete_package(data)
+    return "Delete Package Webhook Received Successfully"
+
+
+@router.post("/delete_assembly")
+def delete_assembly(data: dict):
+    handle_delete_assembly(data)
+    return "Delete Assembly Webhook Received Successfully"
+
+
+@router.post("/delete_bill")
+def delete_bill(data: dict):
+    handle_delete_bill(data)
+    return "Delete Bill Webhook Received Successfully"
+
+
+@router.post("/delete_purchase_order")
+def delete_purchase_order(data: dict):
+    handle_delete_purchase_order(data)
+    return "Delete Purchase Order Webhook Received Successfully"
+
+
+@router.post("/delete_item")
+def delete_item(data: dict):
+    handle_delete_item(data)
+    return "Delete Item Webhook Received Successfully"
+
+
+@router.post("/transfer_order")
+def transfer_order(data: dict):
+    handle_transfer_order(data)
+    return "Transfer Order Webhook Received Successfully"
+
+
+@router.post("/delete_transfer_order")
+def delete_transfer_order(data: dict):
+    handle_delete_transfer_order(data)
+    return "Delete Transfer Order Webhook Received Successfully"
+
+
+@router.post("/delete_vendor")
+def delete_vendor(data: dict):
+    handle_delete_vendor(data)
+    return "Delete Vendor Webhook Received Successfully"
+
+
+@router.post("/delete_customer")
+def delete_customer(data: dict):
+    handle_delete_customer(data)
+    return "Delete Customer Webhook Received Successfully"
+
+
+@router.post("/delete_credit_note")
+def delete_credit_note(data: dict):
+    handle_delete_credit_note(data)
+    return "Delete Credit Note Webhook Received Successfully"
+
+
+@router.post("/sales_order")
+def sales_order(data: dict):
+    handle_sales_order(data)
+    return "Sales Order Webhook Received Successfully"
+
+
+@router.post("/assembly")
+def assembly(data: dict):
+    handle_assembly(data)
+    return "Assembly Webhook Received Successfully"
+
+
+@router.post("/package")
+def package(data: dict):
+    handle_package(data)
+    return "Package Webhook Received Successfully"

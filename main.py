@@ -2,8 +2,8 @@ import logging
 
 logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .routes.api import router
 from .config.root import get_database, disconnect_on_exit
@@ -51,6 +51,7 @@ app.add_middleware(
         "GET",
         "POST",
         "PUT",
+        "PATCH",
         "DELETE",
         "OPTIONS",
     ],  # Specify allowed methods
@@ -93,7 +94,9 @@ async def handle_options():
 
 
 @app.exception_handler(404)
-async def custom_404_handler(_, __):
+async def custom_404_handler(request: Request, __):
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     return RedirectResponse("/")
 
 

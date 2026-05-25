@@ -36,6 +36,8 @@ async def create_contact_submission(request: ContactSubmissionRequest):
             "business_type": request.businessType,
             "city": request.city,
             "message": request.message,
+            "status": "not_contacted",
+            "notes": "",
             "created_at": now_ist(),
         }
 

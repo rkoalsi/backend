@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Query, HTTPException, Response
+from fastapi import APIRouter, Query, HTTPException, Response, Request, BackgroundTasks
 from ..config.root import get_database, serialize_mongo_document
 from typing import Optional
 from bson import ObjectId
 from datetime import datetime, date
 import os, requests
 from .helpers import get_access_token
+from .customer_activity import log_activity, extract_client_info
 
 router = APIRouter()
 db = get_database()
@@ -15,6 +16,8 @@ CUSTOMER_STATEMENT_URL = os.getenv("CUSTOMER_STATEMENT_URL")
 
 @router.get("/invoices")
 def get_customer_invoices(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
@@ -24,6 +27,16 @@ def get_customer_invoices(
     Get all invoices for a specific customer by their customer_id.
     Returns paginated results with invoice details.
     """
+    if page == 1:
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="view_invoices",
+            category="portal",
+            customer_id=customer_id,
+            ip_address=ip,
+            user_agent=ua,
+        )
     query = {"customer_id": customer_id}
 
     if status:
@@ -66,6 +79,8 @@ def get_customer_invoices(
 
 @router.get("/credit-notes")
 def get_customer_credit_notes(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
@@ -75,6 +90,16 @@ def get_customer_credit_notes(
     Get all credit notes for a specific customer by their customer_id.
     Returns paginated results with credit note details.
     """
+    if page == 1:
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="view_credit_notes",
+            category="portal",
+            customer_id=customer_id,
+            ip_address=ip,
+            user_agent=ua,
+        )
     query = {"customer_id": customer_id}
 
     if status:
@@ -113,15 +138,27 @@ def get_customer_credit_notes(
 
 @router.get("/shipments")
 def get_customer_shipments(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
     status: Optional[str] = Query(None, description="Filter by status"),
 ):
     """
-    Get all credit notes for a specific customer by their customer_id.
-    Returns paginated results with credit note details.
+    Get all shipments for a specific customer by their customer_id.
+    Returns paginated results with shipment details.
     """
+    if page == 1:
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="view_shipments",
+            category="portal",
+            customer_id=customer_id,
+            ip_address=ip,
+            user_agent=ua,
+        )
     query = {"customer_id": customer_id}
 
     if status:
@@ -160,12 +197,23 @@ def get_customer_shipments(
 
 @router.get("/dashboard-summary")
 def get_customer_dashboard_summary(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
 ):
     """
     Get a summary of invoices and credit notes for the customer dashboard.
     Returns recent items and statistics.
     """
+    ip, ua = extract_client_info(request)
+    background_tasks.add_task(
+        log_activity,
+        action="view_dashboard",
+        category="portal",
+        customer_id=customer_id,
+        ip_address=ip,
+        user_agent=ua,
+    )
     # Get recent invoices (last 5)
     recent_invoices = list(
         db.invoices.find({"customer_id": customer_id}).sort("date", -1).limit(5)
@@ -209,6 +257,8 @@ def get_customer_dashboard_summary(
 
 @router.get("/payments")
 def get_customer_payments(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
@@ -218,6 +268,16 @@ def get_customer_payments(
     Get all payments for a specific customer by their customer_id.
     Returns paginated results with payment details.
     """
+    if page == 1:
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="view_payments",
+            category="portal",
+            customer_id=customer_id,
+            ip_address=ip,
+            user_agent=ua,
+        )
     query = {"customer_id": customer_id}
 
     if payment_mode:
@@ -277,12 +337,23 @@ def get_financial_year_dates():
 
 @router.get("/statement/download")
 async def download_customer_statement(
+    request: Request,
+    background_tasks: BackgroundTasks,
     customer_id: str = Query(..., description="Customer ID from Zoho"),
 ):
     """
     Download the customer statement PDF for the current financial year.
     Financial year in India: April 1st to March 31st.
     """
+    ip, ua = extract_client_info(request)
+    background_tasks.add_task(
+        log_activity,
+        action="download_statement",
+        category="documents",
+        customer_id=customer_id,
+        ip_address=ip,
+        user_agent=ua,
+    )
     try:
         # Get financial year date range
         from_date, to_date = get_financial_year_dates()

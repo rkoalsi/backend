@@ -1,3 +1,6 @@
+import os
+import requests
+from pathlib import Path
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -13,6 +16,29 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
+TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "emails"
+
+
+def _render_template(template_name: str, **kwargs) -> str:
+    html = (TEMPLATES_DIR / template_name).read_text(encoding="utf-8")
+    for key, value in kwargs.items():
+        html = html.replace("{" + key + "}", str(value))
+    return html
+
+
+def _send_career_email(to: list, subject: str, html: str):
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
+        "Content-Type": "application/json",
+    }
+    requests.post(url, headers=headers, json={
+        "from": "no-reply@no-reply.pupscribe.in",
+        "to": to,
+        "subject": subject,
+        "html": html,
+    })
+
 router = APIRouter()
 db = get_database()
 
@@ -23,6 +49,8 @@ def get_career_applications(
     limit: int = Query(10, ge=1, description="Number of items per page"),
     career_id: Optional[str] = Query(None, description="Filter by career ID"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    date_from: Optional[str] = Query(None, description="Filter applied on >= YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="Filter applied on <= YYYY-MM-DD"),
 ):
     try:
         match_statement = {}
@@ -30,6 +58,13 @@ def get_career_applications(
             match_statement["career_id"] = ObjectId(career_id)
         if status:
             match_statement["status"] = status
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to + "T23:59:59"
+            match_statement["created_at"] = date_filter
 
         pipeline = [
             {"$match": match_statement},
@@ -60,13 +95,27 @@ def get_career_applications(
 def download_career_applications_report(
     career_id: Optional[str] = Query(None, description="Filter by career ID"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    date_from: Optional[str] = Query(None, description="Filter applied on >= YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="Filter applied on <= YYYY-MM-DD"),
+    selected_ids: Optional[str] = Query(None, description="Comma-separated application IDs to export"),
 ):
     try:
         match_statement = {}
-        if career_id:
-            match_statement["career_id"] = career_id
-        if status:
-            match_statement["status"] = status
+        if selected_ids:
+            id_list = [ObjectId(sid.strip()) for sid in selected_ids.split(",") if sid.strip()]
+            match_statement["_id"] = {"$in": id_list}
+        else:
+            if career_id:
+                match_statement["career_id"] = ObjectId(career_id)
+            if status:
+                match_statement["status"] = status
+            if date_from or date_to:
+                date_filter = {}
+                if date_from:
+                    date_filter["$gte"] = date_from
+                if date_to:
+                    date_filter["$lte"] = date_to + "T23:59:59"
+                match_statement["created_at"] = date_filter
 
         pipeline = [
             {"$match": match_statement},
@@ -76,17 +125,26 @@ def download_career_applications_report(
         applications = list(db.career_applications.aggregate(pipeline))
 
         # Build career_id -> title lookup
-        career_ids = list({app.get("career_id", "") for app in applications if app.get("career_id")})
+        career_ids = list({str(app.get("career_id", "")) for app in applications if app.get("career_id")})
         career_map = {}
         if career_ids:
             for career in db.careers.find({"_id": {"$in": [ObjectId(cid) for cid in career_ids]}}, {"title": 1}):
                 career_map[str(career["_id"])] = career.get("title", "")
 
+        # Collect all unique custom question keys in order of first appearance
+        all_custom_questions = []
+        seen_questions = set()
+        for app in applications:
+            for q in (app.get("custom_answers") or {}).keys():
+                if q not in seen_questions:
+                    all_custom_questions.append(q)
+                    seen_questions.add(q)
+
         workbook = openpyxl.Workbook()
         ws = workbook.active
         ws.title = "Career Applications"
 
-        headers = [
+        base_headers = [
             "Applicant Name",
             "Email",
             "Phone",
@@ -107,6 +165,7 @@ def download_career_applications_report(
             "Status",
             "Applied On",
         ]
+        headers = base_headers + all_custom_questions
 
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
@@ -122,7 +181,8 @@ def download_career_applications_report(
             ws.cell(row=row_idx, column=1, value=app.get("applicant_name", ""))
             ws.cell(row=row_idx, column=2, value=app.get("applicant_email", ""))
             ws.cell(row=row_idx, column=3, value=app.get("applicant_phone", ""))
-            ws.cell(row=row_idx, column=4, value=career_map.get(app.get("career_id", ""), app.get("career_id", "")))
+            career_id_str = str(app.get("career_id", ""))
+            ws.cell(row=row_idx, column=4, value=career_map.get(career_id_str, career_id_str))
             ws.cell(row=row_idx, column=5, value=app.get("current_location", ""))
             ws.cell(row=row_idx, column=6, value=app.get("total_experience", ""))
             ws.cell(row=row_idx, column=7, value=app.get("relevant_experience", ""))
@@ -144,6 +204,10 @@ def download_career_applications_report(
                 except Exception:
                     created_at = str(created_at)
             ws.cell(row=row_idx, column=19, value=created_at)
+
+            custom_answers = app.get("custom_answers") or {}
+            for q_idx, question in enumerate(all_custom_questions):
+                ws.cell(row=row_idx, column=20 + q_idx, value=str(custom_answers.get(question, "")))
 
         # Auto-adjust column widths
         for column in ws.columns:
@@ -169,6 +233,56 @@ def download_career_applications_report(
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/{application_id}/send-status-email")
+def send_status_email(application_id: str):
+    try:
+        try:
+            obj_id = ObjectId(application_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid application_id format")
+
+        app = db.career_applications.find_one({"_id": obj_id})
+        if not app:
+            raise HTTPException(status_code=404, detail="Application not found")
+
+        status = app.get("status", "pending")
+        if status not in ("accepted", "rejected"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Can only send status email for accepted or rejected applications, current status: {status}",
+            )
+
+        career = db.careers.find_one({"_id": app.get("career_id")}, {"title": 1})
+        role_title = career.get("title", "the position") if career else "the position"
+        applicant_name = app.get("applicant_name", "Applicant")
+        applicant_email = app.get("applicant_email")
+
+        if not applicant_email:
+            raise HTTPException(status_code=400, detail="Applicant email not found")
+
+        template_name = "applicant_accepted.html" if status == "accepted" else "applicant_rejected.html"
+        html = _render_template(template_name, applicant_name=applicant_name, role_title=role_title)
+        subject = (
+            f"Congratulations! Your Application for {role_title} - Accepted"
+            if status == "accepted"
+            else f"Update on Your Application for {role_title}"
+        )
+
+        _send_career_email([applicant_email], subject, html)
+
+        db.career_applications.update_one(
+            {"_id": obj_id},
+            {"$set": {"status_email_sent": True, "status_email_sent_at": datetime.utcnow().isoformat()}},
+        )
+
+        return {"success": True, "message": f"{status.capitalize()} email sent to {applicant_email}"}
+
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 

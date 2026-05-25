@@ -404,6 +404,41 @@ def process_shipment_data(shipment_data):
     return sort_dict_recursively(shipment_data)
 
 
+def process_transfer_order_data(transfer_order_data):
+    """Process transfer order data to ensure proper formatting and datetime conversion."""
+    transfer_order_data["transfer_order_id"] = str(transfer_order_data.get("transfer_order_id", ""))
+
+    datetime_fields = [
+        "created_time",
+        "date",
+        "last_modified_time",
+        "created_time_formatted",
+        "last_modified_time_formatted",
+    ]
+
+    for field in datetime_fields:
+        if field in transfer_order_data and transfer_order_data[field]:
+            datetime_value = parse_datetime_field(transfer_order_data[field])
+            if isinstance(datetime_value, datetime):
+                transfer_order_data[field] = datetime_value
+
+    if "created_time" in transfer_order_data:
+        transfer_order_data["created_at"] = transfer_order_data.get("created_time")
+    elif "date" in transfer_order_data:
+        date_val = parse_datetime_field(transfer_order_data["date"])
+        if isinstance(date_val, datetime):
+            transfer_order_data["created_at"] = date_val
+        else:
+            transfer_order_data["created_at"] = transfer_order_data["date"]
+
+    if "created_at" not in transfer_order_data:
+        logger.warning(
+            f"No created_at field for transfer order {transfer_order_data.get('transfer_order_id')}"
+        )
+
+    return sort_dict_recursively(transfer_order_data)
+
+
 def process_estimate_data(estimate_data):
     """Process estimate data to ensure proper formatting and datetime conversion."""
     estimate_data["estimate_id"] = str(estimate_data["estimate_id"])
@@ -491,6 +526,39 @@ def process_purchase_order_data(po_data):
         )
 
     return sort_dict_recursively(po_data)
+
+
+def process_customerpayment_data(payment_data):
+    """Process customer payment data to ensure proper formatting and datetime conversion."""
+    payment_data["payment_id"] = str(payment_data.get("payment_id", ""))
+
+    datetime_fields = [
+        "created_time", "date", "last_modified_time",
+        "created_time_formatted", "last_modified_time_formatted",
+        "mail_first_viewed_time", "mail_last_viewed_time",
+    ]
+
+    for field in datetime_fields:
+        if field in payment_data and payment_data[field]:
+            datetime_value = parse_datetime_field(payment_data[field])
+            if isinstance(datetime_value, datetime):
+                payment_data[field] = datetime_value
+
+    if "created_time" in payment_data:
+        payment_data["created_at"] = payment_data.get("created_time")
+    elif "date" in payment_data:
+        date_val = parse_datetime_field(payment_data["date"])
+        if isinstance(date_val, datetime):
+            payment_data["created_at"] = date_val
+        else:
+            payment_data["created_at"] = payment_data["date"]
+
+    if "created_at" not in payment_data:
+        logger.warning(
+            f"No created_at field for customer payment {payment_data.get('payment_id')}"
+        )
+
+    return sort_dict_recursively(payment_data)
 
 
 def find_product_id_with_mongo(item_name: str, products_collection) -> Optional[str]:
@@ -1298,7 +1366,7 @@ async def stock_cron():
         products_collection = db["products"]
 
         # Get yesterday's date
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = datetime.now().strftime("%Y-%m-%d")
         target_date = datetime.strptime(yesterday, "%Y-%m-%d")
 
         # Check if we already have data for this date
@@ -1353,6 +1421,7 @@ async def stock_cron():
             )
 
             # Process warehouse stock - store ALL warehouses
+            # processed_items: {normalized_name: {"warehouses": {...}, "item_id": str|None}}
             processed_items = {}
 
             for item in warehouse_stock:
@@ -1361,13 +1430,15 @@ async def stock_cron():
 
                 item_name = None
                 warehouses_data = {}
+                # Zoho API returns item_id at the top level of each item
+                api_item_id = item.get("item_id") or item.get("zoho_item_id")
 
                 # Handle NEW API structure (warehouse_stock array)
                 if "warehouse_stock" in item:
                     for warehouse_entry in item["warehouse_stock"]:
                         warehouse_name = warehouse_entry.get("warehouse_name")
                         if warehouse_name:
-                            item_name = warehouse_entry.get("item_name")
+                            item_name = warehouse_entry.get("item_name") or item.get("item_name")
                             quantity = int(
                                 warehouse_entry.get("quantity_available_for_sale", 0)
                             )
@@ -1396,19 +1467,33 @@ async def stock_cron():
                     normalized_name = " ".join(item_name.split())
 
                     if normalized_name not in processed_items:
-                        processed_items[normalized_name] = {}
+                        processed_items[normalized_name] = {"warehouses": {}, "item_id": api_item_id}
+                    elif api_item_id and not processed_items[normalized_name]["item_id"]:
+                        processed_items[normalized_name]["item_id"] = api_item_id
 
                     # Merge warehouse data
                     for warehouse_name, quantity in warehouses_data.items():
-                        processed_items[normalized_name][warehouse_name] = quantity
+                        processed_items[normalized_name]["warehouses"][warehouse_name] = quantity
+
+            # Pre-build item_id lookup keyed by item_id for items missing it from API
+            # Fetch all products once to avoid N+1 lookups
+            all_product_names = list(processed_items.keys())
+            product_by_name = {}
+            for prod in products_collection.find(
+                {"$or": [{"name": {"$in": all_product_names}}, {"item_name": {"$in": all_product_names}}]},
+                {"_id": 1, "item_id": 1, "name": 1, "item_name": 1},
+            ):
+                for field in ("name", "item_name"):
+                    key = prod.get(field)
+                    if key:
+                        product_by_name[key] = prod
 
             # Prepare documents for MongoDB
             documents = []
-            for item_name, warehouses in processed_items.items():
-                # Look up product in products collection
-                product = products_collection.find_one(
-                    {"name": item_name}
-                ) or products_collection.find_one({"item_name": item_name})
+            missing_item_id_count = 0
+            for item_name, entry in processed_items.items():
+                warehouses = entry["warehouses"]
+                api_item_id = entry["item_id"]
 
                 doc = {
                     "item_name": item_name,
@@ -1417,12 +1502,22 @@ async def stock_cron():
                     "created_at": datetime.now(),
                 }
 
-                # Add product_id and zoho_item_id if product found
-                if product:
-                    doc["product_id"] = product["_id"]
-                    doc["zoho_item_id"] = product.get("item_id")
+                if api_item_id:
+                    # Best case: item_id came directly from Zoho API response
+                    doc["zoho_item_id"] = str(api_item_id)
+                else:
+                    # Fallback: look up product by name
+                    product = product_by_name.get(item_name)
+                    if product:
+                        doc["product_id"] = product["_id"]
+                        doc["zoho_item_id"] = str(product.get("item_id", "")) or None
+                    else:
+                        missing_item_id_count += 1
 
                 documents.append(doc)
+
+            if missing_item_id_count:
+                logger.warning(f"⚠️ {missing_item_id_count} items could not be matched to a product (no zoho_item_id)")
 
             if documents:
                 warehouse_stock_collection.insert_many(documents, ordered=False)
@@ -1432,8 +1527,8 @@ async def stock_cron():
 
                 # Show warehouse summary
                 all_warehouses = set()
-                for warehouses in processed_items.values():
-                    all_warehouses.update(warehouses.keys())
+                for entry in processed_items.values():
+                    all_warehouses.update(entry["warehouses"].keys())
                 logger.info(f"Warehouses tracked: {len(all_warehouses)}")
             else:
                 logger.info(f"No warehouse stock data found for {yesterday}")
@@ -1560,12 +1655,17 @@ async def items_cron():
                 # Collect item IDs that need detail fetching
                 new_item_ids = []
                 existing_item_ids = []
+                page_item_ids = [str(item["item_id"]) for item in page_items]
+                total_processed += len(page_item_ids)
 
-                for item in page_items:
-                    inv_id = str(item["item_id"])
-                    total_processed += 1
-                    existing_doc = collection.find_one({"item_id": inv_id}, {"_id": 1})
-                    if not existing_doc:
+                existing_docs_cursor = collection.find(
+                    {"item_id": {"$in": page_item_ids}},
+                    {"_id": 0},
+                )
+                existing_docs_map = {doc["item_id"]: doc for doc in existing_docs_cursor}
+
+                for inv_id in page_item_ids:
+                    if inv_id not in existing_docs_map:
                         new_item_ids.append(inv_id)
                     else:
                         existing_item_ids.append(inv_id)
@@ -1574,12 +1674,13 @@ async def items_cron():
                     f"Page {page}: {len(new_item_ids)} new, {len(existing_item_ids)} existing"
                 )
 
-                if not new_item_ids:
+                all_ids_to_fetch = new_item_ids + existing_item_ids
+                if not all_ids_to_fetch:
                     continue
 
-                # Fetch details for new items concurrently
+                # Fetch details for all items concurrently
                 detail_tasks = []
-                for inv_id in new_item_ids:
+                for inv_id in all_ids_to_fetch:
                     detail_url = (
                         f"https://www.zohoapis.com/books/v3/items/{inv_id}?"
                         f"organization_id={org_id}"
@@ -1597,21 +1698,37 @@ async def items_cron():
                     return_exceptions=True,
                 )
 
+                new_item_id_set = set(new_item_ids)
                 items_to_insert = []
                 for i, result in enumerate(detail_results):
+                    inv_id = all_ids_to_fetch[i]
                     try:
                         if isinstance(result, Exception):
                             logger.error(
-                                f"Error fetching item {new_item_ids[i]}: {result}"
+                                f"Error fetching item {inv_id}: {result}"
                             )
                             total_errors += 1
                             continue
 
                         if result and "item" in result:
                             processed_item = process_item_data(result["item"])
-                            items_to_insert.append(processed_item)
+                            if inv_id in new_item_id_set:
+                                items_to_insert.append(processed_item)
+                            else:
+                                existing_doc = existing_docs_map.get(inv_id, {})
+                                diff = {
+                                    k: v
+                                    for k, v in processed_item.items()
+                                    if existing_doc.get(k) != v and k != "status"
+                                }
+                                if diff:
+                                    collection.update_one(
+                                        {"item_id": inv_id},
+                                        {"$set": diff},
+                                    )
+                                    total_updated += 1
                     except Exception as e:
-                        logger.error(f"Error processing item {new_item_ids[i]}: {e}")
+                        logger.error(f"Error processing item {inv_id}: {e}")
                         total_errors += 1
 
                 if items_to_insert:
@@ -1639,7 +1756,7 @@ async def items_cron():
 
             logger.info(f"Items sync completed!")
             logger.info(
-                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+                f"Summary: Processed {total_processed}, Inserted {total_inserted}, Updated {total_updated}, Errors {total_errors}"
             )
 
             send_slack_notification(
@@ -1648,6 +1765,7 @@ async def items_cron():
                 details={
                     "processed": total_processed,
                     "inserted": total_inserted,
+                    "updated": total_updated,
                     "pages": total_pages,
                     "duration": duration,
                 },
@@ -1657,6 +1775,159 @@ async def items_cron():
         error_msg = f"Error in items sync: {e}"
         logger.error(error_msg)
         send_slack_notification("Items Cron Error", success=False, error_msg=str(e))
+
+
+async def transfer_orders_cron():
+    """Cron job for syncing recent transfer orders from the last 2 pages of Zoho Inventory."""
+    logger.info("Starting transfer orders sync (last 2 pages)...")
+    start_time = time.time()
+    all_new_transfer_orders = []
+    new_transfer_order_ids = []
+    total_checked = 0
+
+    try:
+        db = get_database()
+        collection = db["transfer_orders"]
+
+        async with ZohoAPIClient("inventory") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages first
+            first_page_url = (
+                f"https://www.zohoapis.com/inventory/v1/transferorders?"
+                f"page=1&per_page=200&"
+                f"organization_id={org_id}"
+            )
+            first_data = await api_client.make_request(first_page_url)
+            if not first_data:
+                logger.error("Failed to get response from transfer orders API")
+                return
+
+            page_context = first_data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            logger.info(f"Total transfer order pages: {total_pages}")
+
+            # Fetch the last 2 pages (most recent data)
+            pages_to_fetch = list(range(max(1, total_pages - 1), total_pages + 1))
+            logger.info(f"Fetching pages: {pages_to_fetch}")
+
+            for page in pages_to_fetch:
+                logger.info(f"Fetching transfer orders page {page}/{total_pages}...")
+
+                if page == 1 and first_data:
+                    page_data = first_data
+                else:
+                    page_url = (
+                        f"https://www.zohoapis.com/inventory/v1/transferorders?"
+                        f"page={page}&per_page=200&"
+                        f"organization_id={org_id}"
+                    )
+                    page_data = await api_client.make_request(page_url)
+
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                page_transfer_orders = (
+                    page_data.get("transferorders")
+                    or page_data.get("transferorder")
+                    or page_data.get("transfer_orders")
+                    or page_data.get("transfer_order")
+                    or []
+                )
+
+                if not page_transfer_orders:
+                    logger.info(f"No transfer orders found on page {page}")
+                    continue
+
+                logger.info(f"Found {len(page_transfer_orders)} transfer orders on page {page}")
+
+                page_ids = [str(to["transfer_order_id"]) for to in page_transfer_orders if to.get("transfer_order_id")]
+                total_checked += len(page_ids)
+
+                existing_ids = set()
+                existing_docs = collection.find(
+                    {"transfer_order_id": {"$in": page_ids}},
+                    {"transfer_order_id": 1},
+                )
+                for doc in existing_docs:
+                    existing_ids.add(doc["transfer_order_id"])
+
+                for to_id in page_ids:
+                    if to_id not in existing_ids:
+                        new_transfer_order_ids.append(to_id)
+
+                logger.info(f"Page {page}: {len(page_ids) - len([i for i in page_ids if i in existing_ids])} new transfer orders found")
+
+            if not new_transfer_order_ids:
+                logger.info("No new transfer orders found in last 2 pages")
+            else:
+                logger.info(f"Fetching details for {len(new_transfer_order_ids)} new transfer orders...")
+
+                detail_tasks = []
+                for to_id in new_transfer_order_ids:
+                    detail_url = (
+                        f"https://www.zohoapis.com/inventory/v1/transferorders/{to_id}?"
+                        f"organization_id={org_id}"
+                    )
+                    detail_tasks.append(api_client.make_request(detail_url))
+
+                semaphore = asyncio.Semaphore(3)
+
+                async def fetch_detail_with_semaphore(task):
+                    async with semaphore:
+                        return await task
+
+                detail_results = await asyncio.gather(
+                    *[fetch_detail_with_semaphore(task) for task in detail_tasks],
+                    return_exceptions=True,
+                )
+
+                for i, result in enumerate(detail_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(f"Error fetching transfer order {new_transfer_order_ids[i]}: {result}")
+                            continue
+
+                        if not result:
+                            continue
+
+                        to_data = (
+                            result.get("transferorder")
+                            or result.get("transfer_order")
+                        )
+                        if isinstance(to_data, list):
+                            to_data = to_data[0] if to_data else None
+
+                        if to_data:
+                            processed = process_transfer_order_data(to_data)
+                            all_new_transfer_orders.append(processed)
+                    except Exception as e:
+                        logger.error(f"Error processing transfer order {new_transfer_order_ids[i]}: {e}")
+
+                if all_new_transfer_orders:
+                    collection.insert_many(all_new_transfer_orders, ordered=False)
+                    logger.info(f"Inserted {len(all_new_transfer_orders)} new transfer orders")
+                else:
+                    logger.info("No new transfer orders to insert after processing")
+
+        duration = time.time() - start_time
+        send_slack_notification(
+            "Transfer Orders Cron",
+            success=True,
+            details={
+                "processed": total_checked,
+                "inserted": len(all_new_transfer_orders),
+                "duration": duration,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error in transfer orders sync: {e}")
+        send_slack_notification(
+            "Transfer Orders Cron Error", success=False, error_msg=str(e)
+        )
 
 
 async def bills_cron():
@@ -1872,8 +2143,8 @@ async def purchase_orders_cron():
 
             logger.info(f"Found {page_context.get('total', 0)} total purchase orders across {total_pages} pages")
 
-            # Step 1: Delete and reinsert first N pages (most recent purchase orders)
-            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (delete and reinsert)...")
+            # Step 1: Upsert first N pages (most recent purchase orders)
+            logger.info(f"Step 1: Resyncing first {RESYNC_PAGES} pages (upsert)...")
 
             for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
                 logger.info(f"--- Resyncing Page {page} ---")
@@ -1893,26 +2164,16 @@ async def purchase_orders_cron():
                 page_pos = page_data["purchaseorders"]
                 logger.info(f"Page {page}: Found {len(page_pos)} purchase orders")
 
-                # Collect PO IDs from this page and delete them
+                # Collect PO IDs from this page
                 page_po_ids = []
                 for po in page_pos:
                     po_id = str(po.get("purchaseorder_id", ""))
                     if po_id:
                         page_po_ids.append(po_id)
 
-                if page_po_ids:
-                    delete_result = collection.delete_many(
-                        {"purchaseorder_id": {"$in": page_po_ids}}
-                    )
-                    total_deleted += delete_result.deleted_count
-                    logger.info(
-                        f"Deleted {delete_result.deleted_count} existing purchase orders from page {page}"
-                    )
-
                 total_processed += len(page_po_ids)
 
-                # Fetch details and reinsert
-                pos_to_insert = []
+                # Fetch details and upsert
                 batch_size = 5
                 for i in range(0, len(page_po_ids), batch_size):
                     batch_ids = page_po_ids[i : i + batch_size]
@@ -1951,36 +2212,22 @@ async def purchase_orders_cron():
 
                             if po_detail and isinstance(po_detail, dict):
                                 processed = process_purchase_order_data(po_detail)
-                                pos_to_insert.append(processed)
+                                upsert_result = collection.update_one(
+                                    {"purchaseorder_id": processed["purchaseorder_id"]},
+                                    {"$set": processed},
+                                    upsert=True,
+                                )
+                                if upsert_result.upserted_id:
+                                    total_inserted += 1
+                                else:
+                                    total_deleted += 1  # reusing counter to track updates
                             else:
                                 total_errors += 1
                         except Exception as e:
                             logger.error(f"Error processing purchase order: {e}")
                             total_errors += 1
 
-                if pos_to_insert:
-                    try:
-                        result = collection.insert_many(
-                            pos_to_insert, ordered=False
-                        )
-                        inserted = len(result.inserted_ids)
-                        total_inserted += inserted
-                        logger.info(
-                            f"Reinserted {inserted} purchase orders from page {page}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Error during bulk insert for page {page}: {e}"
-                        )
-                        for doc in pos_to_insert:
-                            try:
-                                collection.insert_one(doc)
-                                total_inserted += 1
-                            except Exception as e2:
-                                logger.error(
-                                    f"Failed to insert purchase order: {e2}"
-                                )
-                                total_errors += 1
+                logger.info(f"Page {page}: Upserted {len(page_po_ids)} purchase orders")
 
                 if page < min(RESYNC_PAGES, total_pages):
                     await asyncio.sleep(1)
@@ -2133,6 +2380,237 @@ async def purchase_orders_cron():
         )
 
 
+async def customer_payments_cron():
+    """Cron job for syncing customer payments from Zoho Books.
+
+    Step 1: Upsert first RESYNC_PAGES pages (most recent payments).
+    Step 2: Incremental insert for all remaining pages in reverse (oldest first).
+    """
+    logger.info("🚀 Starting daily customer payments sync...")
+    start_time = time.time()
+
+    total_processed = 0
+    total_inserted = 0
+    total_errors = 0
+    RESYNC_PAGES = 5
+
+    try:
+        db = get_database()
+        collection = db["customer_payments"]
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            logger.info("🔍 Determining total number of pages...")
+            payments_url = (
+                f"https://www.zohoapis.com/books/v3/customerpayments?"
+                f"response_option=2&"
+                f"organization_id={org_id}"
+            )
+
+            data = await api_client.make_request(payments_url)
+            if not data:
+                logger.error("Failed to get response from customer payments API")
+                return
+
+            page_context = data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            total_payments = page_context.get("total", 0)
+
+            logger.info(
+                f"📊 Found {total_payments} total customer payments across {total_pages} pages"
+            )
+
+            async def fetch_and_insert_payment_ids(payment_ids, upsert=False):
+                """Fetch details for payment_ids and insert/upsert into collection."""
+                nonlocal total_inserted, total_errors
+
+                payments_to_write = []
+                batch_size = 5
+                for i in range(0, len(payment_ids), batch_size):
+                    batch_ids = payment_ids[i : i + batch_size]
+
+                    detail_tasks = []
+                    for pid in batch_ids:
+                        detail_url = (
+                            f"https://www.zohoapis.com/books/v3/customerpayments/{pid}?"
+                            f"organization_id={org_id}"
+                        )
+                        detail_tasks.append(api_client.make_request(detail_url))
+
+                    results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+
+                    for j, result in enumerate(results):
+                        try:
+                            if isinstance(result, Exception):
+                                logger.error(f"Error fetching payment {batch_ids[j]}: {result}")
+                                total_errors += 1
+                                continue
+
+                            payment_detail = None
+                            if result:
+                                payment_detail = result.get("payment") or result.get("payments")
+
+                            if payment_detail and isinstance(payment_detail, dict):
+                                processed = process_customerpayment_data(payment_detail)
+                                payments_to_write.append(processed)
+                            else:
+                                total_errors += 1
+                        except Exception as e:
+                            logger.error(f"Error processing customer payment: {e}")
+                            total_errors += 1
+
+                if not payments_to_write:
+                    return
+
+                if upsert:
+                    for doc in payments_to_write:
+                        try:
+                            collection.update_one(
+                                {"payment_id": doc["payment_id"]},
+                                {"$set": doc},
+                                upsert=True,
+                            )
+                            total_inserted += 1
+                        except Exception as e:
+                            logger.error(f"Failed to upsert customer payment: {e}")
+                            total_errors += 1
+                else:
+                    try:
+                        result = collection.insert_many(payments_to_write, ordered=False)
+                        inserted = len(result.inserted_ids)
+                        total_inserted += inserted
+                        logger.info(f"✅ Inserted {inserted} customer payments")
+                    except Exception as e:
+                        logger.error(f"Error during bulk insert: {e}")
+                        for doc in payments_to_write:
+                            try:
+                                collection.insert_one(doc)
+                                total_inserted += 1
+                            except Exception as e2:
+                                logger.error(f"Failed to insert customer payment: {e2}")
+                                total_errors += 1
+
+            # Step 1: Upsert first RESYNC_PAGES pages (most recent payments)
+            logger.info(f"Step 1: Upserting first {RESYNC_PAGES} pages (most recent)...")
+            for page in range(1, min(RESYNC_PAGES + 1, total_pages + 1)):
+                logger.info(f"--- Resyncing Page {page}/{total_pages} ---")
+
+                page_url = (
+                    f"https://www.zohoapis.com/books/v3/customerpayments?"
+                    f"page={page}&"
+                    f"per_page=200&"
+                    f"organization_id={org_id}"
+                )
+
+                page_data = await api_client.make_request(page_url)
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                page_payments = (
+                    page_data.get("customerpayments") or page_data.get("customerpayment")
+                )
+                if not page_payments:
+                    logger.warning(f"No customer payments found for page {page}")
+                    continue
+
+                logger.info(f"Page {page}: Found {len(page_payments)} customer payments")
+
+                page_ids = [str(p.get("payment_id") or "") for p in page_payments if p.get("payment_id")]
+                total_processed += len(page_ids)
+
+                await fetch_and_insert_payment_ids(page_ids, upsert=True)
+                logger.info(f"Page {page}: Upserted {len(page_ids)} customer payments")
+
+                if page < min(RESYNC_PAGES, total_pages):
+                    await asyncio.sleep(1)
+
+            # Step 2: Incremental insert for remaining pages in reverse (oldest first)
+            if total_pages > RESYNC_PAGES:
+                logger.info(
+                    f"Step 2: Incremental sync for pages {total_pages} → {RESYNC_PAGES + 1}..."
+                )
+                for page in range(total_pages, RESYNC_PAGES, -1):
+                    logger.info(f"--- Processing Page {page}/{total_pages} ---")
+
+                    page_url = (
+                        f"https://www.zohoapis.com/books/v3/customerpayments?"
+                        f"page={page}&"
+                        f"per_page=200&"
+                        f"organization_id={org_id}"
+                    )
+
+                    page_data = await api_client.make_request(page_url)
+                    if not page_data:
+                        logger.warning(f"No data returned for page {page}")
+                        continue
+
+                    page_payments = (
+                        page_data.get("customerpayments") or page_data.get("customerpayment")
+                    )
+                    if not page_payments:
+                        logger.warning(f"No customer payments found for page {page}")
+                        continue
+
+                    logger.info(f"Page {page}: Found {len(page_payments)} customer payments")
+
+                    new_payment_ids = []
+                    existing_count = 0
+
+                    for payment in page_payments:
+                        payment_id = str(payment.get("payment_id") or "")
+                        if not payment_id:
+                            continue
+
+                        total_processed += 1
+                        existing_doc = collection.find_one({"payment_id": payment_id}, {"_id": 1})
+                        if not existing_doc:
+                            new_payment_ids.append(payment_id)
+                        else:
+                            existing_count += 1
+
+                    logger.info(
+                        f"Page {page}: {len(new_payment_ids)} new, {existing_count} existing"
+                    )
+
+                    if new_payment_ids:
+                        await fetch_and_insert_payment_ids(new_payment_ids, upsert=False)
+                    else:
+                        logger.info(f"Page {page}: All records already exist, stopping early")
+                        break
+
+                    if page > RESYNC_PAGES + 1:
+                        await asyncio.sleep(1)
+
+            duration = time.time() - start_time
+
+            logger.info(f"🎉 Customer payments sync completed!")
+            logger.info(
+                f"📊 Summary: Processed {total_processed}, Inserted {total_inserted}, Errors {total_errors}"
+            )
+
+            send_slack_notification(
+                "Customer Payments Cron",
+                success=True,
+                details={
+                    "processed": total_processed,
+                    "inserted": total_inserted,
+                    "pages": total_pages,
+                    "duration": duration,
+                },
+            )
+
+    except Exception as e:
+        error_msg = f"Error in customer payments sync: {e}"
+        logger.error(error_msg)
+        send_slack_notification(
+            "Customer Payments Cron Error", success=False, error_msg=str(e)
+        )
+
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
@@ -2244,6 +2722,32 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added purchase_orders_cron job")
+
+        scheduler_instance.add_job(
+            customer_payments_cron,
+            "cron",
+            hour=17,
+            minute=15,
+            id="customer_payments_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added customer_payments_cron job")
+
+        scheduler_instance.add_job(
+            transfer_orders_cron,
+            "cron",
+            hour=17,
+            minute=30,
+            id="transfer_orders_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added transfer_orders_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"

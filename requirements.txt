@@ -26,6 +26,7 @@ Flask==3.1.0
 Flask-Cors==5.0.0
 frozenlist==1.5.0
 google-api-core==2.24.2
+gstin-validator==0.1.2
 google-api-python-client==2.163.0
 google-auth==2.38.0
 google-auth-httplib2==0.2.0
