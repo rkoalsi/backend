@@ -827,9 +827,13 @@ async def invoices_cron():
 
 
 async def estimates_cron():
-    """Cron job for resyncing estimates from previous month till today - delete and reinsert."""
+    """Cron job for resyncing estimates from previous month till today - upsert strategy.
+
+    Uses update_one(upsert=True) instead of delete+insert to avoid race conditions
+    with the estimate webhook handler. Both paths are now safe to run concurrently.
+    """
     logger.info(
-        "🚀 Starting estimate resync from previous month till today (delete and reinsert)..."
+        "🚀 Starting estimate resync from previous month till today (upsert)..."
     )
     start_time = time.time()
 
@@ -860,33 +864,19 @@ async def estimates_cron():
     )
 
     all_estimates = []
-    deleted_count = 0
 
     try:
+        from pymongo import UpdateOne
+
         db = get_database()
         collection = db["estimates"]
-
-        # Step 1: Delete existing estimates for the target period
-        logger.info(f"🗑️ Deleting existing estimates from {period_description}...")
-        delete_result = collection.delete_many(
-            {
-                "date": {
-                    "$gte": month_start.strftime("%Y-%m-%d"),
-                    "$lte": month_end.strftime("%Y-%m-%d"),
-                }
-            }
-        )
-        deleted_count = delete_result.deleted_count
-        logger.info(
-            f"✅ Deleted {deleted_count} existing estimates from {period_description}"
-        )
 
         async with ZohoAPIClient("books") as api_client:
             if not api_client.access_token:
                 logger.error("Failed to get access token")
                 return
 
-            # Step 2: Fetch all estimates from the target period
+            # Fetch all estimates from the target period
             page = 1
             total_fetched = 0
 
@@ -987,15 +977,35 @@ async def estimates_cron():
 
                 page += 1
 
-            # Step 3: Bulk insert all processed estimates
+            # Upsert all processed estimates using bulk_write.
+            # This is safe to run while the webhook handler is also active — both
+            # paths now use atomic upsert, so concurrent calls for the same
+            # estimate_id will merge rather than create duplicates.
+            upserted_count = 0
             if all_estimates:
-                logger.info(f"💾 Inserting {len(all_estimates)} processed estimates...")
-                collection.insert_many(all_estimates, ordered=False)
+                logger.info(f"💾 Upserting {len(all_estimates)} processed estimates...")
+                ops = [
+                    UpdateOne(
+                        {"estimate_id": est["estimate_id"]},
+                        {
+                            "$set": est,
+                            # Only set created_at when a new document is inserted;
+                            # do not overwrite it on subsequent syncs.
+                            "$setOnInsert": {"created_at": est.get("created_at", datetime.now())},
+                        },
+                        upsert=True,
+                    )
+                    for est in all_estimates
+                    if est.get("estimate_id")
+                ]
+                if ops:
+                    bulk_result = collection.bulk_write(ops, ordered=False)
+                    upserted_count = bulk_result.upserted_count + bulk_result.modified_count
                 logger.info(
-                    f"✅ Successfully inserted {len(all_estimates)} estimates for period: {period_description}"
+                    f"✅ Upserted {upserted_count} estimates for period: {period_description}"
                 )
             else:
-                logger.info(f"No estimates to insert for period: {period_description}")
+                logger.info(f"No estimates to upsert for period: {period_description}")
 
             duration = time.time() - start_time
 
@@ -1005,8 +1015,7 @@ async def estimates_cron():
                 success=True,
                 details={
                     "period": period_description,
-                    "deleted": deleted_count,
-                    "inserted": len(all_estimates),
+                    "inserted": upserted_count,
                     "total_fetched": total_fetched,
                     "pages": page,
                     "duration": duration,
@@ -1017,7 +1026,7 @@ async def estimates_cron():
                 f"🎉 Estimate resync from {period_description} completed successfully!"
             )
             logger.info(
-                f"📊 Summary: Deleted {deleted_count}, Inserted {len(all_estimates)} estimates in {duration:.1f}s"
+                f"📊 Summary: Fetched {total_fetched}, Upserted {upserted_count} estimates in {duration:.1f}s"
             )
 
     except Exception as e:

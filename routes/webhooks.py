@@ -1052,10 +1052,6 @@ def handle_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_status = estimate.get("status", "")
     if estimate_id != "":
-        exists = serialize_mongo_document(
-            db.estimates.find_one({"estimate_id": estimate_id})
-        )
-
         # Sort all keys alphabetically
         sorted_estimate = sort_dict_keys(estimate)
         current_time = datetime.datetime.now()
@@ -1072,27 +1068,26 @@ def handle_estimate(data: dict):
                 if isinstance(parsed_dt, datetime.datetime):
                     sorted_estimate[field] = parsed_dt
 
-        if not exists:
-            # Create new estimate
-            sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
-            sorted_estimate["updated_at"] = current_time
-            db.estimates.insert_one(sorted_estimate)
-        else:
-            # Update existing estimate
-            sorted_estimate["updated_at"] = current_time
-            if "created_at" not in sorted_estimate and "created_at" in exists:
-                sorted_estimate["created_at"] = exists["created_at"]
-            elif "created_at" not in sorted_estimate:
-                sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
+        created_at = sorted_estimate.get("created_time", current_time)
+        sorted_estimate["updated_at"] = current_time
 
-            db.estimates.update_one(
-                {"estimate_id": estimate_id},
-                {"$set": sorted_estimate},
-            )
-            estimate_number = estimate.get(
-                "estimate_number", exists.get("estimate_number")
-            )
-            estimate_url = estimate.get("estimate_url", exists.get("estimate_url"))
+        # Use atomic upsert to avoid duplicate inserts when concurrent webhook
+        # calls arrive for the same estimate_id (Zoho often fires multiple webhooks
+        # for a single event). $setOnInsert only runs when a new doc is created,
+        # so created_at is never overwritten on subsequent updates.
+        result = db.estimates.update_one(
+            {"estimate_id": estimate_id},
+            {
+                "$set": sorted_estimate,
+                "$setOnInsert": {"created_at": created_at},
+            },
+            upsert=True,
+        )
+
+        # If the document already existed, also sync the linked order status
+        if result.matched_count > 0:
+            estimate_number = estimate.get("estimate_number", "")
+            estimate_url = estimate.get("estimate_url", "")
             db.orders.update_one(
                 {"estimate_id": estimate_id},
                 {
