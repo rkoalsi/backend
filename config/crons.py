@@ -988,7 +988,7 @@ async def estimates_cron():
                     UpdateOne(
                         {"estimate_id": est["estimate_id"]},
                         {
-                            "$set": est,
+                            "$set": {k: v for k, v in est.items() if k != "created_at"},
                             # Only set created_at when a new document is inserted;
                             # do not overwrite it on subsequent syncs.
                             "$setOnInsert": {"created_at": est.get("created_at", datetime.now())},
