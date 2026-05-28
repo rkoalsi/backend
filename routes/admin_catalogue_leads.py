@@ -53,6 +53,7 @@ def get_catalogue_leads(
         match_statement = {}
         pipeline = [
             {"$match": match_statement},
+            {"$sort": {"created_at": -1}},
             {"$skip": page * limit},
             {"$limit": limit},
         ]
