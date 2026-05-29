@@ -578,29 +578,33 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
             continue
         # Handle new API structure with "warehouse_stock" array
         if "warehouse_stock" in item:
-            for warehouse_entry in item["warehouse_stock"]:
+            sub_entries = item["warehouse_stock"]
+            matched = False
+            # First try to find the target warehouse by name (old behaviour)
+            for warehouse_entry in sub_entries:
                 warehouse_name = warehouse_entry.get("warehouse_name", "")
-                if warehouse_name in target_warehouses:
+                if warehouse_name in target_warehouses or warehouse_name.strip().lower() in {n.lower() for n in target_warehouses}:
                     try:
                         stock_quantity = int(
                             warehouse_entry.get("quantity_available_for_sale", 0)
                         )
                         item_name = warehouse_entry.get("item_name", "").strip().lower()
-                        arr.append(
-                            {
-                                "name": item_name,
-                                "stock": stock_quantity,
-                            }
-                        )
-                        print(f"Added stock for '{item_name}': {stock_quantity}")
-                        # Debug: Log products with brackets
-                        if "(" in item_name or ")" in item_name:
-                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-                        break  # Found the warehouse we want
+                        arr.append({"name": item_name, "stock": stock_quantity})
+                        matched = True
+                        break
                     except ValueError:
                         print(
                             f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}"
                         )
+            # New API: warehouse_name is empty — use top-level aggregate quantity
+            if not matched and sub_entries:
+                try:
+                    item_name = (sub_entries[0].get("item_name") or item.get("item_name", "")).strip().lower()
+                    stock_quantity = int(item.get("quantity_available_for_sale", 0))
+                    if item_name:
+                        arr.append({"name": item_name, "stock": stock_quantity})
+                except ValueError:
+                    print(f"Invalid aggregate stock for item: {item.get('item_name')}")
 
         # Handle old API structure with direct warehouse info
         elif "warehouses" in item:
