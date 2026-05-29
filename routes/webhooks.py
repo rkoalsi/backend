@@ -1478,16 +1478,28 @@ def handle_shipment(data: dict):
 
     invoice = None
     if invoice_number != "":
-        invoice = serialize_mongo_document(
-            dict(db["invoices"].find_one({"invoice_number": invoice_number}))
-        )
-        invoice_sales_person = invoice.get("cf_sales_person", "")
-        salesperson = invoice.get("salesperson_name", "")
-        button_url = f"{invoice.get('_id')}"
+        fetched = db["invoices"].find_one({"invoice_number": invoice_number})
+        if fetched:
+            invoice = serialize_mongo_document(dict(fetched))
+            invoice_sales_person = invoice.get("cf_sales_person", "")
+            salesperson = invoice.get("salesperson_name", "")
+            button_url = f"{invoice.get('_id')}"
+            # If the invoice is voided, fall back to the salesorder lookup below
+            if invoice.get("status") == "void":
+                so_ref = invoice.get("reference_number", "")
+                # Extract the SO number (before any " | " suffix)
+                salesorder_number = so_ref.split("|")[0].strip() if so_ref else ""
+                invoice = None
+                invoice_number = ""
 
     if salesorder_number != "":
-        invoice_query = {"reference_number": {"$regex": salesorder_number}}
+        # Prefer a non-void invoice linked to this sales order
+        invoice_query = {"reference_number": {"$regex": salesorder_number}, "status": {"$ne": "void"}}
         found_invoice = db["invoices"].find_one(invoice_query)
+        if not found_invoice:
+            # Fall back to any invoice if no non-void one exists
+            invoice_query = {"reference_number": {"$regex": salesorder_number}}
+            found_invoice = db["invoices"].find_one(invoice_query)
 
         if found_invoice:
             invoice = serialize_mongo_document(dict(found_invoice))
