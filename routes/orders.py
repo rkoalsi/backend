@@ -1717,6 +1717,8 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
     line_items = []
     for idx, product in enumerate(products):
         item = db.products.find_one({"_id": ObjectId(product.get("product_id"))})
+        if item is None:
+            continue
         product_id_str = str(
             product.get("product_id")
         )  # Convert to string for dictionary lookup
@@ -1727,6 +1729,7 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         discount_value = special_margin
         if not discount_value.endswith("%"):
             discount_value = f"{discount_value}%"
+        tax_prefs = item.get("item_tax_preferences") or []
         obj = {
             "item_order": idx + 1,
             "item_id": item.get("item_id"),
@@ -1736,9 +1739,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             "quantity": product.get("quantity"),
             "discount": discount_value,
             "tax_id": (
-                item.get("item_tax_preferences", [{}])[1].get("tax_id", 0)
-                if place_of_supply == "MH" or place_of_supply == ""
-                else item.get("item_tax_preferences", [{}])[0].get("tax_id", 0)
+                tax_prefs[1].get("tax_id", 0)
+                if (place_of_supply == "MH" or place_of_supply == "") and len(tax_prefs) > 1
+                else tax_prefs[0].get("tax_id", 0) if tax_prefs else 0
             ),
             "tags": [],
             "tax_exemption_code": "",
