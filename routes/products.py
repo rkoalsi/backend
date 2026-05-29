@@ -632,6 +632,36 @@ def get_all_product_categories():
         )
 
 
+@router.get("/batch")
+def get_products_batch(ids: str = Query(..., description="Comma-separated product IDs")):
+    """
+    Fetch multiple products by their IDs in a single request.
+    Returns a dict keyed by product_id for easy lookup, replacing N individual fetches.
+    """
+    try:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        if not id_list:
+            return {"products": {}}
+
+        object_ids = []
+        for pid in id_list:
+            try:
+                object_ids.append(ObjectId(pid))
+            except Exception:
+                pass
+
+        products = list(products_collection.find({"_id": {"$in": object_ids}}))
+        result = {}
+        for product in products:
+            serialized = serialize_mongo_document(product)
+            result[serialized["_id"]] = serialized
+
+        return {"products": result}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch products batch")
+
+
 @router.get("/catalogue/all_products")
 def get_all_products_catalogue(
     page: int = Query(1, ge=1, description="Page number, starting from 1"),
@@ -873,6 +903,124 @@ def get_all_products_catalogue(
         "category": category,
         "search": search,
     }
+
+
+@router.get("/catalogue/init")
+def get_catalogue_init(brand: Optional[str] = Query(None, description="Active brand to preload products for")):
+    """
+    Combined init endpoint: returns brands, product counts, categories for the given brand,
+    and the first page of grouped products — all in one request.
+    Eliminates the brands→categories→products waterfall on initial catalogue load.
+    """
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        active_brand = brand or "New Arrivals"
+
+        def fetch_brands():
+            brand_names = products_collection.distinct(
+                "brand",
+                {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
+            )
+            result = []
+            hidden_brands = {
+                doc["name"]
+                for doc in db.brands.find({"hidden": True}, {"name": 1})
+                if doc.get("name")
+            }
+            for brand_name in brand_names:
+                if not brand_name or brand_name in hidden_brands:
+                    continue
+                brand_doc = db.brands.find_one({"name": {"$regex": brand_name, "$options": "i"}})
+                if brand_doc:
+                    if brand_doc.get("hidden"):
+                        continue
+                    result.append({
+                        "brand": brand_name,
+                        "image": brand_doc.get("image_url"),
+                        "secondary_image_url": brand_doc.get("secondary_image_url"),
+                        "description": brand_doc.get("description"),
+                    })
+                else:
+                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": ""})
+            return result
+
+        def fetch_counts():
+            base_query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}, "status": "active"}
+            pipeline = [
+                {"$match": base_query},
+                {"$group": {"_id": {"brand": "$brand", "category": "$category"}, "count": {"$sum": 1}}},
+            ]
+            counts = list(db.products.aggregate(pipeline))
+            hidden_brands = {
+                doc["name"]
+                for doc in db.brands.find({"hidden": True}, {"name": 1})
+                if doc.get("name")
+            }
+            result = {}
+            for item in counts:
+                gid = item["_id"]
+                if not gid.get("brand") or not gid.get("category"):
+                    continue
+                b = gid["brand"]
+                if b in hidden_brands:
+                    continue
+                c = gid["category"]
+                if b not in result:
+                    result[b] = {}
+                result[b][c] = item["count"]
+            three_months_ago = datetime.now() - relativedelta(months=3)
+            new_count = db.products.count_documents({
+                "stock": {"$gt": 0}, "is_deleted": {"$exists": False},
+                "status": "active", "created_at": {"$gte": three_months_ago},
+            })
+            result["New Arrivals"] = {"All Products": new_count}
+            return result
+
+        def fetch_categories():
+            if active_brand == "New Arrivals":
+                return ["All Products"]
+            cats = products_collection.distinct(
+                "category",
+                {"brand": active_brand, "stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
+            )
+            return [c for c in cats if c]
+
+        def fetch_products():
+            return get_all_products_catalogue(
+                page=1,
+                per_page=200,
+                brand=None if active_brand == "New Arrivals" else active_brand,
+                category=None,
+                search=None,
+                group_by_name=True,
+                new_only=True if active_brand == "New Arrivals" else None,
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            brands_future = executor.submit(fetch_brands)
+            counts_future = executor.submit(fetch_counts)
+            categories_future = executor.submit(fetch_categories)
+            products_future = executor.submit(fetch_products)
+
+            brands_list = brands_future.result()
+            counts = counts_future.result()
+            categories = categories_future.result()
+            products_data = products_future.result()
+
+        return {
+            "brands": brands_list,
+            "counts": counts,
+            "categories": categories,
+            "active_brand": active_brand,
+            "items": products_data.get("items", []),
+            "total": products_data.get("total", 0),
+            "total_pages": products_data.get("total_pages", 1),
+        }
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch catalogue init data")
 
 
 @router.get("/out-of-stock")
