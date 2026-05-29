@@ -146,6 +146,12 @@ def create_user(user_data: dict):
         if existing_code:
             raise HTTPException(status_code=400, detail="User code already exists")
 
+    # Convert phone to integer
+    try:
+        user_data["phone"] = int(user_data["phone"])
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Phone must be a valid number")
+
     # Hash the password
     user_data["password"] = hash_password(user_data["password"])
 
@@ -193,6 +199,13 @@ def update_user(user_id: str, user_data: dict):
         })
         if code_exists:
             raise HTTPException(status_code=400, detail="User code already exists")
+
+    # Convert phone to integer if provided
+    if "phone" in user_data and user_data["phone"] is not None:
+        try:
+            user_data["phone"] = int(user_data["phone"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Phone must be a valid number")
 
     # Hash password if provided and not empty
     if user_data.get("password"):

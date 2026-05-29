@@ -62,6 +62,10 @@ org_id = os.getenv("ORG_ID")
 client = get_client()
 db = get_database()
 
+# Module-level cache for /stats — avoids hammering the DB on every page load
+_stats_cache: dict = {"data": None, "ts": 0.0}
+_STATS_TTL = 60  # seconds
+
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
@@ -299,6 +303,9 @@ def get_attendance_stats(start_of_today_ist, now_ist):
 
 @router.get("/stats")
 async def get_stats():
+    if _stats_cache["data"] and (time.time() - _stats_cache["ts"]) < _STATS_TTL:
+        return _stats_cache["data"]
+
     try:
         # Pre-calculate common date values
         ist = tz("Asia/Kolkata")
@@ -373,6 +380,9 @@ async def get_stats():
             **attendance_stats,
             **product_additions_stats
         }
+
+        _stats_cache["data"] = result
+        _stats_cache["ts"] = time.time()
 
         return result
 

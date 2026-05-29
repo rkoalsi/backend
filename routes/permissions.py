@@ -23,15 +23,18 @@ class UserUpdateModel(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
-    phone: Optional[str] = None
+    phone: Optional[int] = None
     role: Optional[str] = None
     status: Optional[str] = None
 
     @field_validator("phone", mode="before")
     @classmethod
-    def coerce_phone_to_str(cls, v):
+    def coerce_phone_to_int(cls, v):
         if v is not None:
-            return str(v)
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                raise ValueError("Phone must be a valid number")
         return v
 
 
