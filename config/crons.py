@@ -1444,7 +1444,8 @@ async def stock_cron():
 
                 # Handle NEW API structure (warehouse_stock array)
                 if "warehouse_stock" in item:
-                    for warehouse_entry in item["warehouse_stock"]:
+                    sub_entries = item["warehouse_stock"]
+                    for warehouse_entry in sub_entries:
                         warehouse_name = warehouse_entry.get("warehouse_name")
                         if warehouse_name:
                             item_name = warehouse_entry.get("item_name") or item.get("item_name")
@@ -1452,6 +1453,11 @@ async def stock_cron():
                                 warehouse_entry.get("quantity_available_for_sale", 0)
                             )
                             warehouses_data[warehouse_name] = quantity
+                    # New API: warehouse_name is empty in sub-entries — use top-level aggregate
+                    if not warehouses_data and sub_entries:
+                        item_name = sub_entries[0].get("item_name") or item.get("item_name")
+                        quantity = int(item.get("quantity_available_for_sale", 0))
+                        warehouses_data["Total"] = quantity
 
                 # Handle OLD API structure (warehouses array)
                 elif "warehouses" in item:
