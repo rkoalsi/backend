@@ -362,6 +362,29 @@ async def delete_invoice_note_image(
     return {"message": "Image deleted successfully"}
 
 
+@router.get("/download_pdf/zoho/{zoho_invoice_id}")
+async def download_pdf_by_zoho_id(zoho_invoice_id: str):
+    """Download invoice PDF directly from Zoho Books using Zoho's invoice_id."""
+    try:
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        response = requests.get(
+            url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=zoho_invoice_id),
+            headers=headers,
+            allow_redirects=False,
+        )
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=invoice_{zoho_invoice_id}.pdf"},
+            )
+        raise HTTPException(status_code=response.status_code, detail=f"Failed to fetch PDF: {response.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download_pdf/{invoice_id}")
 async def download_pdf(invoice_id: str = ""):
     try:

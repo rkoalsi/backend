@@ -29,28 +29,58 @@ s3_client = boto3.client(
 
 
 @router.get("")
-def get_daily_visits(created_by: str):
+def get_daily_visits(
+    created_by: str,
+    page: int = 0,
+    limit: int = 5,
+    customer_name: str = None,
+    date: str = None,
+):
     try:
+        query = {"created_by": ObjectId(created_by)}
+
+        if customer_name:
+            regex = {"$regex": customer_name, "$options": "i"}
+            query["$or"] = [
+                {"shops.customer_name": regex},
+                {"shops.potential_customer_name": regex},
+            ]
+
+        if date:
+            ist = pytz.timezone("Asia/Kolkata")
+            naive_start = datetime.datetime.strptime(date, "%Y-%m-%d")
+            ist_start = ist.localize(naive_start)
+            ist_end = ist.localize(naive_start + datetime.timedelta(days=1))
+            utc_start = ist_start.astimezone(pytz.UTC).replace(tzinfo=None)
+            utc_end = ist_end.astimezone(pytz.UTC).replace(tzinfo=None)
+            query["created_at"] = {"$gte": utc_start, "$lt": utc_end}
+
+        total_count = db.daily_visits.count_documents(query)
+        total_pages = max(1, -(-total_count // limit))  # ceiling division
+
         daily_visits = list(
-            db.daily_visits.find({"created_by": ObjectId(created_by)}).sort(
-                {"created_at": -1}
-            )
+            db.daily_visits.find(query)
+            .sort("created_at", -1)
+            .skip(page * limit)
+            .limit(limit)
         )
         ist_timezone = pytz.timezone("Asia/Kolkata")
 
         for visit in daily_visits:
             if "created_at" in visit:
                 utc_dt = visit["created_at"]
-                # Make sure the datetime is timezone aware; if not, assume it's in UTC.
                 if utc_dt.tzinfo is None:
                     utc_dt = utc_dt.replace(tzinfo=pytz.UTC)
-                # Convert from UTC to IST and format as desired.
                 ist_dt = utc_dt.astimezone(ist_timezone)
                 visit["created_at"] = ist_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        return serialize_mongo_document(daily_visits)
+        return {
+            "daily_visits": serialize_mongo_document(daily_visits),
+            "total_count": total_count,
+            "total_pages": total_pages,
+        }
     except Exception as e:
-        return e
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("")
@@ -65,13 +95,12 @@ async def create_daily_visit(
     selfie_url = None
     creator_id = ObjectId(created_by)
 
-    # Check if a daily visit already exists for the user today
-    start_of_day = datetime.datetime.combine(
-        datetime.datetime.now().date(), datetime.time.min
-    )
-    end_of_day = datetime.datetime.combine(
-        datetime.datetime.now().date(), datetime.time.max
-    )
+    # Check if a daily visit already exists for the user today (IST-aware)
+    ist_timezone = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.datetime.now(tz=pytz.UTC).astimezone(ist_timezone)
+    ist_offset = datetime.timedelta(hours=5, minutes=30)
+    start_of_day = datetime.datetime.combine(now_ist.date(), datetime.time.min) - ist_offset
+    end_of_day = datetime.datetime.combine(now_ist.date(), datetime.time.max) - ist_offset
     if db.daily_visits.find_one(
         {
             "created_by": creator_id,
@@ -106,6 +135,10 @@ async def create_daily_visit(
         shops_data = json.loads(shops)
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid shops data format")
+    # Assign a stable _id to each shop so shop-level comments can reference it reliably
+    for shop in shops_data:
+        if not shop.get("_id"):
+            shop["_id"] = ObjectId()
     for shop in shops_data:
         if not shop.get("potential_customer", ""):
             shop["customer_id"] = ObjectId(shop["customer_id"])
@@ -285,7 +318,7 @@ async def update_daily_visit_update(
                     shop.pop("address", None)
                     shop.pop("customer_name", None)
                     shop["potential_customer_id"] = ObjectId(pc_id)
-                    potential_customer_data = {
+                    pc_fields = {
                         "name": name,
                         "address": address,
                         "tier": tier,
@@ -295,27 +328,25 @@ async def update_daily_visit_update(
                         "follow_up_date": follow_up_date,
                         "comments": comments,
                         "status": pc_status,
-                        "created_by": ObjectId(uploaded_by),
-                        "created_at": datetime.datetime.now(),
+                        "updated_at": datetime.datetime.now(),
                     }
                     if pc_status == "Onboard":
-                        potential_customer_data["onboard_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+                        pc_fields["onboard_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
 
-                    doc = db.potential_customers.find_one(
-                        {
-                            "_id": ObjectId(pc_id)
-                            # "created_by": ObjectId(uploaded_by),
-                        }
-                    )
+                    doc = db.potential_customers.find_one({"_id": ObjectId(pc_id)})
                     if doc:
                         db.potential_customers.update_one(
                             {"_id": ObjectId(pc_id)},
-                            {"$set": potential_customer_data},
+                            {"$set": pc_fields},
                         )
                         potential_customer_id = pc_id
                     else:
                         potential_customer_id = db.potential_customers.insert_one(
-                            potential_customer_data
+                            {
+                                **pc_fields,
+                                "created_by": ObjectId(uploaded_by),
+                                "created_at": datetime.datetime.now(),
+                            }
                         ).inserted_id
 
         except Exception as e:
@@ -501,7 +532,6 @@ async def update_daily_visit_update(
         update_fields["plan"] = daily_visit["plan"]
     if update_text is not None or "updates" in update_fields:
         update_fields["updates"] = daily_visit.get("updates", [])
-    print(json.dumps(serialize_mongo_document(update_fields), indent=4))
     db.daily_visits.update_one(
         {"_id": ObjectId(daily_visit_id)},
         {"$set": update_fields},
@@ -517,20 +547,23 @@ async def update_daily_visit_update(
         ist_dt = utc_dt.astimezone(ist_timezone)
         updated_daily_visit["created_at"] = ist_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    user_obj = db.users.find_one({"email": "barksalesamit@gmail.com"})
-    created_by_user = db.users.find_one(
-        {"_id": ObjectId(daily_visit.get("created_by", ""))}
-    )
-    template = db.templates.find_one({"name": "update_daily_visit"})
-    send_whatsapp(
-        user_obj.get("phone"),
-        {**template},
-        {
-            "name": user_obj.get("first_name", ""),
-            "salesperson_name": created_by_user.get("first_name", ""),
-            "button_url": f"{daily_visit_id}",
-        },
-    )
+    # Only notify admin when a new update entry is submitted (not on shop edits or deletions)
+    if update_text is not None and not update_id:
+        user_obj = db.users.find_one({"email": "barksalesamit@gmail.com"})
+        created_by_user = db.users.find_one(
+            {"_id": ObjectId(daily_visit.get("created_by", ""))}
+        )
+        template = db.templates.find_one({"name": "update_daily_visit"})
+        if user_obj and template:
+            send_whatsapp(
+                user_obj.get("phone"),
+                {**template},
+                {
+                    "name": user_obj.get("first_name", ""),
+                    "salesperson_name": created_by_user.get("first_name", "") if created_by_user else "",
+                    "button_url": f"{daily_visit_id}",
+                },
+            )
     return JSONResponse(
         status_code=200,
         content={
