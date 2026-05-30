@@ -1569,7 +1569,7 @@ def handle_shipment(data: dict):
                 ),
                 "carrier_name": tracking_partner,
                 "delivery_date": delivery_date,
-                "awb_no": tracking_url,
+                "awb_no": tracking_number,
                 "customer_name":customer_name,
             }
         else:
