@@ -1585,6 +1585,52 @@ async def update_order_from_sheet(order_id: str):
         print(f"💥 Error in update_order_from_sheet: {e}")
         raise HTTPException(status_code=500, detail=f"Error reading spreadsheet: {str(e)}")
 
+# Get invoices linked to an order via its estimate's invoice_ids
+@router.get("/{order_id}/invoices")
+def get_order_invoices(order_id: str):
+    """
+    Find the estimate for this order by estimate_number, then return the
+    invoices listed in the estimate's invoice_ids array.
+    """
+    order = get_order(order_id, orders_collection)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    estimate_number = order.get("estimate_number", "")
+    if not estimate_number:
+        return []
+
+    estimate = db.estimates.find_one({"estimate_number": estimate_number})
+    if not estimate:
+        return []
+
+    invoice_ids = estimate.get("invoice_ids", [])
+    if not invoice_ids:
+        return []
+
+    # Build a lookup map from DB for any invoices that have been synced
+    db_invoices = {
+        doc["invoice_id"]: doc
+        for doc in db.invoices.find(
+            {"invoice_id": {"$in": invoice_ids}},
+            {"invoice_id": 1, "invoice_number": 1, "invoice_url": 1, "total": 1, "status": 1},
+        )
+    }
+
+    # Always return one entry per invoice_id from the estimate; enrich with DB metadata when available
+    result = []
+    for zoho_id in invoice_ids:
+        db_doc = db_invoices.get(zoho_id, {})
+        result.append({
+            "zoho_invoice_id": zoho_id,
+            "invoice_number": db_doc.get("invoice_number", zoho_id),
+            "invoice_url": db_doc.get("invoice_url", ""),
+            "total": db_doc.get("total", None),
+            "status": db_doc.get("status", ""),
+        })
+    return result
+
+
 # Get an order by ID
 @router.get("/{order_id}")
 def read_order(order_id: str):
