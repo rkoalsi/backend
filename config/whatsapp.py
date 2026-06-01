@@ -87,21 +87,40 @@ def generate_whatsapp_template(template_doc: dict, dynamic_params: dict) -> Temp
     )
 
 
-def send_whatsapp(to: str, template_doc: dict, params: dict):
+def _log_chat(chats_col, dst_phone: str, template_doc: dict, params: dict, message_uuid=None, status: str = "queued", error: str = None):
+    doc = {
+        "type": "outgoing",
+        "from": FROM_NUMBER,
+        "to": dst_phone,
+        "template_name": template_doc.get("name"),
+        "params": params,
+        "message_uuid": message_uuid,
+        "status": status,
+        "created_at": datetime.datetime.now(),
+    }
+    if error:
+        doc["error"] = error
     try:
-        # Check if phone number already has country code (starts with +)
-        phone_str = str(to).strip()
+        chats_col.insert_one(doc)
+    except Exception as log_err:
+        print(f"Failed to log WhatsApp chat: {log_err}")
 
-        if phone_str.startswith('+'):
-            dst_phone = phone_str
-        else:
-            cleaned_phone = ''.join(char for char in phone_str if char.isdigit())
 
-            if not cleaned_phone:
-                raise ValueError(f"Invalid phone number after cleaning: {to}")
+def send_whatsapp(to: str, template_doc: dict, params: dict):
+    # Resolve phone number before try/except so we can log failures
+    phone_str = str(to).strip()
+    if phone_str.startswith('+'):
+        dst_phone = phone_str
+    else:
+        cleaned_phone = ''.join(char for char in phone_str if char.isdigit())
+        if not cleaned_phone:
+            print(f"Invalid phone number after cleaning: {to}")
+            return None
+        dst_phone = f"+91{cleaned_phone}"
 
-            dst_phone = f"+91{cleaned_phone}"
+    chats_col = _get_chats_collection()
 
+    try:
         response = client.messages.create(
             type_="whatsapp",
             src=FROM_NUMBER,
@@ -109,21 +128,18 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
             template=generate_whatsapp_template(template_doc, params),
         )
 
-        try:
-            _get_chats_collection().insert_one({
-                "type": "outgoing",
-                "from": FROM_NUMBER,
-                "to": dst_phone,
-                "template_name": template_doc.get("name"),
-                "params": params,
-                "message_uuid": response.get("message_uuid", [None])[0] if isinstance(response, dict) else getattr(response, "message_uuid", [None])[0] if hasattr(response, "message_uuid") else None,
-                "created_at": datetime.datetime.now(),
-            })
-        except Exception as log_err:
-            print(f"Failed to log outgoing WhatsApp to chats: {log_err}")
-
+        uuid_val = (
+            response.get("message_uuid", [None])[0] if isinstance(response, dict)
+            else getattr(response, "message_uuid", [None])[0] if hasattr(response, "message_uuid")
+            else None
+        )
+        _log_chat(chats_col, dst_phone, template_doc, params, message_uuid=uuid_val, status="queued")
         return response
     except plivo.exceptions.AuthenticationError as e:
         print("Authentication failed:", e)
+        _log_chat(chats_col, dst_phone, template_doc, params, status="failed", error=str(e))
     except Exception as e:
-        print("An error occurred:", e)
+        error_msg = str(e)
+        print(f"An error occurred sending to {dst_phone}:", error_msg)
+        status = "rate_limit_exceeded" if "rate limit" in error_msg.lower() else "failed"
+        _log_chat(chats_col, dst_phone, template_doc, params, status=status, error=error_msg)
