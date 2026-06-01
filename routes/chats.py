@@ -45,12 +45,15 @@ async def plivo_callback(request: Request):
         "created_at": datetime.datetime.now(),
     }
 
+    print(f"[callback] type={chat_type} uuid={message_uuid} status={status} from={from_number} to={to_number}")
+
     # If it's a delivery callback, try to update the matching outgoing message
     if chat_type == "callback" and message_uuid:
-        chats.update_one(
+        result = chats.update_one(
             {"type": "outgoing", "message_uuid": message_uuid},
             {"$set": {"status": status, "last_callback_at": datetime.datetime.now()}},
         )
+        print(f"[callback] update matched={result.matched_count} modified={result.modified_count}")
 
     chats.insert_one(doc)
     return {"message": "ok"}

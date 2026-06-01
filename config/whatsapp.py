@@ -128,11 +128,18 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
             template=generate_whatsapp_template(template_doc, params),
         )
 
-        uuid_val = (
-            response.get("message_uuid", [None])[0] if isinstance(response, dict)
-            else getattr(response, "message_uuid", [None])[0] if hasattr(response, "message_uuid")
-            else None
-        )
+        raw_uuid = None
+        if isinstance(response, dict):
+            raw_uuid = response.get("message_uuid")
+        elif hasattr(response, "message_uuid"):
+            raw_uuid = response.message_uuid
+        if isinstance(raw_uuid, list):
+            uuid_val = raw_uuid[0] if raw_uuid else None
+        elif isinstance(raw_uuid, str):
+            uuid_val = raw_uuid
+        else:
+            uuid_val = None
+        print(f"[whatsapp] sent to {dst_phone}, message_uuid={uuid_val}")
         _log_chat(chats_col, dst_phone, template_doc, params, message_uuid=uuid_val, status="queued")
         return response
     except plivo.exceptions.AuthenticationError as e:
