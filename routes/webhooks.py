@@ -485,178 +485,49 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
     sheet_name = f'{now_date.strftime("%b")} {year}'
     print(f"Fetching stock for {now_date.strftime('%b')}-{year} with date {to_date}")
 
-    warehouse_stock = []
+    _PUPSCRIBE_LOCATION_ID = "3220178000000403010"
     access_token = get_access_token('inventory')
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    # Define target warehouse names (both formats for compatibility)
-    target_warehouses = {
-        "pupscribe enterprises private limited",
-        "Pupscribe Enterprises Private Limited",
-    }
-
-    try:
-        # Fetch the total number of pages
-        response = fetch_with_retries(
-            url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
-            headers=headers,
-            retries=3,
-            timeout=10,
-            page_number="Total Pages",
-        )
-        if response is None:
-            print("Failed to retrieve the total number of pages.")
-            return []
-
-        total_pages = int(response.json().get("page_context", {}).get("total_pages", 1))
-        print(f"Total pages to fetch: {total_pages}")
-
-        # Define the maximum number of concurrent threads
-        max_workers = 5
-        failed_pages = []
-
-        def fetch_page(page_number):
-            page_url = WAREHOUSE_URL.format(
-                page=page_number, date1=to_date, org_id=org_id
-            )
-            response = fetch_with_retries(
-                url=page_url,
-                headers=headers,
-                retries=3,
-                timeout=10,
-                page_number=page_number,
-            )
-            if response is not None:
-                try:
-                    page_data = response.json()
-                    warehouse_stock_info = page_data.get("warehouse_stock_info", [])
-                    return warehouse_stock_info
-                except json.JSONDecodeError as e:
-                    print(f"Page {page_number}: JSON decode error: {e}")
-                    return None
-            else:
-                return None
-
-        # Fetch all pages concurrently
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_page = {
-                executor.submit(fetch_page, i): i for i in range(1, total_pages + 1)
-            }
-            for future in as_completed(future_to_page):
-                page = future_to_page[future]
-                try:
-                    data = future.result()
-                    if data is not None:
-                        warehouse_stock.extend(data)
-                    else:
-                        failed_pages.append(page)
-                except Exception as exc:
-                    print(f"Page {page} generated an exception: {exc}")
-                    failed_pages.append(page)
-
-        # Retry failed pages
-        if failed_pages:
-            print(f"Retrying failed pages: {failed_pages}")
-            for page in failed_pages:
-                data = fetch_page(page)
-                if data is not None:
-                    warehouse_stock.extend(data)
-                else:
-                    print(f"Page {page}: Failed to fetch on retry.")
-
-    except Exception as e:
-        print(f"Failed to fetch total pages or initial data: {e}")
-        return []
-
-    print(f"Total warehouse stock items fetched: {len(warehouse_stock)}")
-
-    # Process warehouse stock data - handle both API structures
+    # Use inventorysummary with location_id — returns WH-specific quantity_available_for_sale
+    # (the warehouse report API stopped populating warehouse_name in sub-entries as of 2026-05)
     arr = []
-    for item in warehouse_stock:
-        if not isinstance(item, dict):
-            print(f"Skipping item {item} because it is not a dictionary")
-            continue
-        # Handle new API structure with "warehouse_stock" array
-        if "warehouse_stock" in item:
-            sub_entries = item["warehouse_stock"]
-            matched = False
-            # First try to find the target warehouse by name (old behaviour)
-            for warehouse_entry in sub_entries:
-                warehouse_name = warehouse_entry.get("warehouse_name", "")
-                if warehouse_name in target_warehouses or warehouse_name.strip().lower() in {n.lower() for n in target_warehouses}:
-                    try:
-                        stock_quantity = int(
-                            warehouse_entry.get("quantity_available_for_sale", 0)
-                        )
-                        item_name = warehouse_entry.get("item_name", "").strip().lower()
-                        arr.append({"name": item_name, "stock": stock_quantity})
-                        matched = True
-                        break
-                    except ValueError:
-                        print(
-                            f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}"
-                        )
-            # New API: warehouse_name is empty — use top-level aggregate quantity
-            if not matched and sub_entries:
-                try:
-                    item_name = (sub_entries[0].get("item_name") or item.get("item_name", "")).strip().lower()
-                    stock_quantity = int(item.get("quantity_available_for_sale", 0))
-                    if item_name:
-                        arr.append({"name": item_name, "stock": stock_quantity})
-                except ValueError:
-                    print(f"Invalid aggregate stock for item: {item.get('item_name')}")
+    page = 1
+    while True:
+        inv_url = (
+            f"https://inventory.zoho.com/api/v1/reports/inventorysummary"
+            f"?page={page}&per_page=200&filter_by=TransactionDate.CustomDate"
+            f"&show_actual_stock=false&to_date={to_date}"
+            f"&organization_id={org_id}&location_id={_PUPSCRIBE_LOCATION_ID}"
+        )
+        try:
+            resp = requests.get(inv_url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"inventorysummary page {page} failed: {e}")
+            break
 
-        # Handle old API structure with direct warehouse info
-        elif "warehouses" in item:
-            item_name = item.get("item_name", "").strip().lower()
-            warehouses = item.get("warehouses", [])
-            for w in warehouses:
-                warehouse_name = w.get("warehouse_name", "")
-                # Check both exact and lowercase versions
-                if (
-                    warehouse_name in target_warehouses
-                    or warehouse_name.strip().lower()
-                    in {name.lower() for name in target_warehouses}
-                ):
-                    try:
-                        stock_quantity = int(w.get("quantity_available_for_sale", 0))
-                        arr.append(
-                            {
-                                "name": item_name,
-                                "stock": stock_quantity,
-                            }
-                        )
-                        print(f"Added stock for '{item_name}': {stock_quantity}")
-                        # Debug: Log products with brackets
-                        if "(" in item_name or ")" in item_name:
-                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-                        break  # Found the warehouse we want
-                    except ValueError:
-                        print(
-                            f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}"
-                        )
+        if not data.get("inventory"):
+            break
 
-        # Handle direct warehouse structure (fallback)
-        elif item.get("warehouse_name") in target_warehouses:
+        for item in data["inventory"][0].get("item_details", []):
+            item_name = (item.get("item_name") or "").strip().lower()
+            if not item_name:
+                continue
             try:
-                stock_quantity = int(item.get("quantity_available_for_sale", 0))
-                item_name = item.get("item_name", "").strip().lower()
-                arr.append(
-                    {
-                        "name": item_name,
-                        "stock": stock_quantity,
-                    }
-                )
-                print(f"Added stock for '{item_name}': {stock_quantity}")
-                # Debug: Log products with brackets
-                if "(" in item_name or ")" in item_name:
-                    print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-            except ValueError:
-                print(
-                    f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}"
-                )
+                stock_quantity = int(item.get("quantity_available_for_sale") or 0)
+            except (ValueError, TypeError):
+                print(f"Invalid stock quantity for '{item_name}': {item.get('quantity_available_for_sale')}")
+                continue
+            arr.append({"name": item_name, "stock": stock_quantity})
 
-    print(f"Total stock items after filtering: {len(arr)}")
+        print(f"inventorysummary page {page}: {len(arr)} items so far")
+        if not data.get("page_context", {}).get("has_more_page"):
+            break
+        page += 1
+
+    print(f"Total stock items (Pupscribe WH): {len(arr)}")
     return arr
 
 
