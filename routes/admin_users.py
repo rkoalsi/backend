@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile
+from fastapi.responses import StreamingResponse
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from passlib.hash import bcrypt
@@ -6,6 +7,9 @@ from datetime import datetime
 from typing import Optional
 import secrets
 import string
+import re
+import openpyxl
+from io import BytesIO
 
 router = APIRouter()
 db = get_database()
@@ -105,6 +109,179 @@ def get_available_roles():
 def generate_new_password():
     """Generate a new random password."""
     return {"password": generate_password()}
+
+
+@router.get("/bulk-upload/template")
+def download_bulk_upload_template():
+    """Download the XLSX template for bulk customer upload."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Customers"
+    headers = ["First Name", "Last Name", "Email", "Whatsapp Phone Number", "Zoho Customer Name"]
+    ws.append(headers)
+
+    # Style header row
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    for col_idx, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    # Set column widths
+    col_widths = [20, 20, 30, 25, 35]
+    for i, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = width
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=customer_upload_template.xlsx"},
+    )
+
+
+@router.post("/bulk-upload/preview")
+def preview_bulk_upload(file: UploadFile = File(...)):
+    """Parse uploaded XLSX and match Zoho Customer Name against the customers collection."""
+    contents = file.file.read()
+    try:
+        wb = openpyxl.load_workbook(BytesIO(contents))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read file. Please upload a valid .xlsx file.")
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
+    header = [str(h).strip() if h is not None else "" for h in rows[0]]
+    expected = ["First Name", "Last Name", "Email", "Whatsapp Phone Number", "Zoho Customer Name"]
+    if header != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid template headers. Expected: {', '.join(expected)}. Got: {', '.join(header)}"
+        )
+
+    found = []
+    not_found = []
+
+    for i, row in enumerate(rows[1:], start=2):
+        if not any(row):
+            continue
+
+        first_name = str(row[0]).strip() if row[0] is not None else ""
+        last_name = str(row[1]).strip() if row[1] is not None else ""
+        email = str(row[2]).strip() if row[2] is not None else ""
+        phone = str(row[3]).strip() if row[3] is not None else ""
+        zoho_name = str(row[4]).strip() if row[4] is not None else ""
+
+        entry = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
+            "phone": phone,
+            "zoho_customer_name": zoho_name,
+            "row": i,
+        }
+
+        if not zoho_name:
+            not_found.append({**entry, "reason": "No Zoho Customer Name provided"})
+            continue
+
+        customer = db.customers.find_one(
+            {
+                "$or": [
+                    {"customer_name": {"$regex": re.escape(zoho_name), "$options": "i"}},
+                    {"company_name": {"$regex": re.escape(zoho_name), "$options": "i"}},
+                    {"contact_name": {"$regex": re.escape(zoho_name), "$options": "i"}},
+                ]
+            },
+            {"_id": 0, "contact_id": 1, "contact_name": 1, "company_name": 1, "customer_name": 1},
+        )
+
+        if customer:
+            matched_name = (
+                customer.get("company_name")
+                or customer.get("contact_name")
+                or customer.get("customer_name")
+                or zoho_name
+            )
+            found.append({
+                **entry,
+                "customer_id": customer.get("contact_id"),
+                "matched_customer_name": matched_name,
+            })
+        else:
+            not_found.append({**entry, "reason": "No matching customer found in database"})
+
+    return {"found": found, "not_found": not_found}
+
+
+@router.post("/bulk-upload/create")
+def create_bulk_users(data: dict):
+    """Create user accounts for confirmed entries from the bulk upload preview."""
+    entries = data.get("entries", [])
+    if not entries:
+        raise HTTPException(status_code=400, detail="No entries provided.")
+
+    created = []
+    errors = []
+
+    for entry in entries:
+        email = (entry.get("email") or "").strip()
+        first_name = (entry.get("first_name") or "").strip()
+        last_name = (entry.get("last_name") or "").strip()
+        phone = (entry.get("phone") or "").strip()
+        customer_id = entry.get("customer_id") or ""
+        matched_customer_name = entry.get("matched_customer_name") or ""
+
+        if not email:
+            errors.append({"entry": entry, "reason": "Email is required"})
+            continue
+
+        if db.users.find_one({"email": email}):
+            errors.append({"entry": entry, "reason": f"Email {email} already exists"})
+            continue
+
+        name = f"{first_name} {last_name}".strip() or email
+
+        plain_password = generate_password()
+        try:
+            phone_int = int(phone) if phone else 0
+        except ValueError:
+            phone_int = 0
+
+        user_doc = {
+            "name": name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
+            "phone": phone_int,
+            "role": "customer",
+            "status": "active",
+            "password": hash_password(plain_password),
+            "customer_id": customer_id,
+            "customer_name": matched_customer_name,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+
+        result = db.users.insert_one(user_doc)
+        created.append({
+            "user_id": str(result.inserted_id),
+            "name": name,
+            "email": email,
+            "password": plain_password,
+            "customer_name": matched_customer_name,
+        })
+
+    return {"created": created, "errors": errors, "total_created": len(created)}
 
 
 @router.get("/{user_id}")
