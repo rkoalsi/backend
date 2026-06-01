@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Request, Query, Depends
 from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import JWTBearer
 import datetime
 
 router = APIRouter()
@@ -59,7 +60,7 @@ async def plivo_callback(request: Request):
     return {"message": "ok"}
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(JWTBearer())])
 def get_chats(
     chat_type: str = Query(None, description="Filter by type: outgoing, incoming, callback"),
     phone: str = Query(None, description="Filter by phone number (from or to)"),
