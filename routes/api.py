@@ -129,7 +129,7 @@ router.include_router(
     customer_address_details, prefix="/customer_address_details", tags=["Customer Address Details"], dependencies=_jwt
 )
 router.include_router(
-    chats, prefix="/chats", tags=["Chats"], dependencies=_jwt
+    chats, prefix="/chats", tags=["Chats"]
 )
 
 @router.get("/")
