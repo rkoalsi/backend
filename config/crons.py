@@ -1393,158 +1393,86 @@ async def stock_cron():
                 logger.error("Failed to get access token")
                 return
 
-            # Fetch the first page to determine total pages
-            warehouse_url = (
-                f"https://inventory.zoho.com/api/v1/reports/warehouse?"
-                f"page=1&per_page=2000&sort_column=item_name&sort_order=A&"
-                f"response_option=1&filter_by=TransactionDate.CustomDate&"
-                f"show_actual_stock=false&to_date={yesterday}&organization_id={org_id}"
-            )
+            # Step 1: fetch all warehouses
+            all_warehouses = []
+            wh_page = 1
+            while True:
+                wh_url = (
+                    f"https://inventory.zoho.com/api/v1/warehouses?"
+                    f"organization_id={org_id}&per_page=200&page={wh_page}"
+                )
+                wh_data = await api_client.make_request(wh_url)
+                if not wh_data:
+                    break
+                all_warehouses.extend(wh_data.get("warehouses", []))
+                if not wh_data.get("page_context", {}).get("has_more_page"):
+                    break
+                wh_page += 1
+            logger.info(f"Found {len(all_warehouses)} warehouses")
 
-            data = await api_client.make_request(warehouse_url)
-            if not data or "warehouse_stock_info" not in data:
-                logger.info(f"No warehouse stock data found for {yesterday}")
+            if not all_warehouses:
+                logger.error("No warehouses returned from Zoho — aborting stock cron")
                 return
 
-            warehouse_stock = data["warehouse_stock_info"]
-            total_pages = data.get("page_context", {}).get("total_pages", 1)
+            # Step 2: for each warehouse, fetch inventorysummary with location_id.
+            # quantity_available_for_sale from inventorysummary is location-specific
+            # (unlike the items list API which always returns global totals).
+            # items_map: {item_id (or item_name fallback) -> {item_name, item_id, warehouses: {wh_name: qty}}}
+            items_map: dict[str, dict] = {}
 
-            # Fetch remaining pages if there are more than 1 page
-            if total_pages > 1:
-                logger.info(f"Fetching {total_pages} pages for {yesterday}")
+            active_warehouses = [w for w in all_warehouses if w.get("status") == "active"]
+            logger.info(f"Active warehouses: {[w['warehouse_name'] for w in active_warehouses]}")
 
-                for page in range(2, total_pages + 1):
-                    page_url = (
-                        f"https://inventory.zoho.com/api/v1/reports/warehouse?"
-                        f"page={page}&per_page=2000&sort_column=item_name&sort_order=A&"
-                        f"response_option=1&filter_by=TransactionDate.CustomDate&"
-                        f"show_actual_stock=false&to_date={yesterday}&organization_id={org_id}"
+            for wh in active_warehouses:
+                wh_id = wh["warehouse_id"]
+                wh_name = wh["warehouse_name"]
+                inv_page = 1
+                while True:
+                    inv_url = (
+                        f"https://inventory.zoho.com/api/v1/reports/inventorysummary?"
+                        f"page={inv_page}&per_page=200&filter_by=TransactionDate.CustomDate&"
+                        f"show_actual_stock=false&to_date={yesterday}&"
+                        f"organization_id={org_id}&location_id={wh_id}"
                     )
+                    inv_data = await api_client.make_request(inv_url)
+                    if not inv_data or not inv_data.get("inventory"):
+                        break
+                    page_items = inv_data["inventory"][0].get("item_details", [])
+                    for item in page_items:
+                        item_id = str(item.get("item_id") or "")
+                        item_name = (item.get("item_name") or "").strip()
+                        if not item_id and not item_name:
+                            continue
+                        qty = int(item.get("quantity_available_for_sale") or 0)
+                        key = item_id or item_name
+                        if key not in items_map:
+                            items_map[key] = {
+                                "item_name": " ".join(item_name.split()),
+                                "item_id": item_id,
+                                "warehouses": {},
+                            }
+                        items_map[key]["warehouses"][wh_name] = qty
+                    if not inv_data.get("page_context", {}).get("has_more_page"):
+                        break
+                    inv_page += 1
+                logger.info(f"Fetched '{wh_name}': {len(items_map)} unique items so far")
 
-                    page_data = await api_client.make_request(page_url)
-                    if page_data and "warehouse_stock_info" in page_data:
-                        warehouse_stock.extend(page_data["warehouse_stock_info"])
-
-            logger.info(
-                f"Processing {len(warehouse_stock)} warehouse stock items for {yesterday}"
-            )
-
-            # Process warehouse stock - store ALL warehouses
-            # processed_items: {normalized_name: {"warehouses": {...}, "item_id": str|None}}
-            processed_items = {}
-
-            for item in warehouse_stock:
-                if not isinstance(item, dict):
-                    continue
-
-                item_name = None
-                warehouses_data = {}
-                # Zoho API returns item_id at the top level of each item
-                api_item_id = item.get("item_id") or item.get("zoho_item_id")
-
-                # Handle NEW API structure (warehouse_stock array)
-                if "warehouse_stock" in item:
-                    sub_entries = item["warehouse_stock"]
-                    for warehouse_entry in sub_entries:
-                        warehouse_name = warehouse_entry.get("warehouse_name")
-                        if warehouse_name:
-                            item_name = warehouse_entry.get("item_name") or item.get("item_name")
-                            quantity = int(
-                                warehouse_entry.get("quantity_available_for_sale", 0)
-                            )
-                            warehouses_data[warehouse_name] = quantity
-                    # New API: warehouse_name is empty in sub-entries — use top-level aggregate
-                    if not warehouses_data and sub_entries:
-                        item_name = sub_entries[0].get("item_name") or item.get("item_name")
-                        quantity = int(item.get("quantity_available_for_sale", 0))
-                        warehouses_data["Total"] = quantity
-
-                # Handle OLD API structure (warehouses array)
-                elif "warehouses" in item:
-                    item_name = item.get("item_name")
-                    for warehouse in item.get("warehouses", []):
-                        warehouse_name = warehouse.get("warehouse_name")
-                        if warehouse_name:
-                            quantity = int(
-                                warehouse.get("quantity_available_for_sale", 0)
-                            )
-                            warehouses_data[warehouse_name] = quantity
-
-                # Handle direct warehouse entry
-                elif "warehouse_name" in item:
-                    warehouse_name = item.get("warehouse_name")
-                    item_name = item.get("item_name")
-                    quantity = int(item.get("quantity_available_for_sale", 0))
-                    warehouses_data[warehouse_name] = quantity
-
-                if item_name and warehouses_data:
-                    # Normalize item name
-                    normalized_name = " ".join(item_name.split())
-
-                    if normalized_name not in processed_items:
-                        processed_items[normalized_name] = {"warehouses": {}, "item_id": api_item_id}
-                    elif api_item_id and not processed_items[normalized_name]["item_id"]:
-                        processed_items[normalized_name]["item_id"] = api_item_id
-
-                    # Merge warehouse data
-                    for warehouse_name, quantity in warehouses_data.items():
-                        processed_items[normalized_name]["warehouses"][warehouse_name] = quantity
-
-            # Pre-build item_id lookup keyed by item_id for items missing it from API
-            # Fetch all products once to avoid N+1 lookups
-            all_product_names = list(processed_items.keys())
-            product_by_name = {}
-            for prod in products_collection.find(
-                {"$or": [{"name": {"$in": all_product_names}}, {"item_name": {"$in": all_product_names}}]},
-                {"_id": 1, "item_id": 1, "name": 1, "item_name": 1},
-            ):
-                for field in ("name", "item_name"):
-                    key = prod.get(field)
-                    if key:
-                        product_by_name[key] = prod
-
-            # Prepare documents for MongoDB
+            # Step 3: build and insert documents
             documents = []
-            missing_item_id_count = 0
-            for item_name, entry in processed_items.items():
-                warehouses = entry["warehouses"]
-                api_item_id = entry["item_id"]
-
+            for entry in items_map.values():
                 doc = {
-                    "item_name": item_name,
-                    "warehouses": warehouses,
+                    "item_name": entry["item_name"],
+                    "warehouses": entry["warehouses"],
                     "date": target_date,
                     "created_at": datetime.now(),
                 }
-
-                if api_item_id:
-                    # Best case: item_id came directly from Zoho API response
-                    doc["zoho_item_id"] = str(api_item_id)
-                else:
-                    # Fallback: look up product by name
-                    product = product_by_name.get(item_name)
-                    if product:
-                        doc["product_id"] = product["_id"]
-                        doc["zoho_item_id"] = str(product.get("item_id", "")) or None
-                    else:
-                        missing_item_id_count += 1
-
+                if entry["item_id"]:
+                    doc["zoho_item_id"] = entry["item_id"]
                 documents.append(doc)
-
-            if missing_item_id_count:
-                logger.warning(f"⚠️ {missing_item_id_count} items could not be matched to a product (no zoho_item_id)")
 
             if documents:
                 warehouse_stock_collection.insert_many(documents, ordered=False)
-                logger.info(
-                    f"✅ Inserted {len(documents)} warehouse stock records for {yesterday}"
-                )
-
-                # Show warehouse summary
-                all_warehouses = set()
-                for entry in processed_items.values():
-                    all_warehouses.update(entry["warehouses"].keys())
-                logger.info(f"Warehouses tracked: {len(all_warehouses)}")
+                logger.info(f"✅ Inserted {len(documents)} warehouse stock records for {yesterday}")
             else:
                 logger.info(f"No warehouse stock data found for {yesterday}")
 
@@ -1555,8 +1483,7 @@ async def stock_cron():
                 details={
                     "processed": len(documents),
                     "duration": duration,
-                    "pages_fetched": total_pages,
-                    "total_items": len(warehouse_stock),
+                    "warehouses": len(active_warehouses),
                 },
             )
     except Exception as e:
