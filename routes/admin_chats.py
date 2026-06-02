@@ -36,7 +36,7 @@ def _enrich_outgoing(chat: dict) -> dict:
 def get_admin_chats(
     chat_type: str = Query(None, description="Filter: outgoing, incoming, callback"),
     phone: str = Query(None, description="Filter by phone number (from or to)"),
-    limit: int = Query(50, le=500),
+    limit: int = Query(50, le=100000),
     skip: int = Query(0, ge=0),
 ):
     query: dict = {}
