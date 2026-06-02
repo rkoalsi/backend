@@ -489,11 +489,7 @@ def search_customers_for_assignment(
     """
     customers = db.customers.find(
         {
-            "$or": [
-                {"contact_name": {"$regex": search, "$options": "i"}},
-                {"company_name": {"$regex": search, "$options": "i"}},
-                {"email": {"$regex": search, "$options": "i"}},
-            ],
+            "contact_name": {"$regex": search, "$options": "i"},
             "status": "active"
         },
         {
@@ -505,11 +501,16 @@ def search_customers_for_assignment(
         }
     ).limit(20)
 
+    seen = set()
     results = []
     for customer in customers:
+        contact_id = customer.get("contact_id")
+        if contact_id in seen:
+            continue
+        seen.add(contact_id)
         results.append({
             "_id": str(customer.get("_id")),
-            "contact_id": customer.get("contact_id"),
+            "contact_id": contact_id,
             "contact_name": customer.get("contact_name"),
             "company_name": customer.get("company_name"),
             "email": customer.get("email"),
