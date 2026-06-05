@@ -1260,7 +1260,7 @@ def handle_accepted_estimate(data: dict):
                 "estimate_accepted",
                 f"Estimate {estimate_number} accepted",
                 f"Estimate {estimate_number} has been accepted by the customer.",
-                "/orders",
+                "/admin/orders",
             )
     else:
         print("Estimate Does Not Exist. Webhook Received")

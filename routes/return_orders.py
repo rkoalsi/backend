@@ -246,7 +246,7 @@ async def create_return_order(return_order: ReturnOrderCreate):
             ro_id = str(result.inserted_id)
             ro_title = f"Return order created – {order_dict.get('customer_name', '')}"
             ro_body = f"Reason: {order_dict.get('return_reason', '')}. Items: {total_quantity}."
-            ro_link = f"/return_orders"
+            ro_link = f"/admin/return_orders"
             _notify_ids = set()
             for query in [
                 {"_id": ObjectId(order_dict["created_by"])},
