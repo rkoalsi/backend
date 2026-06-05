@@ -30,6 +30,11 @@ NOTIFICATION_TYPES = {
     # shipments
     "shipment_dispatched": "Shipment Dispatched",
     "shipment_delivered": "Shipment Delivered",
+    # zoho webhook events
+    "estimate_accepted": "Estimate Accepted",
+    "draft_sales_order": "Draft Sales Order",
+    "draft_invoice": "Draft Invoice",
+    "new_product": "New Product",
 }
 
 
