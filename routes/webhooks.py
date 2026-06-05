@@ -1302,6 +1302,7 @@ def handle_shipment(data: dict):
     )
 
     # Find or create shipment in database
+    shipment_mongo_id = None
     if shipment_id:
         shipment["shipment_id"] = shipment_id
         existing_shipment = db.shipments.find_one({"shipment_id": shipment_id})
@@ -1333,12 +1334,14 @@ def handle_shipment(data: dict):
             db.shipments.update_one(
                 {"shipment_id": shipment_id}, {"$set": sorted_data}
             )
+            shipment_mongo_id = str(existing_shipment["_id"])
             print(f"Updated shipment with shipment_id {shipment_id}")
         else:
             # Create new shipment
             sorted_data["created_at"] = sorted_data.get("created_time", current_time)
             sorted_data["updated_at"] = current_time
-            db.shipments.insert_one(sorted_data)
+            insert_result = db.shipments.insert_one(sorted_data)
+            shipment_mongo_id = str(insert_result.inserted_id)
             print(f"Created new shipment with shipment_id {shipment_id}")
 
     # Continue with existing notification logic
@@ -1512,7 +1515,7 @@ def handle_shipment(data: dict):
                 if is_delivered
                 else f"{customer_name} order dispatched. Tracking: {tracking_number}."
             )
-            shipment_link = f"/shipments/{shipment_id}" if shipment_id else "/shipments"
+            shipment_link = f"/shipments/{shipment_mongo_id}" if shipment_mongo_id else "/shipments"
 
             notif_recipients = set()
             for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4, company_number]:
