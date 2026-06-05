@@ -2064,6 +2064,22 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                         f"Your estimate {est_number} has been created successfully.",
                         f"/orders/new/{order_id}",
                     )
+
+        # Notify Invoicee users whenever a customer saves or updates an order
+        if user and user.get("role") == "customer":
+            notif_type = "order_placed" if is_first_create else "order_edited"
+            notif_title = (
+                f"New order {est_number} from {customer_name}"
+                if is_first_create
+                else f"Order {est_number} updated by {customer_name}"
+            )
+            notif_body = (
+                f"Customer {customer_name} has placed order {est_number}."
+                if is_first_create
+                else f"Customer {customer_name} has updated order {est_number}."
+            )
+            for invoicee in db.users.find({"designation": "Invoicee", "status": "active"}, {"_id": 1}):
+                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link)
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 

@@ -323,6 +323,17 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     template_doc=template,
                     params=params,
                 )
+                if person.get("phone"):
+                    user_doc = db.users.find_one({"phone": person["phone"]}, {"_id": 1})
+                    if user_doc:
+                        create_notification(
+                            db,
+                            str(user_doc["_id"]),
+                            "new_product",
+                            f"New product: {item.get('name', '')}",
+                            f"{brand_name} — {item.get('name', '')} has been added.",
+                            "/admin/products",
+                        )
 
             background_tasks.add_task(run_update_stock)
         else:
@@ -656,6 +667,14 @@ def update_stock():
                     to=salesperson["phone"],
                     template_doc=serialize_mongo_document(dict(template_doc)),
                     params=params,
+                )
+                create_notification(
+                    db,
+                    str(salesperson["_id"]),
+                    "product_back_in_stock",
+                    f"{req.get('product_name', 'Product')} is back in stock",
+                    f"{req.get('product_brand', '')} {req.get('product_name', '')} is now available for {req.get('customer_name', '')}.",
+                    f"/orders/past/{str(req.get('order_id', ''))}",
                 )
                 notified_ids.append(req["_id"])
                 print(f"Sent in-stock notification to {salesperson.get('name')} for {req.get('product_name')}")
@@ -1235,6 +1254,14 @@ def handle_accepted_estimate(data: dict):
             to = serialize_mongo_document(dict(user_doc))
             params = {"name": to.get("first_name"), "estimate_number": estimate_number}
             send_whatsapp(to.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                str(user_doc["_id"]),
+                "estimate_accepted",
+                f"Estimate {estimate_number} accepted",
+                f"Estimate {estimate_number} has been accepted by the customer.",
+                "/orders",
+            )
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
@@ -1257,6 +1284,14 @@ def handle_draft_sales_order(data: dict):
                 "sales_order_number": salesorder_number,
             }
             send_whatsapp(person.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                person["_id"] if isinstance(person.get("_id"), str) else str(person["_id"]),
+                "draft_sales_order",
+                f"Draft sales order {salesorder_number}",
+                f"Sales order {salesorder_number} has been drafted.",
+                "/admin/orders",
+            )
     else:
         print("Sales Order Does Not Exist. Webhook Received")
 
@@ -1283,6 +1318,14 @@ def handle_draft_invoice(data: dict):
         for person in recipients:
             params = {"name": person.get("first_name"), "invoice_number": invoice_number}
             send_whatsapp(person.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                str(person["_id"]),
+                "draft_invoice",
+                f"Draft invoice {invoice_number}",
+                f"Invoice {invoice_number} has been drafted.",
+                "/admin/invoices",
+            )
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
