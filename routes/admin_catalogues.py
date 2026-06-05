@@ -11,6 +11,7 @@ from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import boto3, uuid, os
 from .helpers import notify_all_salespeople
+from .notifications import create_notifications_for_roles
 
 load_dotenv()
 router = APIRouter()
@@ -177,7 +178,21 @@ async def upload_catalogue(file: UploadFile = File(...)):
 async def notify():
     try:
         template = db.templates.find_one({"name": "catalogue_notification"})
-        notify_all_salespeople(db, template, {})
+        # notify_all_salespeople(db, template, {})
+        create_notifications_for_roles(
+            db, ["sales_person", "sales_admin"],
+            "new_catalogue",
+            "New catalogue available",
+            "A new product catalogue has been published.",
+            "/catalogues",
+        )
+        create_notifications_for_roles(
+            db, ["customer"],
+            "new_catalogue",
+            "New catalogue available",
+            "A new product catalogue has been published for you.",
+            "/",
+        )
     except Exception as e:
         # Log the exception as needed
         print(e)

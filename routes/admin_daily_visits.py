@@ -4,6 +4,7 @@ from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
 from ..config.whatsapp import send_whatsapp
+from .notifications import create_notification
 from dotenv import load_dotenv
 import math, datetime, io, openpyxl
 
@@ -61,15 +62,23 @@ async def add_admin_comment(daily_visit_id: str, request: Request):
                 template = db.templates.find_one({"name": "admin_comment_daily_visit"})
 
                 if salesperson and template:
-                    # Send WhatsApp message to salesperson
-                    send_whatsapp(
-                        salesperson.get("phone"),
-                        {**template},
-                        {
-                            "name": salesperson.get("first_name", ""),
-                            "admin_name": admin_name or "Admin",
-                            "button_url": f"{daily_visit_id}"
-                        }
+                    # send_whatsapp(
+                    #     salesperson.get("phone"),
+                    #     {**template},
+                    #     {
+                    #         "name": salesperson.get("first_name", ""),
+                    #         "admin_name": admin_name or "Admin",
+                    #         "button_url": f"{daily_visit_id}"
+                    #     }
+                    # )
+                    # In-app notification to salesperson
+                    create_notification(
+                        db,
+                        str(salesperson["_id"]),
+                        "daily_visit_comment",
+                        f"Comment on your daily visit",
+                        f"{admin_name or 'Admin'} commented on your daily visit.",
+                        f"/daily_visits/{daily_visit_id}",
                     )
 
             return JSONResponse(
@@ -800,8 +809,8 @@ def create_daily_visit(daily_visits: dict):
 
         if result:
             # Fetch and return the updated document.
-            template = db.templates.find_one({"name": "update_notification_1"})
-            notify_all_salespeople(db, template, {})
+            # template = db.templates.find_one({"name": "update_notification_1"})
+            # notify_all_salespeople(db, template, {})
             return "Document Created"
         else:
             # It’s possible that the document was not found or that no changes were made.

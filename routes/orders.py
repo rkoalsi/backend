@@ -13,7 +13,8 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from ..config.constants import terms, STATE_CODES 
-from ..config.whatsapp import send_whatsapp 
+from ..config.whatsapp import send_whatsapp
+from .notifications import create_notification, create_notifications_for_roles
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
@@ -2019,6 +2020,41 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         headers,
         timeout,
     )
+
+    # In-app notification: order placed (estimate created) → salesperson + customer
+    try:
+        est_number = estimate_data.get("estimate_number", order_id[-6:])
+        customer_name = order.get("customer_name", "")
+        sp_link = f"/orders/past/{order_id}"
+
+        # Notify salesperson
+        if created_by:
+            create_notification(
+                db,
+                str(created_by),
+                "order_placed",
+                f"Estimate {est_number} created",
+                f"Order for {customer_name} has been finalised.",
+                sp_link,
+            )
+
+        # Notify the customer user account (if one exists linked to this order's customer)
+        customer_doc = db.customers.find_one({"_id": ObjectId(order.get("customer_id", ""))}) if order.get("customer_id") else None
+        if customer_doc:
+            contact_id = str(customer_doc.get("contact_id", ""))
+            customer_user = db.users.find_one({"role": "customer", "customer_id": contact_id})
+            if customer_user:
+                create_notification(
+                    db,
+                    str(customer_user["_id"]),
+                    "order_placed",
+                    f"Your order {est_number} is confirmed",
+                    f"Your estimate {est_number} has been created successfully.",
+                    f"/customer/orders/{order_id}",
+                )
+    except Exception as _e:
+        print(f"[notifications] order_placed error: {_e}")
+
     return {"status": "success", "message": message}
 
 
@@ -2092,19 +2128,30 @@ async def notify(order_dict: dict):
             "estimate_number": estimate_number if estimate_created else order_id[-6:],
             "button_url": f"{order_id}",
         }
-        for item in [
-            {"name": salesperson_name, "phone": sales_person_phone},
-            {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC4_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC4"),
-            },
-            {
-                "name": os.getenv("NOTIFY_NUMBER_TO_CC5_NAME"),
-                "phone": os.getenv("NOTIFY_NUMBER_TO_CC5"),
-            },
-        ]:
-            params["salesperson_name"] = item["name"]
-            send_whatsapp(to=item["phone"], template_doc=template_doc, params=params)
+        # for item in [
+        #     {"name": salesperson_name, "phone": sales_person_phone},
+        #     {
+        #         "name": os.getenv("NOTIFY_NUMBER_TO_CC4_NAME"),
+        #         "phone": os.getenv("NOTIFY_NUMBER_TO_CC4"),
+        #     },
+        #     {
+        #         "name": os.getenv("NOTIFY_NUMBER_TO_CC5_NAME"),
+        #         "phone": os.getenv("NOTIFY_NUMBER_TO_CC5"),
+        #     },
+        # ]:
+        #     params["salesperson_name"] = item["name"]
+        #     send_whatsapp(to=item["phone"], template_doc=template_doc, params=params)
+
+        # In-app notification for order edited → salesperson only
+        ref = estimate_number if estimate_created else order_id[-6:]
+        create_notification(
+            db,
+            str(created_by),
+            "order_edited",
+            f"Order {ref} edited",
+            f"Order for {customer_name} has been updated.",
+            f"/orders/past/{order_id}",
+        )
         return
     except Exception as e:
         raise e
