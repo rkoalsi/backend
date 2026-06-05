@@ -3,6 +3,7 @@ from ..config.root import get_database, serialize_mongo_document
 from ..config.scheduler import schedule_job, remove_scheduled_jobs
 from ..config.whatsapp import send_whatsapp
 from .helpers import get_access_token
+from .notifications import create_notification
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
 from dateutil.parser import parse
@@ -1496,6 +1497,37 @@ def handle_shipment(data: dict):
                     send_whatsapp(phone, {**template}, {**params})
                 except Exception as e:
                     print(f"Failed to send WhatsApp to {name}: {e}")
+
+        # In-app notification for shipment → all valid recipients by user lookup
+        try:
+            is_delivered = shipment.get("status", "") == "delivered"
+            notif_type = "shipment_delivered" if is_delivered else "shipment_dispatched"
+            notif_title = (
+                f"Shipment delivered – {params.get('invoice_number', '')}"
+                if is_delivered
+                else f"Shipment dispatched – {params.get('invoice_number', '')}"
+            )
+            notif_body = (
+                f"{customer_name} order delivered on {params.get('delivery_date', '')}."
+                if is_delivered
+                else f"{customer_name} order dispatched. Tracking: {tracking_number}."
+            )
+            shipment_link = f"/shipments/{shipment_id}" if shipment_id else "/shipments"
+
+            notif_recipients = set()
+            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4, company_number]:
+                uid = person.get("_id") or (db.users.find_one({"phone": person.get("phone")}, {"_id": 1}) or {}).get("_id")
+                if uid:
+                    notif_recipients.add(str(uid))
+            for sp in all_salespeople:
+                sp_user = db.users.find_one({"code": sp}, {"_id": 1})
+                if sp_user:
+                    notif_recipients.add(str(sp_user["_id"]))
+
+            for uid in notif_recipients:
+                create_notification(db, uid, notif_type, notif_title, notif_body, shipment_link)
+        except Exception as _e:
+            print(f"[notifications] shipment error: {_e}")
     else:
         print("Invoice Not Found for Given Shipment")
 

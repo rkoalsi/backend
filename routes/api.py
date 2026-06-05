@@ -34,6 +34,7 @@ from .blog import router as blog
 from .customer_activity import router as customer_activity
 from .customer_address_details import router as customer_address_details
 from .chats import router as chats
+from .notifications import router as notifications
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -130,6 +131,9 @@ router.include_router(
 )
 router.include_router(
     chats, prefix="/chats", tags=["Chats"]
+)
+router.include_router(
+    notifications, prefix="/notifications", tags=["Notifications"], dependencies=_jwt
 )
 
 @router.get("/")

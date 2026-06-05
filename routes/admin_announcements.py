@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from ..config.root import get_database, serialize_mongo_document 
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople, notify_office_coordinator_and_sales_admins
+from .notifications import create_notifications_for_roles
 from dotenv import load_dotenv
 import os, datetime, uuid, boto3, io
 from typing import Optional
@@ -168,8 +169,16 @@ async def create_announcement(
         if result:
             # Notify salespeople about the new announcement
             template = db.templates.find_one({"name": "update_notification_1"})
-            notify_all_salespeople(db, template, {})
-            notify_office_coordinator_and_sales_admins(db, template, {})
+            # notify_all_salespeople(db, template, {})
+            # notify_office_coordinator_and_sales_admins(db, template, {})
+            ann_title = announcement_data.get("title", "New announcement")
+            create_notifications_for_roles(
+                db, ["sales_person", "sales_admin", "admin"],
+                "new_announcement",
+                f"New announcement: {ann_title}",
+                "A new announcement has been posted.",
+                "/announcements",
+            )
             return "Document Created"
         else:
             raise HTTPException(status_code=500, detail="Failed to create announcement")

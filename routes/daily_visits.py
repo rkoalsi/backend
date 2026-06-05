@@ -4,6 +4,7 @@ from bson import ObjectId
 import boto3, os, uuid, logging, datetime, json, pytz
 from ..config.root import get_database, serialize_mongo_document
 from ..config.whatsapp import send_whatsapp
+from .notifications import create_notification, create_notifications_for_roles
 
 router = APIRouter()
 
@@ -198,15 +199,30 @@ async def create_daily_visit(
     created_by_user = db.users.find_one({"_id": ObjectId(created_by)})
     template = db.templates.find_one({"name": "create_daily_visit"})
 
-    send_whatsapp(
-        user_obj.get("phone"),
-        {**template},
-        {
-            "name": user_obj.get("first_name", ""),
-            "salesperson_name": created_by_user.get("first_name", ""),
-            "button_url": f"{str(result.inserted_id)}",
-        },
-    )
+    # send_whatsapp(
+    #     user_obj.get("phone"),
+    #     {**template},
+    #     {
+    #         "name": user_obj.get("first_name", ""),
+    #         "salesperson_name": created_by_user.get("first_name", ""),
+    #         "button_url": f"{str(result.inserted_id)}",
+    #     },
+    # )
+
+    # In-app notification → all sales_admins
+    try:
+        dv_id = str(result.inserted_id)
+        sp_name = created_by_user.get("first_name", "") if created_by_user else ""
+        create_notifications_for_roles(
+            db,
+            ["sales_admin"],
+            "daily_visit_created",
+            f"Daily visit created by {sp_name}",
+            f"{sp_name} submitted a new daily visit.",
+            f"/admin/daily_visits",
+        )
+    except Exception as _e:
+        print(f"[notifications] daily_visit_created error: {_e}")
 
     return JSONResponse(
         status_code=201,
@@ -555,15 +571,31 @@ async def update_daily_visit_update(
         )
         template = db.templates.find_one({"name": "update_daily_visit"})
         if user_obj and template:
-            send_whatsapp(
-                user_obj.get("phone"),
-                {**template},
-                {
-                    "name": user_obj.get("first_name", ""),
-                    "salesperson_name": created_by_user.get("first_name", "") if created_by_user else "",
-                    "button_url": f"{daily_visit_id}",
-                },
+            pass
+            # send_whatsapp(
+            #     user_obj.get("phone"),
+            #     {**template},
+            #     {
+            #         "name": user_obj.get("first_name", ""),
+            #         "salesperson_name": created_by_user.get("first_name", "") if created_by_user else "",
+            #         "button_url": f"{daily_visit_id}",
+            #     },
+            # )
+
+        # In-app notification → all sales_admins
+        try:
+            sp_name = created_by_user.get("first_name", "") if created_by_user else ""
+            create_notifications_for_roles(
+                db,
+                ["sales_admin"],
+                "daily_visit_updated",
+                f"Daily visit updated by {sp_name}",
+                f"{sp_name} added an update to their daily visit.",
+                f"/admin/daily_visits",
             )
+        except Exception as _e:
+            print(f"[notifications] daily_visit_updated error: {_e}")
+
     return JSONResponse(
         status_code=200,
         content={
@@ -638,15 +670,16 @@ async def add_reply_to_comment(daily_visit_id: str, comment_id: str, request: Re
                 template = db.templates.find_one({"name": "salesperson_comment"})
 
                 if admin and template:
-                    send_whatsapp(
-                        admin.get("phone"),
-                        {**template},
-                        {
-                            "name": admin.get("first_name", ""),
-                            "salesperson_name": user_name or "Salesperson",
-                            "button_url": f"{daily_visit_id}"
-                        }
-                    )
+                    pass
+                    # send_whatsapp(
+                    #     admin.get("phone"),
+                    #     {**template},
+                    #     {
+                    #         "name": admin.get("first_name", ""),
+                    #         "salesperson_name": user_name or "Salesperson",
+                    #         "button_url": f"{daily_visit_id}"
+                    #     }
+                    # )
 
             return JSONResponse(
                 status_code=200,
