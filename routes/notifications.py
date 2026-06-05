@@ -44,9 +44,18 @@ def create_notification(
 ):
     """
     Insert a single notification for one recipient.
+    Skips insert if an identical notification (same recipient, type, title)
+    already exists, preventing duplicates from double-submits or retries.
     recipient_id: str of the user's _id
     """
     try:
+        existing = db.order_form_notifications.find_one({
+            "recipient_id": ObjectId(recipient_id),
+            "type": notification_type,
+            "title": title,
+        })
+        if existing:
+            return
         doc = {
             "recipient_id": ObjectId(recipient_id),
             "type": notification_type,
