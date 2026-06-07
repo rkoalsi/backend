@@ -1968,6 +1968,79 @@ def read_all_orders(
     }
 
 
+@router.get("/payments_due/aging_stats")
+def get_payments_due_aging_stats(
+    sales_person: str = Query(None, description="Filter by sales person"),
+):
+    """
+    Return aggregate aging bucket stats (counts + balances) across ALL overdue invoices.
+    Buckets: 0-30, 31-60, 61+ days overdue.
+    """
+    today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    due_date_filter = {"$or": [
+        {"due_date": {"$type": "string", "$lt": today_str}},
+        {"due_date": {"$type": "date", "$lt": today_date}},
+    ]}
+
+    and_clauses = [due_date_filter, {"status": {"$nin": ["paid", "void"]}}]
+
+    if sales_person:
+        escaped = re.escape(sales_person)
+        and_clauses.append({"$or": [
+            {"cf_sales_person": {"$regex": f"^{escaped}$", "$options": "i"}},
+            {"salesperson_name": {"$regex": f"^{escaped}$", "$options": "i"}},
+        ]})
+
+    base_query = {"$and": and_clauses}
+
+    pipeline = [
+        {"$match": base_query},
+        {"$project": {
+            "balance": 1,
+            "overdue_by_days": {
+                "$dateDiff": {
+                    "startDate": {
+                        "$cond": {
+                            "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                            "then": {"$dateFromString": {"dateString": "$due_date"}},
+                            "else": "$due_date",
+                        }
+                    },
+                    "endDate": "$$NOW",
+                    "unit": "day",
+                }
+            },
+        }},
+        {"$group": {
+            "_id": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$lte": ["$overdue_by_days", 30]}, "then": "current"},
+                        {"case": {"$lte": ["$overdue_by_days", 60]}, "then": "overdue30"},
+                    ],
+                    "default": "overdue60",
+                }
+            },
+            "count": {"$sum": 1},
+            "balance": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}},
+        }},
+    ]
+
+    rows = list(db.invoices.aggregate(pipeline))
+    result = {
+        "current": {"count": 0, "balance": 0},
+        "overdue30": {"count": 0, "balance": 0},
+        "overdue60": {"count": 0, "balance": 0},
+    }
+    for row in rows:
+        key = row["_id"]
+        if key in result:
+            result[key] = {"count": row["count"], "balance": round(row["balance"], 2)}
+    return result
+
+
 @router.get("/payments_due/download_csv")
 def download_payments_due_csv(sales_person: str):
     """

@@ -1633,6 +1633,64 @@ def get_order_invoices(order_id: str):
 
 
 # Get an order by ID
+@router.get("/my-performance")
+def get_my_performance(user_id: str):
+    """
+    Return order performance stats for the given user for this month vs. last month.
+    Includes order count, total value, and breakdown by status.
+    """
+    import datetime as dt
+    from dateutil.relativedelta import relativedelta
+
+    try:
+        user_oid = ObjectId(user_id)
+    except Exception:
+        user_oid = user_id
+
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month_start = this_month_start - relativedelta(months=1)
+    last_month_end = this_month_start
+
+    def bucket_stats(start, end):
+        pipeline = [
+            {"$match": {
+                "created_by": user_oid,
+                "status": {"$ne": "deleted"},
+                "created_at": {"$gte": start, "$lt": end},
+            }},
+            {"$group": {
+                "_id": "$status",
+                "count": {"$sum": 1},
+                "total_value": {"$sum": {"$toDouble": {"$ifNull": ["$total_amount", 0]}}},
+            }},
+        ]
+        rows = list(orders_collection.aggregate(pipeline))
+        total_count = sum(r["count"] for r in rows)
+        total_value = sum(r["total_value"] for r in rows)
+        by_status = {r["_id"]: {"count": r["count"], "value": r["total_value"]} for r in rows}
+        return {"total_count": total_count, "total_value": total_value, "by_status": by_status}
+
+    this_month = bucket_stats(this_month_start, now)
+    last_month = bucket_stats(last_month_start, last_month_end)
+
+    def pct_change(current, previous):
+        if previous == 0:
+            return None
+        return round((current - previous) / previous * 100, 1)
+
+    return {
+        "this_month": this_month,
+        "last_month": last_month,
+        "count_change_pct": pct_change(this_month["total_count"], last_month["total_count"]),
+        "value_change_pct": pct_change(this_month["total_value"], last_month["total_value"]),
+        "period": {
+            "this_month_label": this_month_start.strftime("%B %Y"),
+            "last_month_label": last_month_start.strftime("%B %Y"),
+        },
+    }
+
+
 @router.get("/{order_id}")
 def read_order(order_id: str):
     """

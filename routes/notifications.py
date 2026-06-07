@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from bson import ObjectId
 import datetime
 from ..config.root import get_database, serialize_mongo_document
@@ -38,6 +38,17 @@ NOTIFICATION_TYPES = {
 }
 
 
+def get_user_disabled_types(db, recipient_id: str) -> set:
+    """Return the set of notification types the user has muted."""
+    try:
+        prefs = db.notification_preferences.find_one({"user_id": ObjectId(recipient_id)})
+        if prefs:
+            return set(prefs.get("disabled_types", []))
+    except Exception:
+        pass
+    return set()
+
+
 def create_notification(
     db,
     recipient_id: str,
@@ -50,10 +61,15 @@ def create_notification(
     """
     Insert a single notification for one recipient.
     Skips insert if an identical notification (same recipient, type, title)
-    already exists, preventing duplicates from double-submits or retries.
+    already exists, or if the user has muted this notification type.
     recipient_id: str of the user's _id
     """
     try:
+        # Check user preferences — skip if type is muted
+        disabled = get_user_disabled_types(db, recipient_id)
+        if notification_type in disabled:
+            return
+
         existing = db.order_form_notifications.find_one({
             "recipient_id": ObjectId(recipient_id),
             "type": notification_type,
@@ -177,3 +193,33 @@ def mark_all_read(current_user: dict = Depends(get_current_user)):
         {"$set": {"read": True}},
     )
     return {"ok": True}
+
+
+@router.get("/preferences")
+def get_preferences(current_user: dict = Depends(get_current_user)):
+    """Return the user's notification preferences (which types are disabled)."""
+    db = get_database()
+    user_id = current_user.get("data", {}).get("_id") or current_user.get("_id")
+    prefs = db.notification_preferences.find_one({"user_id": ObjectId(user_id)})
+    disabled = prefs.get("disabled_types", []) if prefs else []
+    return {
+        "all_types": NOTIFICATION_TYPES,
+        "disabled_types": disabled,
+    }
+
+
+@router.put("/preferences")
+async def update_preferences(request: Request, current_user: dict = Depends(get_current_user)):
+    """Update which notification types the user has muted."""
+    db = get_database()
+    user_id = current_user.get("data", {}).get("_id") or current_user.get("_id")
+    body = await request.json()
+    disabled_types = body.get("disabled_types", [])
+    # Validate — only known types accepted
+    disabled_types = [t for t in disabled_types if t in NOTIFICATION_TYPES]
+    db.notification_preferences.update_one(
+        {"user_id": ObjectId(user_id)},
+        {"$set": {"user_id": ObjectId(user_id), "disabled_types": disabled_types}},
+        upsert=True,
+    )
+    return {"ok": True, "disabled_types": disabled_types}
