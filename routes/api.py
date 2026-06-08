@@ -112,7 +112,7 @@ router.include_router(
     external_links, prefix="/external_links", tags=["External Links"], dependencies=_jwt
 )
 router.include_router(
-    attendance, prefix="/attendance", tags=["Attendance"], dependencies=_jwt
+    attendance, prefix="/attendance", tags=["Attendance"]
 )
 router.include_router(
     customer_analytics, prefix="/customer_analytics", tags=["Customer Analytics"], dependencies=_jwt
