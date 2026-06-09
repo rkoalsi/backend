@@ -140,7 +140,7 @@ async def upload_bill(file: UploadFile = File(...), current_user: dict = Depends
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "bin"
     key = f"expense-bills/{uuid.uuid4()}.{ext}"
     try:
-        _s3.upload_fileobj(file.file, _S3_BUCKET, key, ExtraArgs={"ContentType": file.content_type})
+        _s3.upload_fileobj(file.file, _S3_BUCKET, key, ExtraArgs={"ContentType": file.content_type, "ACL": "public-read"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
     return {"url": f"{_S3_URL}/{key}"}
