@@ -69,6 +69,16 @@ def get_estimate(estimate_id: str, current_user: dict = Depends(get_current_user
     return serialize_mongo_document(_get_estimate_or_404(estimate_id))
 
 
+@router.delete("/{estimate_id}")
+def delete_estimate(estimate_id: str, current_user: dict = Depends(get_current_user)):
+    role = (current_user.get("data") or current_user).get("role", "")
+    if role not in ("admin", "sales_admin"):
+        raise HTTPException(status_code=403, detail="Only admin or sales_admin can delete estimates")
+    _get_estimate_or_404(estimate_id)
+    db.expense_estimates.delete_one({"_id": ObjectId(estimate_id)})
+    return {"detail": "Deleted"}
+
+
 # ── approve ────────────────────────────────────────────────────────────────────
 
 @router.post("/{estimate_id}/approve")
