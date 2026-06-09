@@ -35,6 +35,12 @@ NOTIFICATION_TYPES = {
     "draft_sales_order": "Draft Sales Order",
     "draft_invoice": "Draft Invoice",
     "new_product": "New Product",
+    # expense estimates
+    "expense_submitted": "Expense Estimate Submitted",
+    "expense_approved_stage": "Expense Estimate Approved",
+    "expense_rejected": "Expense Estimate Rejected",
+    "expense_advance_released": "Expense Advance Released",
+    "expense_actuals_submitted": "Expense Actuals Submitted",
 }
 
 
