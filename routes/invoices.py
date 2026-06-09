@@ -3,7 +3,7 @@ from ..config.root import get_database, serialize_mongo_document
 from typing import Optional, List
 from bson import ObjectId
 import re, uuid, boto3, os, requests, json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 from .helpers import get_access_token
 
@@ -135,40 +135,46 @@ def get_invoices(
         "cf_sales_person": 1,
         "salesperson_name": 1,
         "created_at": 1,
-        "overdue_by_days": {
-            "$dateDiff": {
-                "startDate": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
-                    }
-                },
-                "endDate": "$$NOW",
-                "unit": "day",
-            },
-        },
+        "overdue_by_days": 1,
         "invoice_notes": 1,
+    }
+
+    overdue_days_expr = {
+        "$dateDiff": {
+            "startDate": {
+                "$cond": {
+                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                    "then": {"$dateFromString": {"dateString": "$due_date"}},
+                    "else": "$due_date",
+                }
+            },
+            "endDate": "$$NOW",
+            "unit": "day",
+        }
     }
 
     # Construct the aggregation pipeline
     pipeline = [
         {"$match": query},
+        # Compute overdue_by_days first so we can filter and sort reliably
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        # Enforce 365-day cap
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
-        {"$sort": {"due_date": -1}},  # Latest first
         {"$project": project},
     ]
 
