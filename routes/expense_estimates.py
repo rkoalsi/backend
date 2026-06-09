@@ -1,12 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, File, UploadFile
 from bson import ObjectId
-import datetime, os, requests as req_lib
+import boto3, datetime, os, uuid, requests as req_lib
 from ..config.root import get_database, get_client, serialize_mongo_document
 from ..config.auth import get_current_user
 from .notifications import create_notification
 
 router = APIRouter()
 db = get_database()
+
+_s3 = boto3.client(
+    "s3",
+    region_name=os.getenv("S3_REGION", "ap-south-1"),
+    aws_access_key_id=os.getenv("S3_ACCESS_KEY"),
+    aws_secret_access_key=os.getenv("S3_SECRET_KEY"),
+)
+_S3_BUCKET = os.getenv("S3_BUCKET_NAME")
+_S3_URL = os.getenv("S3_URL")
+
 _client = get_client()
 attendance_db = _client.get_database("attendance")
 employees_collection = attendance_db.get_collection("employees")
@@ -121,6 +131,20 @@ def _compute_actual_totals(expense_items: list) -> dict:
 
 
 # ── endpoints ──────────────────────────────────────────────────────────────────
+
+@router.post("/upload-bill")
+async def upload_bill(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    allowed = {"image/jpeg", "image/png", "image/jpg", "application/pdf"}
+    if file.content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG, and PDF files are allowed")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else "bin"
+    key = f"expense-bills/{uuid.uuid4()}.{ext}"
+    try:
+        _s3.upload_fileobj(file.file, _S3_BUCKET, key, ExtraArgs={"ContentType": file.content_type})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+    return {"url": f"{_S3_URL}/{key}"}
+
 
 @router.get("")
 def list_estimates(

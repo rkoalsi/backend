@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
 from bson import ObjectId
-import datetime, io, openpyxl
+import datetime, io, openpyxl, calendar
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 from openpyxl.utils import get_column_letter
 from ..config.root import get_database, serialize_mongo_document
@@ -259,6 +259,85 @@ async def complete_settlement(
     return serialize_mongo_document(updated)
 
 
+# ── Customer analytics helpers for Excel report ───────────────────────────────
+
+def _get_fy_bounds(fy_start_year: int):
+    """Return (start_str, end_str) for a financial year starting April of fy_start_year."""
+    start = f"{fy_start_year}-04-01"
+    end = f"{fy_start_year + 1}-03-31"
+    return start, end
+
+
+def _get_fy_label(fy_start: int) -> str:
+    return f"FY {fy_start}-{str(fy_start + 1)[2:]}"
+
+
+def _customer_stats_for_report(customer_id: str) -> dict:
+    """
+    Return sales and outstanding balance from the invoices collection.
+    - current_yr_sales  : current FY (e.g. 2026-27)
+    - last_fy_sales     : last FY    (e.g. 2025-26) — "Last Financial Year" card in analytics
+    - prev_fy_sales     : prev FY    (e.g. 2024-25) — "Previous Financial Year" card in analytics
+    customer_id may be a 24-char MongoDB _id string or a Zoho contact_id string.
+    """
+    now = datetime.datetime.now()
+    cur_month = now.month
+    cur_fy_start = now.year if cur_month >= 4 else now.year - 1
+    last_fy_start = cur_fy_start - 1
+    prev_fy_start = cur_fy_start - 2
+
+    # Resolve MongoDB _id → Zoho contact_id if needed
+    zoho_id = customer_id
+    if customer_id and len(customer_id) == 24:
+        try:
+            cust = db.customers.find_one({"_id": ObjectId(customer_id)}, {"contact_id": 1})
+            if cust and cust.get("contact_id"):
+                zoho_id = cust["contact_id"]
+            else:
+                return {"current_yr_sales": 0, "last_fy_sales": 0, "prev_fy_sales": 0, "outstanding_balance": 0}
+        except Exception:
+            pass
+
+    def fy_cond(fy_s):
+        return {"$or": [
+            {"$and": [{"$eq": ["$parsedYear", fy_s]}, {"$gte": ["$parsedMonth", 4]}]},
+            {"$and": [{"$eq": ["$parsedYear", fy_s + 1]}, {"$lte": ["$parsedMonth", 3]}]},
+        ]}
+
+    pipeline = [
+        {"$match": {"customer_id": zoho_id, "status": {"$nin": ["void", "draft"]}}},
+        {"$addFields": {
+            "parsedYear": {"$year": {"$dateFromString": {"dateString": "$date", "onError": None}}},
+            "parsedMonth": {"$month": {"$dateFromString": {"dateString": "$date", "onError": None}}},
+        }},
+        {"$group": {
+            "_id": None,
+            "currentFYSales": {"$sum": {"$cond": [fy_cond(cur_fy_start), {"$ifNull": ["$total", 0]}, 0]}},
+            "lastFYSales":    {"$sum": {"$cond": [fy_cond(last_fy_start), {"$ifNull": ["$total", 0]}, 0]}},
+            "prevFYSales":    {"$sum": {"$cond": [fy_cond(prev_fy_start), {"$ifNull": ["$total", 0]}, 0]}},
+            "outstandingBalance": {"$sum": {"$cond": [
+                {"$in": ["$status", ["sent", "overdue", "partially_paid"]]},
+                {"$ifNull": ["$balance", 0]}, 0,
+            ]}},
+        }},
+    ]
+
+    try:
+        result = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
+        if result:
+            r = result[0]
+            return {
+                "current_yr_sales": round(r.get("currentFYSales") or 0, 2),
+                "last_fy_sales": round(r.get("lastFYSales") or 0, 2),
+                "prev_fy_sales": round(r.get("prevFYSales") or 0, 2),
+                "outstanding_balance": round(r.get("outstandingBalance") or 0, 2),
+            }
+    except Exception as e:
+        print(f"[expense report] customer stats lookup failed for {customer_id}: {e}")
+
+    return {"current_yr_sales": 0, "last_fy_sales": 0, "prev_fy_sales": 0, "outstanding_balance": 0}
+
+
 # ── Excel report ───────────────────────────────────────────────────────────────
 
 def _thin_border():
@@ -271,12 +350,28 @@ def _header_fill(hex_color: str) -> PatternFill:
 
 
 def _write_report(est: dict) -> io.BytesIO:
+    # Enrich existing-customer visits with live FY sales + outstanding balance
+    now_dt = datetime.datetime.now()
+    _cur_fy_start = now_dt.year if now_dt.month >= 4 else now_dt.year - 1
+    _last_fy_start = _cur_fy_start - 1
+    _prev_fy_start = _cur_fy_start - 2
+    last_fy_label = _get_fy_label(_last_fy_start)   # e.g. "FY 2025-26"
+    prev_fy_label = _get_fy_label(_prev_fy_start)   # e.g. "FY 2024-25"
+
+    enriched_visits = []
+    for visit in est.get("customer_visits", []):
+        cid = visit.get("customer_id")
+        if cid and visit.get("customer_type") == "existing":
+            stats = _customer_stats_for_report(cid)
+            visit = {**visit, **stats}
+        enriched_visits.append(visit)
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Expense Report"
 
     # Column widths
-    col_widths = {1: 6, 2: 14, 3: 16, 4: 30, 5: 28, 6: 14, 7: 14, 8: 12, 9: 12, 10: 14, 11: 16, 12: 30, 13: 16, 14: 30}
+    col_widths = {1: 6, 2: 14, 3: 16, 4: 30, 5: 28, 6: 14, 7: 14, 8: 12, 9: 12, 10: 14, 11: 16, 12: 30, 13: 16, 14: 30, 15: 18}
     for col, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -393,7 +488,7 @@ def _write_report(est: dict) -> io.BytesIO:
         merge_write(r, 1, 14, table_label, label_font, label_fill, left)
         r += 1
         hdrs = ["SL No", "Date", "Expense Type", "Particulars / Description", "Location / Route",
-                "Amount (₹)", "Bill Status", "Bill No.", "Tax (GST)", "Net Amount", "Approved Amount", "Remarks", "DA (₹)", "DA Date"]
+                "Amount (₹)", "Bill Status", "Bill No.", "Tax (GST)", "Net Amount", "Approved Amount", "Remarks", "DA (₹)", "DA Date", "Bill"]
         for ci, h in enumerate(hdrs, 1):
             write(r, ci, h, header_font, header_fill, center)
             ws.row_dimensions[r].height = 30
@@ -417,6 +512,15 @@ def _write_report(est: dict) -> io.BytesIO:
             ]
             for ci, val in enumerate(row_data, 1):
                 write(r, ci, val, normal_font, align=center)
+            bill_url = item.get("bill_url", "")
+            if bill_url:
+                bc = ws.cell(row=r, column=15, value="View Bill")
+                bc.hyperlink = bill_url
+                bc.font = Font(color="0563C1", underline="single", size=10)
+                bc.border = _thin_border()
+                bc.alignment = center
+            else:
+                write(r, 15, "", normal_font, align=center)
             r += 1
         # Subtotals
         total_amt = sum(float(i.get("amount") or 0) for i in items)
@@ -475,23 +579,23 @@ def _write_report(est: dict) -> io.BytesIO:
     ws.row_dimensions[r].height = 18
     r += 1
     visit_hdrs = ["Date", "Customer Name", "City", "Customer Status",
-                  "Current Yr Sales", "FY 2025-26 Sales", "FY 2024-25 Sales",
+                  "Current Yr Sales", f"{last_fy_label} Sales", f"{prev_fy_label} Sales",
                   "Outstanding Balance", "Purpose of Visit", "Outcome / Next Action",
                   "Follow-up Date", "Order Value", "Notes"]
     for ci, h in enumerate(visit_hdrs, 1):
         write(r, ci, h, header_font, header_fill, center)
     ws.row_dimensions[r].height = 30
     r += 1
-    total_curr = total_fy25 = total_fy24 = total_outstanding = total_order = 0.0
-    for visit in est.get("customer_visits", []):
+    total_curr = total_last_fy = total_prev_fy = total_outstanding = total_order = 0.0
+    for visit in enriched_visits:
         curr = float(visit.get("current_yr_sales") or 0)
-        fy25 = float(visit.get("fy_2025_sales") or 0)
-        fy24 = float(visit.get("fy_2024_sales") or 0)
+        last_fy = float(visit.get("last_fy_sales") or 0)
+        prev_fy = float(visit.get("prev_fy_sales") or 0)
         outstanding = float(visit.get("outstanding_balance") or 0)
         order_val = float(visit.get("order_value") or 0)
         total_curr += curr
-        total_fy25 += fy25
-        total_fy24 += fy24
+        total_last_fy += last_fy
+        total_prev_fy += prev_fy
         total_outstanding += outstanding
         total_order += order_val
         name = visit.get("customer_name") or visit.get("potential_customer_name", "")
@@ -500,7 +604,7 @@ def _write_report(est: dict) -> io.BytesIO:
             name,
             visit.get("city", ""),
             visit.get("customer_status", ""),
-            curr, fy25, fy24, outstanding,
+            curr, last_fy, prev_fy, outstanding,
             visit.get("purpose_of_visit", ""),
             visit.get("outcome", ""),
             _fmt_date(visit.get("follow_up_date")),
@@ -511,7 +615,7 @@ def _write_report(est: dict) -> io.BytesIO:
             write(r, ci, val, normal_font, align=center)
         r += 1
     # Totals row
-    total_row = ["TOTAL", "", "", "", total_curr, total_fy25, total_fy24, total_outstanding, "", "", "", total_order, ""]
+    total_row = ["TOTAL", "", "", "", total_curr, total_last_fy, total_prev_fy, total_outstanding, "", "", "", total_order, ""]
     for ci, val in enumerate(total_row, 1):
         write(r, ci, val, Font(bold=True, size=10), label_fill, center)
 
