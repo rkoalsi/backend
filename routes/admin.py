@@ -1811,25 +1811,18 @@ def read_all_orders(
     today_str = date.today().isoformat()
     today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Query to match invoices with a due_date less than today
-    # Handle both string and date formats for due_date
+    # Broad pre-filter: unpaid invoices past due (mixed string/date types)
     base_query = {
         "$or": [
-            # Case 1: due_date is a string
-            {
-                "due_date": {"$type": "string", "$lt": today_str}
-            },
-            # Case 2: due_date is a date
-            {
-                "due_date": {"$type": "date", "$lt": today_date}
-            }
+            {"due_date": {"$type": "string", "$lt": today_str}},
+            {"due_date": {"$type": "date", "$lt": today_date}},
         ],
         "status": {"$nin": ["paid", "void"]}
     }
 
     # Additional filters
     additional_conditions = []
-    
+
     if sales_person:
         escaped_sales_person = re.escape(sales_person)
         additional_conditions.append({
@@ -1863,28 +1856,51 @@ def read_all_orders(
     else:
         query = base_query
 
-    # Basic query stage for the aggregation pipeline
-    match_stage = {"$match": query}
+    # Compute overdue_by_days early so we can filter and sort on it reliably
+    overdue_days_expr = {
+        "$dateDiff": {
+            "startDate": {
+                "$cond": {
+                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                    "then": {"$dateFromString": {"dateString": "$due_date"}},
+                    "else": "$due_date",
+                }
+            },
+            "endDate": "$$NOW",
+            "unit": "day",
+        }
+    }
 
-    # Count total invoices matching the query (for frontend pagination)
-    total_count = db.invoices.count_documents(query)
+    # Accurate count: compute overdue_by_days then filter to <= 365
+    count_pipeline = [
+        {"$match": query},
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$count": "total"},
+    ]
+    count_result = list(db.invoices.aggregate(count_pipeline))
+    total_count = count_result[0]["total"] if count_result else 0
 
     # Build the aggregation pipeline
     pipeline = [
-        match_stage,
-        # Project only the necessary fields
+        {"$match": query},
+        # Compute overdue_by_days before lookups so we can filter on it
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        # Enforce 365-day cap reliably on the computed field
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
         {
@@ -1897,16 +1913,14 @@ def read_all_orders(
         },
         {
             "$unwind": {
-                "path": "$user_created_by",  # note the change from "$note_created_by" to "$user_created_by"
+                "path": "$user_created_by",
                 "preserveNullAndEmptyArrays": True,
             }
         },
-        # Project the necessary fields and replace created_by with the user's first name
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                # Handle both string and date formats for due_date
                 "due_date": {
                     "$cond": {
                         "if": {"$eq": [{"$type": "$due_date"}, "string"]},
@@ -1925,31 +1939,16 @@ def read_all_orders(
                 "invoice_id": 1,
                 "line_items": 1,
                 "created_by_name": 1,
-                "overdue_by_days": {
-                    "$dateDiff": {
-                        "startDate": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                                "then": {"$dateFromString": {"dateString": "$due_date"}},
-                                "else": "$due_date"
-                            }
-                        },
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                    }
-                },
+                "overdue_by_days": 1,
                 "invoice_notes": 1,
-                # Replace the invoice note's created_by with the user's first name
                 "note_created_by_name": "$user_created_by.first_name",
             }
         },
-        # Now sort by the converted due_date
-        {"$sort": {"due_date": -1}},
-        {"$skip": page * limit},  # Skip the appropriate number of documents
-        {"$limit": limit},  # Limit the number of documents returned
+        {"$skip": page * limit},
+        {"$limit": limit},
     ]
     # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline)
+    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
 
     # Convert each Mongo document to a JSON-serializable Python dict
     inv = [serialize_mongo_document(doc) for doc in invoices_cursor]
@@ -2013,6 +2012,7 @@ def get_payments_due_aging_stats(
                 }
             },
         }},
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
         {"$group": {
             "_id": {
                 "$switch": {
@@ -2050,18 +2050,11 @@ def download_payments_due_csv(sales_person: str):
     today_str = date.today().isoformat()
     today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Query to match invoices with a due_date less than today and status not in ["paid"]
-    # Handle both string and date formats for due_date
+    # Broad pre-filter: unpaid invoices past due
     base_query = {
         "$or": [
-            # Case 1: due_date is a string
-            {
-                "due_date": {"$type": "string", "$lt": today_str}
-            },
-            # Case 2: due_date is a date
-            {
-                "due_date": {"$type": "date", "$lt": today_date}
-            }
+            {"due_date": {"$type": "string", "$lt": today_str}},
+            {"due_date": {"$type": "date", "$lt": today_date}},
         ],
         "status": {"$nin": ["paid", "void"]}
     }
@@ -2088,36 +2081,42 @@ def download_payments_due_csv(sales_person: str):
         match_stage,
         {
             "$addFields": {
-                # Normalize due_date for sorting
-                "normalized_due_date": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
+                "overdue_by_days": {
+                    "$dateDiff": {
+                        "startDate": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                                "then": {"$dateFromString": {"dateString": "$due_date"}},
+                                "else": "$due_date",
+                            }
+                        },
+                        "endDate": "$$NOW",
+                        "unit": "day",
                     }
                 }
             }
         },
-        {"$sort": {"normalized_due_date": -1}},
+        # Enforce 365-day cap on the computed field
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                # Handle both string and date formats for due_date
                 "due_date": {
                     "$cond": {
                         "if": {"$eq": [{"$type": "$due_date"}, "string"]},
@@ -2126,7 +2125,6 @@ def download_payments_due_csv(sales_person: str):
                     }
                 },
                 "balance": 1,
-                # For CSV purposes, you may output the status directly if needed
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
                 "created_by_name": 1,
@@ -2137,26 +2135,14 @@ def download_payments_due_csv(sales_person: str):
                 "invoice_number": 1,
                 "invoice_id": 1,
                 "line_items": 1,
-                "overdue_by_days": {
-                    "$dateDiff": {
-                        "startDate": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                                "then": {"$dateFromString": {"dateString": "$due_date"}},
-                                "else": "$due_date"
-                            }
-                        },
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                    }
-                },
+                "overdue_by_days": 1,
                 "invoice_notes": 1,
             }
         },
     ]
 
     # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline)
+    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
     invoices = [serialize_mongo_document(doc) for doc in invoices_cursor]
 
     # Create a CSV in memory
