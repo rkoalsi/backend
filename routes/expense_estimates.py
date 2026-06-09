@@ -81,7 +81,7 @@ def _notify_approver(approver_email: str, estimate: dict, subject: str, body_htm
             "expense_submitted",
             subject,
             f"Expense estimate from {estimate.get('created_by_name')} for trip on {estimate.get('travel_start_date', '')[:10] if isinstance(estimate.get('travel_start_date'), str) else ''}",
-            f"/admin/expense-estimates/{str(estimate['_id'])}",
+            f"/admin/expense_estimates",
         )
     _send_email(approver_email, subject, body_html)
 
@@ -440,7 +440,7 @@ async def submit_actuals(
                 "expense_actuals_submitted",
                 subject,
                 f"{name} submitted actuals for trip {est.get('travel_start_date','')[:10]}",
-                f"/admin/expense-estimates/{estimate_id}",
+                f"/admin/expense_estimates",
             )
         background_tasks.add_task(_send_email, approver_email, subject, html)
 

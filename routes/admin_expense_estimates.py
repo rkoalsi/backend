@@ -148,7 +148,7 @@ async def approve_estimate(
         next_user = _get_user_by_email(next_approver["email"])
         if next_user:
             create_notification(db, str(next_user["_id"]), "expense_submitted", subject,
-                f"Expense estimate from {sp_name} needs your approval", f"/admin/expense-estimates/{estimate_id}")
+                f"Expense estimate from {sp_name} needs your approval", f"/admin/expense_estimates")
 
     elif next_status == "Pending Payment":
         next_approver = APPROVER_CHAIN[2]
@@ -167,7 +167,7 @@ async def approve_estimate(
         next_user = _get_user_by_email(next_approver["email"])
         if next_user:
             create_notification(db, str(next_user["_id"]), "expense_submitted", subject,
-                f"Process advance for {sp_name}'s trip on {trip_date}", f"/admin/expense-estimates/{estimate_id}")
+                f"Process advance for {sp_name}'s trip on {trip_date}", f"/admin/expense_estimates")
 
     elif next_status == "Draft":
         advance_msg = "Advance has been released." if update.get("yogesh_advance_released") else "Your trip expenses are approved."
