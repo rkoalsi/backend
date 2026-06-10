@@ -178,11 +178,17 @@ async def approve_estimate(
             "Please submit your actual expenses after you return.",
         )
 
-    if next_status not in ["Draft"]:
+    if next_status == "Pending Second Review":
         background_tasks.add_task(
             _notify_salesperson, updated, "expense_approved_stage",
-            f"Expense Estimate Approved by {approver['label']}",
-            f"Your expense estimate for trip on {trip_date} has been approved by {approver['label']} and forwarded for next review.",
+            f"Expense Estimate Approved – Stage 1",
+            f"Your expense estimate for trip on {trip_date} has been approved by {approver['label']} and forwarded for second review.",
+        )
+    elif next_status == "Pending Payment":
+        background_tasks.add_task(
+            _notify_salesperson, updated, "expense_approved_stage",
+            f"Expense Estimate Approved – Stage 2",
+            f"Your expense estimate for trip on {trip_date} has been approved by {approver['label']} and is now being processed for advance payment.",
         )
 
     return serialize_mongo_document(updated)
