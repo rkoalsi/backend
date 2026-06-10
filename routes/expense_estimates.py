@@ -94,7 +94,7 @@ def _notify_salesperson(estimate: dict, notif_type: str, title: str, body: str):
         notif_type,
         title,
         body,
-        f"/expenses/{str(estimate['_id'])}",
+        "/expenses",
     )
     creator = db.users.find_one({"_id": estimate.get("created_by")})
     if creator and creator.get("email"):

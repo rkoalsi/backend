@@ -80,6 +80,7 @@ def create_notification(
             "recipient_id": ObjectId(recipient_id),
             "type": notification_type,
             "title": title,
+            "link": link,
         })
         if existing:
             return
