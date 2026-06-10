@@ -184,7 +184,7 @@ def get_employee_info(current_user: dict = Depends(get_current_user)):
 
     return {
         "name": user.get("name", ""),
-        "employee_id": employee.get("employee_number", "") or user.get("employee_id", ""),
+        "employee_number": employee.get("employee_number", "") or user.get("employee_number", "") or user.get("employee_id", ""),
         "designation": employee.get("designation") or user.get("designation") or "",
         "department": employee.get("department") or user.get("department") or "Sales",
         "reporting_manager": user.get("reporting_manager", ""),
@@ -245,7 +245,7 @@ async def create_estimate(
     doc = {
         "created_by": ObjectId(user_id),
         "created_by_name": user.get("name", ""),
-        "employee_id": body.get("employee_id", user.get("employee_id", "")),
+        "employee_number": body.get("employee_number", user.get("employee_number", "") or user.get("employee_id", "")),
         "designation": body.get("designation", user.get("designation", "")),
         "department": body.get("department", "Sales"),
         "reporting_manager": body.get("reporting_manager", ""),
@@ -359,7 +359,7 @@ async def update_estimate(
         expense_items = body.get("expense_items", est.get("expense_items", []))
         totals = _compute_totals(expense_items)
         update = {
-            "employee_id": body.get("employee_id", est.get("employee_id")),
+            "employee_number": body.get("employee_number", est.get("employee_number")),
             "designation": body.get("designation", est.get("designation")),
             "department": body.get("department", est.get("department")),
             "reporting_manager": body.get("reporting_manager", est.get("reporting_manager")),
