@@ -164,6 +164,7 @@ async def approve_estimate(
             </ul>
         </div>"""
         background_tasks.add_task(_send_email, next_approver["email"], subject, html)
+        background_tasks.add_task(_send_email, "spupscribeacc@gmail.com", subject, html)
         next_user = _get_user_by_email(next_approver["email"])
         if next_user:
             create_notification(db, str(next_user["_id"]), "expense_submitted", subject,
