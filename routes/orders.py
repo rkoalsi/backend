@@ -1695,10 +1695,36 @@ def get_my_performance(user_id: str):
 def read_order(order_id: str):
     """
     Retrieve an order by its ID.
+
+    Embeds the customer's current margin (`customer_margin`), GST type
+    (`gst_type`) and special margins (`special_margins`: product_id -> margin)
+    so unauthenticated shared-link visitors price products with exactly the
+    same margins as the order creator.
     """
     order = get_order(order_id, orders_collection)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("customer_id"):
+        try:
+            customer = customers_collection.find_one(
+                {"_id": ObjectId(order["customer_id"])},
+                {"cf_margin": 1, "cf_in_ex": 1},
+            )
+            if customer:
+                order["customer_margin"] = customer.get("cf_margin") or "40%"
+                if not order.get("gst_type"):
+                    order["gst_type"] = customer.get("cf_in_ex") or "Exclusive"
+            order["special_margins"] = {
+                str(doc["product_id"]): doc["margin"]
+                for doc in db["special_margins"].find(
+                    {"customer_id": ObjectId(order["customer_id"])},
+                    {"product_id": 1, "margin": 1},
+                )
+                if doc.get("product_id") and doc.get("margin")
+            }
+        except Exception as e:
+            # Pricing context is an enhancement — never fail the order fetch over it
+            print(f"Error embedding pricing context on order {order_id}: {e}")
     return order
 
 
