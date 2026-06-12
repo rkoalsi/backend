@@ -79,6 +79,45 @@ def delete_estimate(estimate_id: str, current_user: dict = Depends(get_current_u
     return {"detail": "Deleted"}
 
 
+# ── admin edit (Yogesh adds flight/hotel amounts at Pending Payment stage) ──────
+
+@router.put("/{estimate_id}")
+async def admin_update_estimate(
+    estimate_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    est = _get_estimate_or_404(estimate_id)
+    caller_email = current_user.get("data", {}).get("email") or current_user.get("email", "")
+    role = (current_user.get("data") or current_user).get("role", "")
+
+    yogesh_email = next((a["email"] for a in APPROVER_CHAIN if a["stage"] == "Pending Payment"), None)
+    is_yogesh = caller_email == yogesh_email
+    is_admin = role in ("admin", "sales_admin")
+
+    if not (is_yogesh or is_admin):
+        raise HTTPException(status_code=403, detail="Not authorised to edit this estimate")
+
+    if est["status"] != "Pending Payment":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Admin expense edit only allowed when status is 'Pending Payment', current: '{est['status']}'"
+        )
+
+    body = await request.json()
+    from .expense_estimates import _compute_totals
+    expense_items = body.get("expense_items", est.get("expense_items", []))
+    totals = _compute_totals(expense_items)
+
+    update = {
+        "expense_items": expense_items,
+        **totals,
+        "updated_at": datetime.datetime.utcnow(),
+    }
+    db.expense_estimates.update_one({"_id": ObjectId(estimate_id)}, {"$set": update})
+    return serialize_mongo_document(db.expense_estimates.find_one({"_id": ObjectId(estimate_id)}))
+
+
 # ── approve ────────────────────────────────────────────────────────────────────
 
 @router.post("/{estimate_id}/approve")
@@ -355,6 +394,58 @@ def _customer_stats_for_report(customer_id: str) -> dict:
     return {"current_yr_sales": 0, "last_fy_sales": 0, "prev_fy_sales": 0, "outstanding_balance": 0}
 
 
+# ── Last-trip potential customer stats (used in Section 2B of report) ─────────
+
+def _last_trip_stats_for_report(created_by: ObjectId, exclude_id: ObjectId) -> dict:
+    """
+    Returns potential-customer tracking stats from the SP's most recent completed
+    trip BEFORE the estimate being reported (exclude_id).
+    """
+    last = db.expense_estimates.find_one(
+        {
+            "created_by": created_by,
+            "status": {"$in": ["Submitted", "Completed"]},
+            "_id": {"$ne": exclude_id},
+        },
+        sort=[("travel_start_date", -1)],
+    )
+    if not last:
+        return {"potential_visited": "-", "onboarded": "-", "orders_received": "-", "conversion_rate": "-"}
+
+    potential_visits = [
+        v for v in last.get("customer_visits", [])
+        if v.get("potential_customer_id") or v.get("customer_type") == "potential"
+    ]
+    potential_ids = [
+        ObjectId(v["potential_customer_id"])
+        for v in potential_visits
+        if v.get("potential_customer_id")
+    ]
+
+    onboarded_count = 0
+    zoho_ids = []
+    if potential_ids:
+        onboarded = list(db.potential_customers.find(
+            {"_id": {"$in": potential_ids}, "status": {"$in": ["Onboarded", "onboarded", "Customer"]}},
+            {"_id": 1, "contact_id": 1},
+        ))
+        onboarded_count = len(onboarded)
+        zoho_ids = [pc["contact_id"] for pc in onboarded if pc.get("contact_id")]
+
+    orders_count = 0
+    if zoho_ids:
+        orders_count = db.invoices.count_documents({"customer_id": {"$in": zoho_ids}})
+
+    visited = len(potential_visits)
+    conv = f"{orders_count / onboarded_count * 100:.1f}%" if onboarded_count else "-"
+    return {
+        "potential_visited": visited if visited else "-",
+        "onboarded": onboarded_count if onboarded_count else "-",
+        "orders_received": orders_count if orders_count else "-",
+        "conversion_rate": conv,
+    }
+
+
 # ── Excel report ───────────────────────────────────────────────────────────────
 
 def _thin_border():
@@ -383,12 +474,14 @@ def _write_report(est: dict) -> io.BytesIO:
             visit = {**visit, **stats}
         enriched_visits.append(visit)
 
+    last_trip = _last_trip_stats_for_report(est["created_by"], est["_id"])
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Expense Report"
 
     # Column widths
-    col_widths = {1: 6, 2: 14, 3: 16, 4: 30, 5: 28, 6: 14, 7: 14, 8: 12, 9: 12, 10: 14, 11: 16, 12: 30, 13: 16, 14: 30, 15: 18}
+    col_widths = {1: 6, 2: 14, 3: 16, 4: 30, 5: 28, 6: 14, 7: 14, 8: 12, 9: 12, 10: 14, 11: 16, 12: 30, 13: 16, 14: 18}
     for col, width in col_widths.items():
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -479,7 +572,9 @@ def _write_report(est: dict) -> io.BytesIO:
     actual_total = int(est.get("actual_existing_visits") or 0) + int(est.get("actual_new_visits") or 0)
     ach_total = f"{actual_total/planned_total*100:.1f}%" if planned_total else "-"
     for col, val in enumerate([
-        "No. of Visits", planned_total, actual_total, ach_total, "-", "-", "-", "-", ""
+        "No. of Visits", planned_total, actual_total, ach_total,
+        last_trip["potential_visited"], last_trip["onboarded"],
+        last_trip["orders_received"], last_trip["conversion_rate"], ""
     ], 1):
         write(r, col, val, normal_font, align=center)
     r += 1
@@ -505,7 +600,7 @@ def _write_report(est: dict) -> io.BytesIO:
         merge_write(r, 1, 14, table_label, label_font, label_fill, left)
         r += 1
         hdrs = ["SL No", "Date", "Expense Type", "Particulars / Description", "Location / Route",
-                "Amount (₹)", "Bill Status", "Bill No.", "Tax (GST)", "Net Amount", "Approved Amount", "Remarks", "DA (₹)", "DA Date", "Bill"]
+                "Amount (₹)", "Bill Status", "Bill No.", "Tax (GST)", "Net Amount", "Approved Amount", "Remarks", "DA (₹)", "Bill"]
         for ci, h in enumerate(hdrs, 1):
             write(r, ci, h, header_font, header_fill, center)
             ws.row_dimensions[r].height = 30
@@ -525,19 +620,18 @@ def _write_report(est: dict) -> io.BytesIO:
                 float(item.get("approved_amount") or 0),
                 item.get("remarks", ""),
                 float(item.get("daily_allowance") or 0),
-                _fmt_date(item.get("da_date")),
             ]
             for ci, val in enumerate(row_data, 1):
                 write(r, ci, val, normal_font, align=center)
             bill_url = item.get("bill_url", "")
             if bill_url:
-                bc = ws.cell(row=r, column=15, value="View Bill")
+                bc = ws.cell(row=r, column=14, value="View Bill")
                 bc.hyperlink = bill_url
                 bc.font = Font(color="0563C1", underline="single", size=10)
                 bc.border = _thin_border()
                 bc.alignment = center
             else:
-                write(r, 15, "", normal_font, align=center)
+                write(r, 14, "", normal_font, align=center)
             r += 1
         # Subtotals
         total_amt = sum(float(i.get("amount") or 0) for i in items)
@@ -545,7 +639,7 @@ def _write_report(est: dict) -> io.BytesIO:
         total_net = sum(float(i.get("amount") or 0) + float(i.get("tax_gst") or 0) for i in items)
         total_approved = sum(float(i.get("approved_amount") or 0) for i in items)
         total_da = sum(float(i.get("daily_allowance") or 0) for i in items)
-        subtotal_row = ["SUBTOTALS", "", "", "", "", total_amt, "", "", total_gst, total_net, total_approved, "", total_da, ""]
+        subtotal_row = ["SUBTOTALS", "", "", "", "", total_amt, "", "", total_gst, total_net, total_approved, "", total_da]
         for ci, val in enumerate(subtotal_row, 1):
             write(r, ci, val, Font(bold=True, size=10), label_fill, center)
         r += 1
