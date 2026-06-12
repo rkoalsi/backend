@@ -388,8 +388,15 @@ async def update_daily_visit_update(
 
                     shop["potential_customer_id"] = ObjectId(str(potential_customer_id))
 
+        except HTTPException:
+            raise
         except Exception as e:
             print(e)
+            if "E11000" in str(e) or "duplicate key" in str(e).lower():
+                raise HTTPException(
+                    status_code=400,
+                    detail="A shop with the same name and address already exists. Please use a different name or address.",
+                )
             raise HTTPException(status_code=400, detail="Invalid shops data format")
 
         # If we updated potential customer info, reflect those changes in the updates array
