@@ -333,7 +333,6 @@ async def update_daily_visit_update(
 
                     shop.pop("address", None)
                     shop.pop("customer_name", None)
-                    shop["potential_customer_id"] = ObjectId(pc_id)
                     pc_fields = {
                         "name": name,
                         "address": address,
@@ -349,21 +348,45 @@ async def update_daily_visit_update(
                     if pc_status == "Onboard":
                         pc_fields["onboard_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
 
-                    doc = db.potential_customers.find_one({"_id": ObjectId(pc_id)})
-                    if doc:
+                    # Try to update by _id first; if the doc no longer exists,
+                    # upsert by name+address+created_by (matches unique index) to
+                    # avoid duplicate key errors on stale pc_ids.
+                    existing = db.potential_customers.find_one({"_id": ObjectId(pc_id)})
+                    if existing:
                         db.potential_customers.update_one(
                             {"_id": ObjectId(pc_id)},
                             {"$set": pc_fields},
                         )
                         potential_customer_id = pc_id
                     else:
-                        potential_customer_id = db.potential_customers.insert_one(
+                        upsert_result = db.potential_customers.update_one(
                             {
-                                **pc_fields,
+                                "name": name,
+                                "address": address,
                                 "created_by": ObjectId(uploaded_by),
-                                "created_at": datetime.datetime.now(),
-                            }
-                        ).inserted_id
+                            },
+                            {
+                                "$set": pc_fields,
+                                "$setOnInsert": {
+                                    "created_by": ObjectId(uploaded_by),
+                                    "created_at": datetime.datetime.now(),
+                                },
+                            },
+                            upsert=True,
+                        )
+                        if upsert_result.upserted_id:
+                            potential_customer_id = upsert_result.upserted_id
+                        else:
+                            found = db.potential_customers.find_one(
+                                {
+                                    "name": name,
+                                    "address": address,
+                                    "created_by": ObjectId(uploaded_by),
+                                }
+                            )
+                            potential_customer_id = found["_id"] if found else pc_id
+
+                    shop["potential_customer_id"] = ObjectId(str(potential_customer_id))
 
         except Exception as e:
             print(e)
