@@ -337,7 +337,7 @@ async def update_estimate(
         raise HTTPException(status_code=403, detail="Not your estimate")
     if est["status"] == "Rejected":
         raise HTTPException(status_code=400, detail="Rejected estimates cannot be edited")
-    if est["status"] not in ["Pending Review", "Draft"]:
+    if est["status"] not in ["Pending Review", "Pending Second Review", "Pending Payment", "Draft"]:
         raise HTTPException(status_code=400, detail=f"Cannot edit estimate in status '{est['status']}'")
 
     body = await request.json()
@@ -372,6 +372,15 @@ async def update_estimate(
             "expense_items": expense_items,
             **totals,
             "advance_requested": float(body.get("advance_requested") or est.get("advance_requested") or 0),
+            "customer_visits": body.get("customer_visits", est.get("customer_visits", [])),
+            "planned_existing_visits": int(body.get("planned_existing_visits") or est.get("planned_existing_visits") or 0),
+            "planned_new_visits": int(body.get("planned_new_visits") or est.get("planned_new_visits") or 0),
+            "updated_at": datetime.datetime.utcnow(),
+        }
+
+    elif est["status"] in ("Pending Second Review", "Pending Payment"):
+        # Post-approval: SP can only update visit data (not expense amounts or trip details)
+        update = {
             "customer_visits": body.get("customer_visits", est.get("customer_visits", [])),
             "planned_existing_visits": int(body.get("planned_existing_visits") or est.get("planned_existing_visits") or 0),
             "planned_new_visits": int(body.get("planned_new_visits") or est.get("planned_new_visits") or 0),
@@ -445,3 +454,152 @@ async def submit_actuals(
         background_tasks.add_task(_send_email, approver_email, subject, html)
 
     return serialize_mongo_document(updated)
+
+
+@router.post("/{estimate_id}/sync-daily-visits")
+def sync_daily_visits(estimate_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Pull outcome/follow_up_date/order_value from daily visit shop records into
+    this estimate's customer_visits, matching by customer_id or potential_customer_id
+    within the trip date range for the same salesperson.
+    """
+    user_id = _current_user_id(current_user)
+    est = _get_estimate_or_404(estimate_id)
+    if str(est["created_by"]) != user_id:
+        raise HTTPException(status_code=403, detail="Not your estimate")
+
+    start_str = est.get("travel_start_date", "")
+    end_str = est.get("travel_end_date", "")
+    if not start_str or not end_str:
+        raise HTTPException(status_code=400, detail="Trip dates not set on estimate")
+
+    # Parse trip window (dates are stored as ISO strings)
+    try:
+        trip_start = datetime.datetime.fromisoformat(start_str).replace(hour=0, minute=0, second=0, microsecond=0)
+        trip_end = datetime.datetime.fromisoformat(end_str).replace(hour=23, minute=59, second=59, microsecond=999999)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid trip date format")
+
+    # Fetch all daily_visits for this SP within the trip window (+/- 1 day buffer)
+    buffer = datetime.timedelta(days=1)
+    daily_visits = list(db.daily_visits.find({
+        "created_by": ObjectId(user_id),
+        "created_at": {"$gte": trip_start - buffer, "$lte": trip_end + buffer},
+    }))
+
+    # Build lookup maps: customer_id → shop, potential_customer_id → shop
+    cid_to_shop: dict = {}
+    pcid_to_shop: dict = {}
+    for dv in daily_visits:
+        for shop in dv.get("shops", []):
+            cid = shop.get("customer_id")
+            if cid:
+                cid_to_shop[str(cid)] = shop
+            pcid = shop.get("potential_customer_id")
+            if pcid:
+                pcid_to_shop[str(pcid)] = shop
+        # Also include update entries
+        for upd in dv.get("updates", []):
+            cid = upd.get("customer_id")
+            if cid:
+                cid_to_shop[str(cid)] = upd
+            pcid = upd.get("potential_customer_id")
+            if pcid:
+                pcid_to_shop[str(pcid)] = upd
+
+    updated_visits = []
+    synced = 0
+    for visit in est.get("customer_visits", []):
+        matched_shop = None
+        if visit.get("customer_id"):
+            matched_shop = cid_to_shop.get(str(visit["customer_id"]))
+        if not matched_shop and visit.get("potential_customer_id"):
+            matched_shop = pcid_to_shop.get(str(visit["potential_customer_id"]))
+
+        if matched_shop:
+            synced += 1
+            visit = {
+                **visit,
+                "outcome": matched_shop.get("reason") or visit.get("outcome", ""),
+                "follow_up_date": (
+                    matched_shop.get("potential_customer_follow_up_date")
+                    or matched_shop.get("follow_up_date")
+                    or visit.get("follow_up_date", "")
+                ),
+                "order_value": (
+                    str(matched_shop.get("order_amount", ""))
+                    or visit.get("order_value", "")
+                ),
+            }
+        updated_visits.append(visit)
+
+    db.expense_estimates.update_one(
+        {"_id": ObjectId(estimate_id)},
+        {"$set": {"customer_visits": updated_visits, "updated_at": datetime.datetime.utcnow()}},
+    )
+    updated = db.expense_estimates.find_one({"_id": ObjectId(estimate_id)})
+    return {**serialize_mongo_document(updated), "synced_count": synced}
+
+
+@router.get("/last-trip-summary")
+def last_trip_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Returns potential customer tracking stats from the SP's most recent completed trip.
+    """
+    user_id = _current_user_id(current_user)
+
+    last_est = db.expense_estimates.find_one(
+        {"created_by": ObjectId(user_id), "status": {"$in": ["Submitted", "Completed"]}},
+        sort=[("travel_start_date", -1)],
+    )
+    if not last_est:
+        return {"has_last_trip": False}
+
+    potential_visits = [
+        v for v in last_est.get("customer_visits", [])
+        if v.get("potential_customer_id") or v.get("customer_type") == "potential"
+    ]
+
+    potential_ids = [
+        ObjectId(v["potential_customer_id"])
+        for v in potential_visits
+        if v.get("potential_customer_id")
+    ]
+
+    onboarded_ids = []
+    if potential_ids:
+        onboarded_pcs = list(db.potential_customers.find(
+            {"_id": {"$in": potential_ids}, "status": {"$in": ["Onboarded", "onboarded", "Customer"]}},
+            {"_id": 1, "name": 1, "contact_id": 1},
+        ))
+        onboarded_ids = [pc["_id"] for pc in onboarded_pcs]
+        onboarded_names = [pc.get("name", "") for pc in onboarded_pcs]
+        # Map potential_customer_id → contact_id for invoice lookup
+        zoho_ids = [pc.get("contact_id") for pc in onboarded_pcs if pc.get("contact_id")]
+    else:
+        onboarded_names = []
+        zoho_ids = []
+
+    orders_count = 0
+    orders_total = 0.0
+    if zoho_ids:
+        pipeline = [
+            {"$match": {"customer_id": {"$in": zoho_ids}}},
+            {"$group": {"_id": None, "count": {"$sum": 1}, "total": {"$sum": {"$toDouble": {"$ifNull": ["$total", 0]}}}}}
+        ]
+        agg = list(db.invoices.aggregate(pipeline))
+        if agg:
+            orders_count = agg[0].get("count", 0)
+            orders_total = agg[0].get("total", 0.0)
+
+    return {
+        "has_last_trip": True,
+        "trip_start": last_est.get("travel_start_date", "")[:10] if last_est.get("travel_start_date") else "",
+        "trip_end": last_est.get("travel_end_date", "")[:10] if last_est.get("travel_end_date") else "",
+        "locations": last_est.get("locations_visited", ""),
+        "potential_customers_visited": len(potential_visits),
+        "onboarded_count": len(onboarded_ids),
+        "onboarded_names": onboarded_names,
+        "orders_received_count": orders_count,
+        "orders_received_total": orders_total,
+    }
