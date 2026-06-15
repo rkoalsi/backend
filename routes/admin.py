@@ -2377,9 +2377,13 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
             # Add new image to the end of the array
             updated_images = current_images + [s3_url]
 
+            # Keep image_url in sync with the first image in the array
+            primary_image = updated_images[0]
+
             # Update the product with the new images array
             products_collection.update_one(
-                {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+                {"_id": ObjectId(product_id)},
+                {"$set": {"images": updated_images, "image_url": primary_image}},
             )
 
             return {
@@ -2452,10 +2456,12 @@ async def delete_image(product_id: str = Form(...), image_url: str = Form(...)):
 
         # Remove image from array
         updated_images = [img for img in current_images if img != image_url]
+        new_primary = updated_images[0] if updated_images else None
 
         # Update the product
+        update_fields = {"images": updated_images, "image_url": new_primary}
         result = products_collection.update_one(
-            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+            {"_id": ObjectId(product_id)}, {"$set": update_fields}
         )
 
         if result.modified_count > 0:
@@ -2499,7 +2505,8 @@ async def make_primary_image(product_id: str = Form(...), image_url: str = Form(
 
         # Update the product
         result = products_collection.update_one(
-            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+            {"_id": ObjectId(product_id)},
+            {"$set": {"images": updated_images, "image_url": image_url}},
         )
 
         if result.modified_count > 0:
