@@ -501,49 +501,178 @@ async def get_daily_visits(request: Request):
     )
 
 
+def _get_fy_info():
+    """Return current FY start years and month/year info."""
+    now = datetime.datetime.utcnow() + datetime.timedelta(seconds=IST_OFFSET / 1000)
+    current_year = now.year
+    current_month = now.month
+    current_fy_start_year = current_year if current_month >= 4 else current_year - 1
+    last_fy_start_year = current_fy_start_year - 1
+    previous_fy_start_year = current_fy_start_year - 2
+    return {
+        "current_year": current_year,
+        "current_month": current_month,
+        "current_fy_start_year": current_fy_start_year,
+        "last_fy_start_year": last_fy_start_year,
+        "previous_fy_start_year": previous_fy_start_year,
+        "current_month_name": now.strftime("%B %Y"),
+    }
+
+
+def _fetch_financial_data(customer_mongo_ids, fy):
+    """
+    Returns dict keyed by mongo customer _id string with financial metrics
+    aggregated from the invoices collection.
+    """
+    if not customer_mongo_ids:
+        return {}
+
+    customers = list(
+        db.customers.find(
+            {"_id": {"$in": [ObjectId(cid) for cid in customer_mongo_ids]}},
+            {"_id": 1, "contact_id": 1},
+        )
+    )
+    contact_to_mongo = {c["contact_id"]: str(c["_id"]) for c in customers if c.get("contact_id")}
+    contact_ids = list(contact_to_mongo.keys())
+    if not contact_ids:
+        return {}
+
+    cy = fy["current_year"]
+    cm = fy["current_month"]
+    cfy = fy["current_fy_start_year"]
+    lfy = fy["last_fy_start_year"]
+    pfy = fy["previous_fy_start_year"]
+
+    pipeline = [
+        {"$match": {"customer_id": {"$in": contact_ids}}},
+        {
+            "$addFields": {
+                "parsedYear": {"$year": {"$dateFromString": {"dateString": "$date"}}},
+                "parsedMonth": {"$month": {"$dateFromString": {"dateString": "$date"}}},
+            }
+        },
+        {
+            "$addFields": {
+                "isCurrentMonth": {
+                    "$and": [{"$eq": ["$parsedYear", cy]}, {"$eq": ["$parsedMonth", cm]}]
+                },
+                "isCurrentFY": {
+                    "$or": [
+                        {"$and": [{"$eq": ["$parsedYear", cfy]}, {"$gte": ["$parsedMonth", 4]}]},
+                        {"$and": [{"$eq": ["$parsedYear", cfy + 1]}, {"$lte": ["$parsedMonth", 3]}]},
+                    ]
+                },
+                "isLastFY": {
+                    "$or": [
+                        {"$and": [{"$eq": ["$parsedYear", lfy]}, {"$gte": ["$parsedMonth", 4]}]},
+                        {"$and": [{"$eq": ["$parsedYear", lfy + 1]}, {"$lte": ["$parsedMonth", 3]}]},
+                    ]
+                },
+                "isPreviousFY": {
+                    "$or": [
+                        {"$and": [{"$eq": ["$parsedYear", pfy]}, {"$gte": ["$parsedMonth", 4]}]},
+                        {"$and": [{"$eq": ["$parsedYear", pfy + 1]}, {"$lte": ["$parsedMonth", 3]}]},
+                    ]
+                },
+                "isDue": {
+                    "$not": {"$in": ["$status", ["void", "draft", "sent", "paid"]]}
+                },
+            }
+        },
+        {
+            "$group": {
+                "_id": "$customer_id",
+                "currentMonthSale": {
+                    "$sum": {
+                        "$cond": [
+                            "$isCurrentMonth",
+                            {"$toDouble": {"$ifNull": ["$total", 0]}},
+                            0,
+                        ]
+                    }
+                },
+                "currentFYSale": {
+                    "$sum": {
+                        "$cond": [
+                            "$isCurrentFY",
+                            {"$toDouble": {"$ifNull": ["$total", 0]}},
+                            0,
+                        ]
+                    }
+                },
+                "lastFYSale": {
+                    "$sum": {
+                        "$cond": [
+                            "$isLastFY",
+                            {"$toDouble": {"$ifNull": ["$total", 0]}},
+                            0,
+                        ]
+                    }
+                },
+                "previousFYSale": {
+                    "$sum": {
+                        "$cond": [
+                            "$isPreviousFY",
+                            {"$toDouble": {"$ifNull": ["$total", 0]}},
+                            0,
+                        ]
+                    }
+                },
+                "outstandingBalance": {
+                    "$sum": {
+                        "$cond": [
+                            "$isDue",
+                            {"$toDouble": {"$ifNull": ["$balance", 0]}},
+                            0,
+                        ]
+                    }
+                },
+            }
+        },
+    ]
+
+    results = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
+    financial_data = {}
+    for r in results:
+        mongo_id = contact_to_mongo.get(r["_id"])
+        if mongo_id:
+            financial_data[mongo_id] = {
+                "current_month_sale": round(r["currentMonthSale"], 2),
+                "current_fy_sale": round(r["currentFYSale"], 2),
+                "last_fy_sale": round(r["lastFYSale"], 2),
+                "previous_fy_sale": round(r["previousFYSale"], 2),
+                "outstanding_balance": round(r["outstandingBalance"], 2),
+            }
+    return financial_data
+
+
 @router.get("/report")
 def get_daily_visits_report(request: Request):
-    # Get date filter parameters from query
     start_date = request.query_params.get("start_date")
     end_date = request.query_params.get("end_date")
     salesperson_name = request.query_params.get("salesperson_name")
 
-    # Base query
     match_query = {}
-
-    # Add date filtering if parameters are provided
     if start_date or end_date:
         match_query["created_at"] = {}
-
         if start_date:
-            # Convert string to datetime and set to start of day (00:00:00)
-            start_datetime = datetime.datetime.strptime(start_date, "%Y-%m-%d")
-            match_query["created_at"]["$gte"] = start_datetime
-
+            match_query["created_at"]["$gte"] = datetime.datetime.strptime(start_date, "%Y-%m-%d")
         if end_date:
-            # Convert string to datetime and set to end of day (23:59:59)
-            end_datetime = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-            match_query["created_at"]["$lt"] = end_datetime
+            match_query["created_at"]["$lt"] = datetime.datetime.strptime(end_date, "%Y-%m-%d")
 
-    # Add salesperson filter if provided (look up by name)
     if salesperson_name:
         matched_users = list(
-            db.users.find(
-                {"name": {"$regex": salesperson_name, "$options": "i"}},
-                {"_id": 1},
-            )
+            db.users.find({"name": {"$regex": salesperson_name, "$options": "i"}}, {"_id": 1})
         )
-        user_ids = [u["_id"] for u in matched_users]
-        match_query["created_by"] = {"$in": user_ids}
+        match_query["created_by"] = {"$in": [u["_id"] for u in matched_users]}
 
-    # Start with match stage if we have date filters
-    query = []
+    pipeline = []
     if match_query:
-        query.append({"$match": match_query})
-
-    # Add the rest of the pipeline
-    query.extend(
+        pipeline.append({"$match": match_query})
+    pipeline.extend(
         [
+            {"$sort": {"created_at": 1}},
             {
                 "$lookup": {
                     "from": "users",
@@ -552,208 +681,165 @@ def get_daily_visits_report(request: Request):
                     "as": "created_by_info",
                 }
             },
-            {
-                "$unwind": {
-                    "path": "$created_by_info",
-                    "preserveNullAndEmptyArrays": True,
-                }
-            },
+            {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
             {
                 "$addFields": {
-                    "created_at": {
+                    "created_at_ist": {
                         "$dateToString": {
                             "format": "%Y-%m-%d %H:%M:%S",
                             "date": {"$add": ["$created_at", IST_OFFSET]},
                         }
                     },
-                    "updated_at": {
-                        "$dateToString": {
-                            "format": "%Y-%m-%d %H:%M:%S",
-                            "date": {"$add": ["$updated_at", IST_OFFSET]},
-                        }
-                    },
-                    "updates": {
-                        "$map": {
-                            "input": {"$ifNull": ["$updates", []]},
-                            "as": "update",
-                            "in": {
-                                "$mergeObjects": [
-                                    "$$update",
-                                    {
-                                        "created_at": {
-                                            "$dateToString": {
-                                                "format": "%Y-%m-%d %H:%M:%S",
-                                                "date": {
-                                                    "$add": [
-                                                        "$$update.created_at",
-                                                        IST_OFFSET,
-                                                    ]
-                                                },
-                                            }
-                                        },
-                                        "updated_at": {
-                                            "$dateToString": {
-                                                "format": "%Y-%m-%d %H:%M:%S",
-                                                "date": {
-                                                    "$add": [
-                                                        "$$update.updated_at",
-                                                        IST_OFFSET,
-                                                    ]
-                                                },
-                                            }
-                                        },
-                                    },
-                                ]
-                            },
-                        }
-                    },
                 }
             },
-            {"$sort": {"created_at": -1}},
         ]
     )
 
-    # Fetch matching daily visits
-    daily_visits_cursor = db.daily_visits.aggregate(query)
-    daily_visits = [serialize_mongo_document(doc) for doc in daily_visits_cursor]
+    daily_visits = [serialize_mongo_document(doc) for doc in db.daily_visits.aggregate(pipeline)]
 
-    # Add shop_hooks data similar to get_daily_visits API
+    # Collect all unique customer mongo _ids for financial lookup
+    all_customer_ids = set()
     for dv in daily_visits:
-        updates = dv.get("updates", [])
-        created_by = dv.get("created_by", "")
-        if len(updates) > 0:
-            for update in updates:
-                potential_customer = update.get("potential_customer")
-                if not potential_customer:
-                    customer_id = update.get("customer_id")
-                    address_id = update.get("address", {"address_id": ""}).get(
-                        "address_id"
-                    )
-                    shop_hooks = list(
-                        db.shop_hooks.find(
-                            {
-                                "customer_id": ObjectId(customer_id),
-                                "created_by": ObjectId(created_by),
-                                "customer_address.address_id": address_id,
-                            },
-                        ).sort({"created_at": -1})
-                    )
-                    update["shop_hooks"] = (
-                        shop_hooks[0].get("hooks") if len(shop_hooks) > 0 else []
-                    )
-                    for shop_hook in update["shop_hooks"]:
-                        del shop_hook["entryId"]
-                        del shop_hook["editing"]
-                        del shop_hook["category_id"]
+        for shop in dv.get("shops", []):
+            cid = shop.get("customer_id")
+            if cid and not shop.get("potential_customer"):
+                all_customer_ids.add(cid)
 
-    # Create an Excel workbook using openpyxl
+    fy = _get_fy_info()
+    financial_data = _fetch_financial_data(list(all_customer_ids), fy)
+
+    # Dynamic FY label headers
+    cfy = fy["current_fy_start_year"]
+    lfy = fy["last_fy_start_year"]
+    pfy = fy["previous_fy_start_year"]
+    current_fy_label = f"{cfy}-{cfy + 1}"
+    last_fy_label = f"{lfy}-{lfy + 1}"
+    previous_fy_label = f"{pfy}-{pfy + 1}"
+
+    headers = [
+        "Created By",
+        "Created Date & Time",
+        "Customer Name",
+        "Remarks",
+        "Selfie",
+        "Selfie Link",
+        "Selfie Date & Time",
+        "Shop Photo",
+        "Shop Photo Link",
+        "Shop Photo Date & Time",
+        f"Current Month Sale ({fy['current_month_name']})",
+        f"Current Year Sale ({current_fy_label})",
+        f"Previous Year Sale ({last_fy_label})",
+        f"Last Year Sale ({previous_fy_label})",
+        "Outstanding Balance",
+        "Final Remarks (For office Team)",
+    ]
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Daily Visits Report"
-
-    # Find the maximum number of updates across all visits
-    max_updates = 0
-    for dv in daily_visits:
-        updates_count = len(dv.get("updates", []))
-        if updates_count > max_updates:
-            max_updates = updates_count
-
-    # Define fields to exclude from update columns
-    keys_to_exclude = {
-        "_id",
-        # "uploaded_by",
-        "images",
-        "customer_id",
-        # Exclude all potential customer fields as requested
-        "potential_customer",
-        "potential_customer_name",
-        "potential_customer_address",
-        "potential_customer_tier",
-    }
-
-    # Collect all possible update keys for dynamic columns
-    update_keys = set()
-    for dv in daily_visits:
-        for update in dv.get("updates", []):
-            # Only add keys that aren't in the exclude list
-            update_keys.update([k for k in update.keys() if k not in keys_to_exclude])
-
-    # Define the base header row
-    base_headers = ["Created By", "Selfie", "Created At", "Updated At"]
-
-    # Create dynamic headers for each update
-    headers = base_headers.copy()
-    for i in range(max_updates):
-        # Add a single "Customer" column that will contain either customer_name or "Potential Customer"
-        headers.append(f"Update {i+1} - Customer")
-
-        # Add the rest of the columns
-        for key in sorted(update_keys):
-            headers.append(f"Update {i+1} - {key}")
-
     ws.append(headers)
 
-    # Add data rows
     for dv in daily_visits:
-        # Base row data
-        row = [
-            dv.get("created_by_info", {}).get("name", ""),
-            dv.get("selfie", ""),
-            dv.get("created_at", ""),
-            dv.get("updated_at", ""),
-        ]
+        created_by_name = (dv.get("created_by_info") or {}).get("name", "")
+        created_at = dv.get("created_at_ist", "")
+        selfie_url = dv.get("selfie") or ""
+        has_selfie = bool(selfie_url)
 
-        # Add update data
-        updates = dv.get("updates", [])
-        for i in range(max_updates):
-            if i < len(updates):
-                update = updates[i]
-
-                # Handle customer column - use "Potential Customer" if potential_customer is True,
-                # otherwise use customer_name
-                if update.get("potential_customer") is True:
-                    row.append("Potential Customer")
-                else:
-                    row.append(update.get("customer_name", ""))
-
-                # Add other fields
-                for key in sorted(update_keys):
-                    value = update.get(key, "")
-                    # Handle shop_hooks specially - convert list to string
-                    if key == "shop_hooks" and isinstance(value, list):
-                        value = ", ".join(str(hook) for hook in value) if value else ""
-                    row.append(str(value) if value is not None else "")
+        # Build a map: customer_id/potential_customer_id → first update with images
+        update_photo_map = {}
+        for upd in dv.get("updates", []):
+            images = upd.get("images") or []
+            if not images:
+                continue
+            first_image = images[0].get("url", "") if images else ""
+            # updates.created_at is stored as a UTC string; convert to IST
+            raw_upd_time = upd.get("created_at") or ""
+            if raw_upd_time:
+                try:
+                    # stored as either "2026-06-15 HH:MM:SS..." or "2026-06-15T..."
+                    normalized = str(raw_upd_time).replace("T", " ")[:19]
+                    upd_dt = datetime.datetime.strptime(
+                        normalized, "%Y-%m-%d %H:%M:%S"
+                    ) + datetime.timedelta(seconds=IST_OFFSET / 1000)
+                    upd_time = upd_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    upd_time = str(raw_upd_time)
             else:
-                # Fill empty cells for missing updates
-                # +1 for the customer column
-                for _ in range(len(update_keys) + 1):
-                    row.append("")
+                upd_time = ""
+            cid = upd.get("customer_id")
+            pcid = upd.get("potential_customer_id")
+            key = cid or pcid
+            if key and key not in update_photo_map:
+                update_photo_map[key] = (first_image, upd_time)
 
-        ws.append(row)
+        # Admin comments as final remarks (all comments on this visit)
+        admin_comments = dv.get("admin_comments") or []
+        final_remarks = "; ".join(
+            c.get("text", "") for c in admin_comments if c.get("text")
+        )
 
-    # Auto-adjust column width for better readability
-    for column in ws.columns:
-        max_length = 0
-        column_letter = openpyxl.utils.get_column_letter(column[0].column)
-        for cell in column:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = (max_length + 2) if max_length < 50 else 50
-        ws.column_dimensions[column_letter].width = adjusted_width
+        for shop in dv.get("shops", []):
+            is_potential = bool(shop.get("potential_customer"))
+            if is_potential:
+                customer_name = shop.get("potential_customer_name", "")
+                customer_key = shop.get("potential_customer_id", "")
+            else:
+                customer_name = shop.get("customer_name", "")
+                customer_key = shop.get("customer_id", "")
 
-    # Save the workbook to a binary stream
+            remarks = shop.get("reason", "")
+
+            photo_url, photo_time = update_photo_map.get(customer_key, ("", ""))
+            has_photo = bool(photo_url)
+
+            if is_potential:
+                fin = {}
+            else:
+                fin = financial_data.get(customer_key, {})
+
+            row = [
+                created_by_name,
+                created_at,
+                customer_name,
+                remarks,
+                has_selfie,
+                selfie_url,
+                created_at,  # selfie time = visit created_at
+                has_photo,
+                photo_url,
+                photo_time,
+                fin.get("current_month_sale", ""),
+                fin.get("current_fy_sale", ""),
+                fin.get("last_fy_sale", ""),
+                fin.get("previous_fy_sale", ""),
+                fin.get("outstanding_balance", ""),
+                final_remarks,
+            ]
+            ws.append(row)
+
+    # Style boolean columns
+    bool_cols = [5, 8]  # Selfie, Shop Photo (1-indexed)
+    for row in ws.iter_rows(min_row=2):
+        for col_idx in bool_cols:
+            cell = row[col_idx - 1]
+            cell.value = "Yes" if cell.value is True else ("No" if cell.value is False else cell.value)
+
+    # Auto-adjust column widths
+    for col in ws.columns:
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        max_len = max(
+            (len(str(cell.value)) for cell in col if cell.value is not None), default=10
+        )
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
+
     stream = io.BytesIO()
     wb.save(stream)
     stream.seek(0)
 
-    # Add date range and salesperson to filename if filters are active
     filename = "daily_visits_report"
     if salesperson_name:
-        safe_name = salesperson_name.replace(" ", "_")
-        filename += f"_{safe_name}"
+        filename += f"_{salesperson_name.replace(' ', '_')}"
     if start_date and end_date:
         filename += f"_{start_date}_to_{end_date}"
     elif start_date:
