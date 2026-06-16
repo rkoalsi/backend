@@ -81,6 +81,7 @@ def _minimal_payload(user: dict) -> dict:
         "role": user.get("role", ""),
         "customer_id": user.get("customer_id"),
         "name": user.get("name", ""),
+        "code": user.get("code", ""),
     }
 
 

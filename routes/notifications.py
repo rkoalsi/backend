@@ -41,6 +41,9 @@ NOTIFICATION_TYPES = {
     "expense_rejected": "Expense Estimate Rejected",
     "expense_advance_released": "Expense Advance Released",
     "expense_actuals_submitted": "Expense Actuals Submitted",
+    # cheques
+    "cheque_uploaded": "Cheque Uploaded",
+    "cheque_comment": "Comment on Cheque",
 }
 
 

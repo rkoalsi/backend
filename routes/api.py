@@ -37,6 +37,7 @@ from .chats import router as chats
 from .notifications import router as notifications
 from .expense_estimates import router as expense_estimates
 from .admin_expense_estimates import router as admin_expense_estimates
+from .cheques import router as cheques
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -142,6 +143,9 @@ router.include_router(
 )
 router.include_router(
     admin_expense_estimates, prefix="/admin/expense-estimates", tags=["Admin Expense Estimates"], dependencies=_jwt
+)
+router.include_router(
+    cheques, prefix="/cheques", tags=["Cheques"], dependencies=_jwt
 )
 
 @router.get("/")
