@@ -226,18 +226,8 @@ async def create_estimate(
 
     body = await request.json()
 
-    # Validate 10-day lead time
-    try:
-        travel_start = datetime.datetime.fromisoformat(body["travel_start_date"])
-    except (KeyError, ValueError):
+    if "travel_start_date" not in body:
         raise HTTPException(status_code=400, detail="travel_start_date is required (ISO format)")
-
-    today = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    if (travel_start - today).days < 10:
-        raise HTTPException(
-            status_code=400,
-            detail="Expense estimates must be submitted at least 10 days before the travel start date.",
-        )
 
     expense_items = body.get("expense_items", [])
     totals = _compute_totals(expense_items)
@@ -343,19 +333,6 @@ async def update_estimate(
     body = await request.json()
 
     if est["status"] == "Pending Review":
-        # Full edit allowed — re-validate 10-day rule if travel_start_date changed
-        if "travel_start_date" in body:
-            try:
-                travel_start = datetime.datetime.fromisoformat(body["travel_start_date"])
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid travel_start_date format")
-            today = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            if (travel_start - today).days < 10:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Expense estimates must be submitted at least 10 days before the travel start date.",
-                )
-
         expense_items = body.get("expense_items", est.get("expense_items", []))
         totals = _compute_totals(expense_items)
         update = {
