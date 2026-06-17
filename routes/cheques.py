@@ -196,7 +196,7 @@ def get_cheques(
         user_code = user_data.get("code", "")
 
         query: dict = {}
-        if user_role in ("sales_person", "sales_admin"):
+        if user_role == "sales_person":
             if not user_code:
                 return {"cheques": [], "total": 0, "page": page, "limit": limit}
             query["salesperson_codes"] = {
