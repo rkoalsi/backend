@@ -340,7 +340,7 @@ def delete_cheque(cheque_id: str, current_user: dict = Depends(get_current_user)
     try:
         user_data = current_user.get("data", current_user)
         user_role = user_data.get("role", "")
-        if user_role not in ("admin", "super_admin"):
+        if user_role not in ("admin", "super_admin", "sales_admin"):
             raise HTTPException(status_code=403, detail="Only admins can delete cheques")
 
         cheque = db.cheques.find_one({"_id": ObjectId(cheque_id)})
