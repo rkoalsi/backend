@@ -714,7 +714,7 @@ def _write_report(est: dict) -> io.BytesIO:
             _fmt_date(visit.get("date")),
             name,
             visit.get("city", ""),
-            visit.get("customer_status", ""),
+            "New / Potential" if visit.get("customer_type") == "potential" else visit.get("customer_status", ""),
             curr, last_fy, prev_fy, outstanding,
             visit.get("purpose_of_visit", ""),
             visit.get("outcome", ""),
