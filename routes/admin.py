@@ -71,6 +71,78 @@ customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
 
+def get_upcoming_stock_for_products(pre_order_products: list) -> dict:
+    """
+    For a list of pre-order products, return a dict mapping product _id (str)
+    to upcoming stock quantity sourced from the latest open/non-cancelled
+    purchase order whose vendor matches the product's brand.
+    """
+    if not pre_order_products:
+        return {}
+
+    brand_names = list({p.get("brand") for p in pre_order_products if p.get("brand")})
+    item_id_to_product_id = {
+        p.get("item_id"): str(p["_id"])
+        for p in pre_order_products
+        if p.get("item_id")
+    }
+
+    if not brand_names or not item_id_to_product_id:
+        return {}
+
+    # brand name → vendor_id
+    brand_docs = list(db.brands.find(
+        {"name": {"$in": brand_names}},
+        {"name": 1, "vendor_id": 1}
+    ))
+    brand_to_vendor = {b["name"]: b.get("vendor_id") for b in brand_docs if b.get("vendor_id")}
+
+    vendor_ids = list(set(brand_to_vendor.values()))
+    if not vendor_ids:
+        return {}
+
+    # product item_id → vendor_id expected for that product
+    item_id_to_vendor = {}
+    for p in pre_order_products:
+        iid = p.get("item_id")
+        brand = p.get("brand")
+        if iid and brand and brand in brand_to_vendor:
+            item_id_to_vendor[iid] = brand_to_vendor[brand]
+
+    # Fetch open/non-cancelled POs for these vendors that contain these items
+    open_item_ids = list(item_id_to_vendor.keys())
+    pos = list(db.purchase_orders.find(
+        {
+            "vendor_id": {"$in": vendor_ids},
+            "status": {"$nin": ["cancelled"]},
+            "line_items": {"$elemMatch": {"item_id": {"$in": open_item_ids}}},
+        },
+        {"vendor_id": 1, "line_items": 1, "date": 1}
+    ).sort("date", -1))
+
+    # Walk POs newest-first; take the first match per item_id
+    upcoming_by_item: dict = {}
+    seen: set = set()
+    for po in pos:
+        po_vendor = po.get("vendor_id")
+        for li in po.get("line_items", []):
+            iid = li.get("item_id")
+            if not iid or iid in seen:
+                continue
+            if item_id_to_vendor.get(iid) != po_vendor:
+                continue
+            qty = float(li.get("quantity") or 0)
+            qty_received = float(li.get("quantity_received") or 0)
+            upcoming_by_item[iid] = max(0, int(qty - qty_received))
+            seen.add(iid)
+
+    # Map back to product _id
+    return {
+        item_id_to_product_id[iid]: upcoming_by_item.get(iid, 0)
+        for iid in item_id_to_product_id
+    }
+
+
 # Connect to attendance database
 attendance_db = client.get_database("attendance")
 employees_collection = attendance_db.get_collection("employees")
@@ -1002,6 +1074,7 @@ def get_products(
     stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
     new_arrivals: Optional[bool] = None,
     missing_info_products: Optional[bool] = None,
+    pre_order: Optional[bool] = None,
     sort_by: Optional[str] = None,
 ):
     """
@@ -1027,14 +1100,13 @@ def get_products(
 
         # 3) New Arrivals (depending on how you define "new")
         if new_arrivals:
-            # If your DB has a boolean field `is_new`
-            # query["is_new"] = True
-
-            # Or if it's based on creation date (last 30 days, etc.)
             from datetime import datetime, timedelta
 
             ninty_days_ago = datetime.now() - timedelta(days=90)
             query["created_at"] = {"$gte": ninty_days_ago}
+
+        if pre_order:
+            query["pre_order"] = True
 
         if missing_info_products:
             query["$and"] = [
@@ -1061,19 +1133,31 @@ def get_products(
         # Pagination
         skip = page * limit
 
+        if sort_by == "catalogue":
+            sort_spec = [("catalogue_order", 1)]
+        elif sort_by == "latest":
+            sort_spec = [("created_at", -1)]
+        else:
+            sort_spec = [("status", 1), ("name", 1)]
+
         docs_cursor = (
             products_collection.find(query)
-            .sort(
-                [("catalogue_order", 1)]
-                if sort_by == "catalogue"
-                else [("status", 1), ("name", 1)]
-            )
+            .sort(sort_spec)
             .skip(skip)
             .limit(limit)
         )
         print(json.dumps(query, indent=4))
         total_count = products_collection.count_documents(query)
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
+
+        # Enrich pre-order products with upcoming stock from purchase orders
+        pre_order_prods = [p for p in products if p.get("pre_order")]
+        if pre_order_prods:
+            upcoming_map = get_upcoming_stock_for_products(pre_order_prods)
+            for p in products:
+                if p.get("pre_order"):
+                    p["upcoming_stock"] = upcoming_map.get(p["_id"], 0)
+
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
         # Validate page number
         if page > total_pages and total_pages != 0:
@@ -3094,6 +3178,7 @@ async def update_product(
     stock: Optional[int] = Form(None),
     status: Optional[str] = Form(None),
     catalogue_order: Optional[int] = Form(None),
+    pre_order: Optional[str] = Form(None),
     files: Optional[List[UploadFile]] = File(None),
     replace_images: Optional[bool] = Form(False)  # Whether to replace all images or append
 ):
@@ -3122,22 +3207,25 @@ async def update_product(
         # Build update dict from form fields
         form_data = {
             "name": name,
-            "brand": brand, 
+            "brand": brand,
             "category": category,
             "sub_category": sub_category,
             "series": series,
             "cf_sku_code": cf_sku_code,
-            "upc_code": upc_code,  # Added this field to the form_data dict
-            "catalogue_page": catalogue_page,  # Added this field too if needed
+            "upc_code": upc_code,
+            "catalogue_page": catalogue_page,
             "rate": rate,
             "stock": stock,
             "status": status,
             "catalogue_order": catalogue_order
         }
-        
+
         for field, value in form_data.items():
             if value is not None:
                 update_dict[field] = value
+
+        if pre_order is not None:
+            update_dict["pre_order"] = pre_order.lower() == "true"
 
         # Handle image uploads if files are provided
         uploaded_image_urls = []

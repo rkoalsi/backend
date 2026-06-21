@@ -91,6 +91,15 @@ def get_product_counts():
 
         result["New Arrivals"] = {"All Products": new_products_count}
 
+        # Add count for "Pre Orders" — products marked pre_order=true (no stock filter)
+        pre_orders_count = db.products.count_documents(
+            {
+                "pre_order": True,
+                "is_deleted": {"$exists": False},
+            }
+        )
+        result["Pre Orders"] = {"All Products": pre_orders_count}
+
         return result
 
     except Exception as e:
@@ -288,16 +297,24 @@ def get_products(
     new_only: Optional[bool] = Query(
         False, description="Filter to show only new products (created in last 3 months)"
     ),
+    pre_order: Optional[bool] = Query(
+        False, description="Filter to show only pre-order products"
+    ),
 ):
     """
     Retrieves paginated products with optional filters.
     When sort is "catalogue", the `catalogue_page` parameter is used to filter
     products by their catalogue_page field rather than for skipping documents.
     """
-    # Define base query
-    query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+    # Define base query — skip stock filter for pre-orders (they may have zero stock by design)
+    query = {"is_deleted": {"$exists": False}}
+    if not pre_order:
+        query["stock"] = {"$gt": 0}
 
-    if brand:
+    # Don't filter by brand when pre_order or new_only is true
+    if pre_order:
+        query["pre_order"] = True
+    elif not new_only and brand:
         query["brand"] = brand
 
     if category:
@@ -307,7 +324,7 @@ def get_products(
         regex = {"$regex": search, "$options": "i"}
         query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
 
-    if role == "salesperson":
+    if role == "salesperson" and not pre_order:
         query["status"] = "active"
 
     three_months_ago = datetime.now() - relativedelta(months=3)
@@ -455,6 +472,44 @@ def get_products(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
+
+    # Enrich pre-order products with upcoming stock from purchase orders
+    pre_order_prods = [p for p in all_products if p.get("pre_order")]
+    if pre_order_prods:
+        brand_names = list({p.get("brand") for p in pre_order_prods if p.get("brand")})
+        item_id_to_vendor = {}
+        if brand_names:
+            brand_to_vendor = {
+                b["name"]: b.get("vendor_id")
+                for b in db.brands.find({"name": {"$in": brand_names}}, {"name": 1, "vendor_id": 1})
+                if b.get("vendor_id")
+            }
+            item_id_to_vendor = {
+                p["item_id"]: brand_to_vendor[p["brand"]]
+                for p in pre_order_prods
+                if p.get("item_id") and p.get("brand") in brand_to_vendor
+            }
+        if item_id_to_vendor:
+            vendor_ids = list(set(item_id_to_vendor.values()))
+            pos = list(db.purchase_orders.find(
+                {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]},
+                 "line_items": {"$elemMatch": {"item_id": {"$in": list(item_id_to_vendor.keys())}}}},
+                {"vendor_id": 1, "line_items": 1, "date": 1}
+            ).sort("date", -1))
+            upcoming_by_item: dict = {}
+            seen_iids: set = set()
+            for po in pos:
+                for li in po.get("line_items", []):
+                    iid = li.get("item_id")
+                    if not iid or iid in seen_iids or item_id_to_vendor.get(iid) != po.get("vendor_id"):
+                        continue
+                    qty = float(li.get("quantity") or 0)
+                    qty_received = float(li.get("quantity_received") or 0)
+                    upcoming_by_item[iid] = max(0, int(qty - qty_received))
+                    seen_iids.add(iid)
+            for p in all_products:
+                if p.get("pre_order") and p.get("item_id") in upcoming_by_item:
+                    p["upcoming_stock"] = upcoming_by_item[p["item_id"]]
 
     try:
         total_products = db.products.count_documents(query)

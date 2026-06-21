@@ -335,6 +335,38 @@ async def forgot_password(
     return {"message": "If the email exists, a reset link has been sent."}
 
 
+class TourSeenUpdate(BaseModel):
+    tour_key: str  # 'home' | 'orders' | 'dashboard'
+
+
+@router.patch("/tour-seen")
+async def mark_tour_seen(body: TourSeenUpdate, token: str = Depends(JWTBearer())):
+    """Mark a specific onboarding tour as seen for the authenticated user."""
+    if body.tour_key not in {"home", "orders", "dashboard"}:
+        raise HTTPException(status_code=400, detail="Invalid tour_key")
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user_data = payload.get("data", {})
+    user_id = user_data.get("_id") if isinstance(user_data, dict) else None
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+
+    try:
+        obj_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+
+    users_collection.update_one(
+        {"_id": obj_id},
+        {"$set": {f"tour_seen.{body.tour_key}": True}},
+    )
+    return {"message": "Tour marked as seen"}
+
+
 @router.post("/reset_password")
 async def reset_password(confirm: PasswordResetConfirm):
     try:

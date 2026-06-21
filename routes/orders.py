@@ -3,7 +3,7 @@ from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket, re, io
@@ -262,6 +262,7 @@ def update_order(
                     "margin": product.get("margin", ""),
                     "price": product.get("rate", 0),
                     "added_by": product.get("added_by", ""),
+                    "pre_order": product.get("pre_order", False),
                 }
             )
         # Replace the product list in the update payload
@@ -314,10 +315,9 @@ async def email_estimate(
     estimate_id: str,
     estimate_number: str,
     estimate_url: str,
-    message: str,
     headers: dict,
     timeout: any,
-):
+) -> str:
     async with httpx.AsyncClient(timeout=timeout) as client:
         if status in {"accepted", "declined"}:
             await client.post(
@@ -329,7 +329,6 @@ async def email_estimate(
                 headers=headers,
             )
             status_response.raise_for_status()
-            message += status_response.json()["message"]
             db.orders.update_one(
                 {"_id": ObjectId(order_id)},
                 {
@@ -342,6 +341,8 @@ async def email_estimate(
                     }
                 },
             )
+            return status_response.json().get("message", "")
+    return ""
 
 
 def clear_cart(order_id: str, orders_collection: Collection):
@@ -1725,6 +1726,24 @@ def read_order(order_id: str):
         except Exception as e:
             # Pricing context is an enhancement — never fail the order fetch over it
             print(f"Error embedding pricing context on order {order_id}: {e}")
+
+    # Embed live estimate statuses from the estimates collection (kept current by webhook)
+    est_num = order.get("estimate_number")
+    po_est_num = order.get("pre_order_estimate_number")
+    if est_num or po_est_num:
+        nums_to_fetch = [n for n in [est_num, po_est_num] if n]
+        est_docs = {
+            doc["estimate_number"]: doc.get("status", "")
+            for doc in db.estimates.find(
+                {"estimate_number": {"$in": nums_to_fetch}},
+                {"estimate_number": 1, "status": 1},
+            )
+        }
+        if est_num:
+            order["estimate_status"] = est_docs.get(est_num, "")
+        if po_est_num:
+            order["pre_order_estimate_status"] = est_docs.get(po_est_num, "")
+
     return order
 
 
@@ -1795,6 +1814,8 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
     """
     order_id = order_dict.get("order_id")
     status = str(order_dict.get("status")).lower()
+    create_stock = order_dict.get("create_stock", True)
+    create_pre_order = order_dict.get("create_pre_order", True)
     try:
         # Perform order validation
         validate_order(order_id)
@@ -1845,55 +1866,89 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         str(sm["product_id"]): sm["margin"] for sm in special_margins_cursor
     }
 
-    line_items = []
-    for idx, product in enumerate(products):
-        item = db.products.find_one({"_id": ObjectId(product.get("product_id"))})
-        if item is None:
-            continue
-        product_id_str = str(
-            product.get("product_id")
-        )  # Convert to string for dictionary lookup
-        # Retrieve the special margin if it exists; otherwise, use the product's default margin
-        special_margin = special_margin_dict.get(
-            product_id_str, customer.get("cf_margin", "40%")
-        )
-        discount_value = special_margin
-        if not discount_value.endswith("%"):
-            discount_value = f"{discount_value}%"
-        tax_prefs = item.get("item_tax_preferences") or []
-        obj = {
-            "item_order": idx + 1,
-            "item_id": item.get("item_id"),
-            "rate": item.get("rate"),
-            "name": item.get("name"),
-            "description": f"SOH:{item.get('stock')}",
-            "quantity": product.get("quantity"),
-            "discount": discount_value,
-            "tax_id": (
-                tax_prefs[1].get("tax_id", 0)
-                if (place_of_supply == "MH" or place_of_supply == "") and len(tax_prefs) > 1
-                else tax_prefs[0].get("tax_id", 0) if tax_prefs else 0
-            ),
-            "tags": [],
-            "tax_exemption_code": "",
-            "item_custom_fields": [
-                {"label": "Manufacturer Code", "value": item.get("cf_item_code")},
-                {"label": "SKU Code", "value": item.get("cf_sku_code")},
-            ],
-            "hsn_or_sac": item.get("hsn_or_sac"),
-            "gst_treatment_code": "",
-            "unit": "pcs",
-            "unit_conversion_id": "",
-        }
-        line_items.append(obj)
+    # Look up authoritative pre_order flag from products collection (not the saved order field,
+    # which may be missing on orders saved before this field was persisted).
+    all_product_ids = [ObjectId(p["product_id"]) for p in products if p.get("product_id")]
+    product_docs_map = {
+        str(doc["_id"]): doc
+        for doc in db.products.find({"_id": {"$in": all_product_ids}})
+    }
+
+    # Split products into in-stock and pre-order
+    in_stock_products = [
+        p for p in products
+        if not product_docs_map.get(str(p.get("product_id")), {}).get("pre_order", False)
+    ]
+    pre_order_products_list = [
+        p for p in products
+        if product_docs_map.get(str(p.get("product_id")), {}).get("pre_order", False)
+    ]
+
+    pre_order_estimate_created = order.get("pre_order_estimate_created", False)
+    pre_order_estimate_id = order.get("pre_order_estimate_id", "")
+
+    def _make_line_items(prod_list, is_pre_order=False):
+        items = []
+        for idx, product in enumerate(prod_list):
+            item = product_docs_map.get(str(product.get("product_id")))
+            if item is None:
+                continue
+            product_id_str = str(product.get("product_id"))
+            special_margin = special_margin_dict.get(
+                product_id_str, customer.get("cf_margin", "40%")
+            )
+            discount_value = special_margin
+            if not discount_value.endswith("%"):
+                discount_value = f"{discount_value}%"
+            tax_prefs = item.get("item_tax_preferences") or []
+            description = (
+                f"PRE-ORDER | SOH:{item.get('stock')}"
+                if is_pre_order
+                else f"SOH:{item.get('stock')}"
+            )
+            obj = {
+                "item_order": idx + 1,
+                "item_id": item.get("item_id"),
+                "rate": item.get("rate"),
+                "name": item.get("name"),
+                "description": description,
+                "quantity": product.get("quantity"),
+                "discount": discount_value,
+                "tax_id": (
+                    tax_prefs[1].get("tax_id", 0)
+                    if (place_of_supply == "MH" or place_of_supply == "") and len(tax_prefs) > 1
+                    else tax_prefs[0].get("tax_id", 0) if tax_prefs else 0
+                ),
+                "tags": [],
+                "tax_exemption_code": "",
+                "item_custom_fields": [
+                    {"label": "Manufacturer Code", "value": item.get("cf_item_code")},
+                    {"label": "SKU Code", "value": item.get("cf_sku_code")},
+                ],
+                "hsn_or_sac": item.get("hsn_or_sac"),
+                "gst_treatment_code": "",
+                "unit": "pcs",
+                "unit_conversion_id": "",
+            }
+            items.append(obj)
+        return items
+
+    stock_line_items = _make_line_items(in_stock_products)
+    pre_order_line_items = _make_line_items(pre_order_products_list, is_pre_order=True)
 
     headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
     message = ""
-    estimate_data = {}
+    stock_estimate_data: dict = {}
+    preorder_estimate_data: dict = {}
 
-    if not estimate_created:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            # Compute current financial year string (April–March) first
+    need_new_stock = create_stock and not estimate_created and bool(stock_line_items)
+    need_new_preorder = create_pre_order and not pre_order_estimate_created and bool(pre_order_line_items)
+    prefix = ""; num_width = 4; fy_str = ""; counter_id = ""
+    errors: list = []
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        # Fetch Zoho list ONCE if any new estimate needs creating
+        if need_new_stock or need_new_preorder:
             now = datetime.now()
             fy_start = now.year if now.month >= 4 else now.year - 1
             fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
@@ -1905,53 +1960,28 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             if y.status_code != 200:
                 return {"status": "error", "message": f"{y.json().get('message','')}"}
             all_estimates = y.json().get("estimates", [])
-            # Find the last estimate for the current FY only
             fy_estimates = [
                 e for e in all_estimates if f"/{fy_str}/" in e.get("estimate_number", "")
             ]
-            # Use the first matching estimate (list is sorted descending by estimate_number)
             if fy_estimates:
-                last_estimate_number = str(fy_estimates[0]["estimate_number"]).split("/")
-                last_num = int(last_estimate_number[-1])
-                num_width = len(last_estimate_number[-1])
-                prefix = last_estimate_number[0]
+                last_parts = str(fy_estimates[0]["estimate_number"]).split("/")
+                last_num = int(last_parts[-1]); num_width = len(last_parts[-1]); prefix = last_parts[0]
             else:
-                # No estimates yet for this FY — start from 0, use defaults from most recent estimate
-                last_estimate_number = str(all_estimates[0]["estimate_number"]).split("/") if all_estimates else ["EST"]
-                last_num = 0
-                num_width = len(last_estimate_number[-1]) if len(last_estimate_number) > 1 else 4
-                prefix = last_estimate_number[0]
-            # Sync the counter up to current FY's last value, then atomically claim the next number.
-            # Per-FY counter key prevents cross-year contamination.
-            # $max ensures the counter never goes backwards (handles out-of-band Zoho estimates).
-            # $inc is atomic, so concurrent requests each get a unique sequential number.
+                last_parts = str(all_estimates[0]["estimate_number"]).split("/") if all_estimates else ["EST"]
+                last_num = 0; num_width = len(last_parts[-1]) if len(last_parts) > 1 else 4; prefix = last_parts[0]
             counter_id = f"estimate_counter_{fy_str}"
-            db.counters.update_one(
-                {"_id": counter_id},
-                {"$max": {"seq": last_num}},
-                upsert=True,
-            )
-            counter = db.counters.find_one_and_update(
-                {"_id": counter_id},
-                {"$inc": {"seq": 1}},
-                return_document=True,
-            )
-            new_last_part = str(counter["seq"]).zfill(num_width)
-            # Reconstruct the estimate number
-            new_estimate_number = (
-                f"{prefix}/{fy_str}/{new_last_part}"
-            )
-            # Prepare the request payload
-            payload = {
-                "estimate_number": new_estimate_number,
+            db.counters.update_one({"_id": counter_id}, {"$max": {"seq": last_num}}, upsert=True)
+
+        def _base_payload(line_items_list: list, notes_text: str) -> dict:
+            return {
                 "location_id": "3220178000143298047",
                 "contact_persons": [],
                 "customer_id": customer.get("contact_id"),
                 "date": datetime.now().strftime("%Y-%m-%d"),
                 "expiry_date": "",
-                "notes": "Looking forward for your business.",
+                "notes": notes_text,
                 "terms": terms,
-                "line_items": line_items,
+                "line_items": line_items_list,
                 "custom_fields": [],
                 "is_inclusive_tax": False if gst_type == "Exclusive" else True,
                 "is_discount_before_tax": "",
@@ -1963,7 +1993,6 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 "tax_authority_name": "",
                 "pricebook_id": "",
                 "salesperson_id": user.get("salesperson_id", ""),
-                # "template_id": "3220178000000075080",
                 "payment_options": {"payment_gateways": []},
                 "documents": [],
                 "mail_attachments": [],
@@ -1975,137 +2004,176 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 "gst_no": customer.get("gst_no", ""),
                 "place_of_supply": place_of_supply,
                 "is_tcs_amount_in_percent": True,
-                "client_computation": {"total": total_amount},
+                "client_computation": {"total": total_amount or 0},
                 "reference_number": reference_number,
             }
-            estimate_response = await client.post(
-                url=ESTIMATE_URL.format(org_id=org_id)
-                + "&ignore_auto_number_generation=true",
-                headers=headers,
-                json=payload,
-            )
-            print(estimate_response.json())
 
-            # Check if the response contains an error
-            response_json = estimate_response.json()
-            # Zoho returns code: 0 for success, non-zero for errors
-            if estimate_response.status_code != 201 or (response_json.get("code", 0) != 0):
-                error_message = response_json.get("message", "Unknown error occurred")
-                error_code = response_json.get("code", "")
-                return {
-                    "status": "error",
-                    "message": error_message,
-                    "error_code": error_code
-                }
-
-            estimate_data = response_json["estimate"]
-            estimate_id = estimate_data.get("estimate_id")
-            estimate_number = estimate_data.get("estimate_number")
-            estimate_url = estimate_data.get("estimate_url")
-            db.estimates.insert_one(
-                {
-                    **estimate_data,
-                    "order_id": ObjectId(order_id),
-                }
-            )
-            db.orders.update_one(
-                {"_id": ObjectId(order_id)},
-                {
-                    "$set": {
-                        "status": status,
-                        "estimate_created": True,
+        # ── In-stock estimate ──
+        if stock_line_items and create_stock:
+            if not estimate_created:
+                counter = db.counters.find_one_and_update(
+                    {"_id": counter_id}, {"$inc": {"seq": 1}}, return_document=True
+                )
+                new_est_num = f"{prefix}/{fy_str}/{str(counter['seq']).zfill(num_width)}"
+                payload = {"estimate_number": new_est_num, **_base_payload(stock_line_items, "Looking forward for your business.")}
+                resp = await client.post(
+                    url=ESTIMATE_URL.format(org_id=org_id) + "&ignore_auto_number_generation=true",
+                    headers=headers,
+                    json=payload,
+                )
+                print(resp.json())
+                rj = resp.json()
+                if resp.status_code != 201 or rj.get("code", 0) != 0:
+                    errors.append(f"In-stock estimate: {rj.get('message', 'Unknown error')}")
+                else:
+                    stock_estimate_data = rj["estimate"]
+                    db.estimates.insert_one({**stock_estimate_data, "order_id": ObjectId(order_id)})
+                    db.orders.update_one({"_id": ObjectId(order_id)}, {"$set": {
+                        "status": status, "estimate_created": True,
+                        "estimate_id": stock_estimate_data["estimate_id"],
+                        "estimate_number": stock_estimate_data["estimate_number"],
+                        "estimate_url": stock_estimate_data.get("estimate_url", ""),
+                    }})
+                    message += f"Estimate created: {stock_estimate_data['estimate_number']}\n"
+            else:
+                if status in {"accepted", "declined"}:
+                    # Don't PUT-update a closed estimate — Zoho rejects it.
+                    # Just carry forward the stored IDs so email_estimate can
+                    # push the status change.
+                    stock_estimate_data = {
                         "estimate_id": estimate_id,
-                        "estimate_number": estimate_number,
-                        "estimate_url": estimate_url,
+                        "estimate_number": order.get("estimate_number", ""),
+                        "estimate_url": order.get("estimate_url", ""),
                     }
-                },
-            )
-            message = f"Estimate has been created - {estimate_data['estimate_number']} with Status : {str(status).capitalize()}\n"
-    else:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            payload = {
-                "location_id": "3220178000143298047",
-                "contact_persons": [],
-                "customer_id": customer.get("contact_id"),
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "expiry_date": "",
-                "notes": "Looking forward for your business.",
-                "terms": terms,
-                "line_items": line_items,
-                "custom_fields": [],
-                "is_inclusive_tax": False if gst_type == "Exclusive" else True,
-                "is_discount_before_tax": "",
-                "discount": 0,
-                "discount_type": "item_level",
-                "adjustment": "",
-                "adjustment_description": "Adjustment",
-                "tax_exemption_code": "",
-                "tax_authority_name": "",
-                "pricebook_id": "",
-                "salesperson_id": user.get("salesperson_id", ""),
-                # "template_id": "3220178000000075080",
-                "payment_options": {"payment_gateways": []},
-                "documents": [],
-                "mail_attachments": [],
-                "billing_address_id": billing_address_id,
-                "shipping_address_id": shipping_address_id,
-                "dispatch_from_address_id": "3220178000177830244",
-                "project_id": "",
-                "gst_treatment": customer.get("gst_treatment"),
-                "gst_no": customer.get("gst_no", ""),
-                "place_of_supply": place_of_supply,
-                "is_tcs_amount_in_percent": True,
-                "client_computation": {"total": total_amount},
-                "reference_number": reference_number,
-            }
+                    message += f"Estimate {order.get('estimate_number', '')} {status}\n"
+                else:
+                    payload = _base_payload(stock_line_items, "Looking forward for your business.")
+                    resp = await client.put(
+                        url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}?organization_id={org_id}",
+                        headers=headers,
+                        json=payload,
+                    )
+                    rj = resp.json()
+                    if resp.status_code != 200 or rj.get("code", 0) != 0:
+                        errors.append(f"In-stock estimate: {rj.get('message', 'Unknown error')}")
+                    else:
+                        stock_estimate_data = rj["estimate"]
+                        db.orders.update_one({"_id": ObjectId(order_id)}, {"$set": {
+                            "status": status, "estimate_created": True,
+                            "estimate_id": stock_estimate_data["estimate_id"],
+                            "estimate_number": stock_estimate_data["estimate_number"],
+                            "estimate_url": stock_estimate_data.get("estimate_url", ""),
+                        }})
+                        message += f"Estimate updated: {stock_estimate_data['estimate_number']}\n"
 
-            y = await client.put(
-                url=f"https://books.zoho.com/api/v3/estimates/{estimate_id}?organization_id={org_id}",
+        # ── Pre-order estimate ──
+        if pre_order_line_items and create_pre_order:
+            if not pre_order_estimate_created:
+                counter = db.counters.find_one_and_update(
+                    {"_id": counter_id}, {"$inc": {"seq": 1}}, return_document=True
+                )
+                new_po_num = f"{prefix}/{fy_str}/{str(counter['seq']).zfill(num_width)}"
+                payload = {"estimate_number": new_po_num, **_base_payload(pre_order_line_items, "PRE-ORDER — Items will be fulfilled when stock arrives.")}
+                resp = await client.post(
+                    url=ESTIMATE_URL.format(org_id=org_id) + "&ignore_auto_number_generation=true",
+                    headers=headers,
+                    json=payload,
+                )
+                print(resp.json())
+                rj = resp.json()
+                if resp.status_code != 201 or rj.get("code", 0) != 0:
+                    errors.append(f"Pre-order estimate: {rj.get('message', 'Unknown error')}")
+                else:
+                    preorder_estimate_data = rj["estimate"]
+                    db.estimates.insert_one({**preorder_estimate_data, "order_id": ObjectId(order_id), "is_pre_order": True})
+                    db.orders.update_one({"_id": ObjectId(order_id)}, {"$set": {
+                        "status": status,
+                        "pre_order_estimate_created": True,
+                        "pre_order_estimate_id": preorder_estimate_data["estimate_id"],
+                        "pre_order_estimate_number": preorder_estimate_data["estimate_number"],
+                        "pre_order_estimate_url": preorder_estimate_data.get("estimate_url", ""),
+                    }})
+                    message += f"Pre-order estimate created: {preorder_estimate_data['estimate_number']}\n"
+            else:
+                if status in {"accepted", "declined"}:
+                    preorder_estimate_data = {
+                        "estimate_id": pre_order_estimate_id,
+                        "estimate_number": order.get("pre_order_estimate_number", ""),
+                        "estimate_url": order.get("pre_order_estimate_url", ""),
+                    }
+                    message += f"Pre-order estimate {order.get('pre_order_estimate_number', '')} {status}\n"
+                else:
+                    payload = _base_payload(pre_order_line_items, "PRE-ORDER — Items will be fulfilled when stock arrives.")
+                    resp = await client.put(
+                        url=f"https://books.zoho.com/api/v3/estimates/{pre_order_estimate_id}?organization_id={org_id}",
+                        headers=headers,
+                        json=payload,
+                    )
+                    rj = resp.json()
+                    if resp.status_code != 200 or rj.get("code", 0) != 0:
+                        errors.append(f"Pre-order estimate: {rj.get('message', 'Unknown error')}")
+                    else:
+                        preorder_estimate_data = rj["estimate"]
+                        db.orders.update_one({"_id": ObjectId(order_id)}, {"$set": {
+                            "status": status,
+                            "pre_order_estimate_created": True,
+                            "pre_order_estimate_id": preorder_estimate_data["estimate_id"],
+                            "pre_order_estimate_number": preorder_estimate_data["estimate_number"],
+                            "pre_order_estimate_url": preorder_estimate_data.get("estimate_url", ""),
+                        }})
+                        message += f"Pre-order estimate updated: {preorder_estimate_data['estimate_number']}\n"
+
+    # Always persist the status change (estimates may already exist)
+    db.orders.update_one({"_id": ObjectId(order_id)}, {"$set": {"status": status}})
+
+    # Email primary estimate (in-stock first, fall back to pre-order)
+    primary_estimate = stock_estimate_data if stock_estimate_data else preorder_estimate_data
+    if primary_estimate:
+        msg_fragment = await email_estimate(
+            status,
+            order_id,
+            primary_estimate["estimate_id"],
+            primary_estimate["estimate_number"],
+            primary_estimate.get("estimate_url", ""),
+            headers,
+            timeout,
+        )
+        if msg_fragment:
+            message += msg_fragment + "\n"
+        # Sync status to db.estimates immediately — don't wait for the Zoho webhook
+        if status in {"accepted", "declined"} and primary_estimate.get("estimate_number"):
+            db.estimates.update_one(
+                {"estimate_number": primary_estimate["estimate_number"]},
+                {"$set": {"status": status}},
+            )
+
+    # For accept/decline: also push the status to the pre-order estimate in Zoho
+    # (email_estimate only handles the primary/in-stock estimate)
+    if status in {"accepted", "declined"} and pre_order_estimate_id:
+        _po_est_id = preorder_estimate_data.get("estimate_id") or pre_order_estimate_id
+        async with httpx.AsyncClient(timeout=timeout) as _client:
+            await _client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{_po_est_id}/status/sent?organization_id={org_id}",
                 headers=headers,
-                json=payload,
             )
-
-            # Check if the response contains an error
-            response_json = y.json()
-            # Zoho returns code: 0 for success, non-zero for errors
-            if y.status_code != 200 or (response_json.get("code", 0) != 0):
-                error_message = response_json.get("message", "Unknown error occurred")
-                error_code = response_json.get("code", "")
-                return {
-                    "status": "error",
-                    "message": error_message,
-                    "error_code": error_code
-                }
-
-            estimate_data = response_json["estimate"]
-            estimate_id = estimate_data.get("estimate_id")
-            estimate_number = estimate_data.get("estimate_number")
-            estimate_url = estimate_data.get("estimate_url")
-            message = f"Estimate has been updated - {estimate_number} with Status : {str(status).capitalize()}\n"
-            update_fields = {
-                "status": f"{str(status).capitalize()}",
-                "estimate_created": True,
-                "estimate_id": estimate_id,
-                "estimate_number": estimate_number,
-                "estimate_url": estimate_url,
-            }
-
-            db.orders.update_one(
-                {"_id": ObjectId(order_id)},
-                {"$set": update_fields},
+            await _client.post(
+                url=f"https://books.zoho.com/api/v3/estimates/{_po_est_id}/status/{status}?organization_id={org_id}",
+                headers=headers,
             )
-    await email_estimate(
-        status,
-        order_id,
-        estimate_data["estimate_id"],
-        estimate_data["estimate_number"],
-        estimate_data["estimate_url"],
-        message,
-        headers,
-        timeout,
-    )
+        db.orders.update_one(
+            {"_id": ObjectId(order_id)},
+            {"$set": {"pre_order_estimate_created": True, "pre_order_estimate_id": _po_est_id}},
+        )
+        # Sync pre-order status to db.estimates immediately — don't wait for the Zoho webhook
+        _po_est_num = preorder_estimate_data.get("estimate_number") or order.get("pre_order_estimate_number", "")
+        if _po_est_num:
+            db.estimates.update_one(
+                {"estimate_number": _po_est_num},
+                {"$set": {"status": status}},
+            )
 
     # In-app notification: order placed/updated → salesperson + customer
+    estimate_data = stock_estimate_data or preorder_estimate_data
     try:
         est_number = estimate_data.get("estimate_number", order_id[-6:])
         customer_name = order.get("customer_name", "")
@@ -2167,20 +2235,31 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 
+    if errors and not message:
+        return {"status": "error", "message": "; ".join(errors)}
+    if errors:
+        message += "\nWarnings: " + "; ".join(errors)
     return {"status": "success", "message": message}
 
 
 @router.get("/download_pdf/{order_id}")
-async def download_pdf(order_id: str = ""):
+async def download_pdf(order_id: str = "", estimate_type: str = Query("stock", alias="type")):
     try:
         # Check if the order exists in the database
-        order = db.orders.find_one(
-            {"_id": ObjectId(order_id), "estimate_created": True}
-        )
-        if order is None:
-            return {"status": "error", "message": "Draft Estimate Not Created"}
-        # Get the estimate_id and make the request to Zoho
-        estimate_id = order.get("estimate_id", "")
+        if estimate_type == "pre_order":
+            order = db.orders.find_one(
+                {"_id": ObjectId(order_id), "pre_order_estimate_created": True}
+            )
+            if order is None:
+                return {"status": "error", "message": "Pre-Order Estimate Not Created"}
+            estimate_id = order.get("pre_order_estimate_id", "")
+        else:
+            order = db.orders.find_one(
+                {"_id": ObjectId(order_id), "estimate_created": True}
+            )
+            if order is None:
+                return {"status": "error", "message": "Draft Estimate Not Created"}
+            estimate_id = order.get("estimate_id", "")
         headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
         response = requests.get(
             url=PDF_URL.format(org_id=org_id, estimate_id=estimate_id),
@@ -2191,11 +2270,15 @@ async def download_pdf(order_id: str = ""):
         # Check if the response from Zoho is successful (200)
         if response.status_code == 200:
             # Return the PDF content
+            if estimate_type == "pre_order":
+                pdf_filename = order.get("pre_order_estimate_number", f"preorder_{order_id}") + ".pdf"
+            else:
+                pdf_filename = order.get("estimate_number", f"order_{order_id}") + ".pdf"
             return Response(
                 content=response.content,
                 media_type="application/pdf",
                 headers={
-                    "Content-Disposition": f"attachment; filename=order_{order_id}.pdf"
+                    "Content-Disposition": f'attachment; filename="{pdf_filename}"'
                 },
             )
         elif response.status_code == 307:
