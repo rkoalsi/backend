@@ -256,8 +256,9 @@ def update_order(
                     ),
                     "brand": product.get("brand", ""),
                     "product_code": product.get("cf_sku_code", ""),
-                    "quantity": product.get("quantity", 1),
-                    "name": product.get("item_name", ""),
+                    "quantity": product.get("quantity", 0),
+                    "pre_order_quantity": product.get("pre_order_quantity", 0),
+                    "name": product.get("item_name") or product.get("name", ""),
                     "image_url": product.get("image_url", ""),
                     "margin": product.get("margin", ""),
                     "price": product.get("rate", 0),
@@ -1874,15 +1875,35 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         for doc in db.products.find({"_id": {"$in": all_product_ids}})
     }
 
-    # Split products into in-stock and pre-order
-    in_stock_products = [
-        p for p in products
-        if not product_docs_map.get(str(p.get("product_id")), {}).get("pre_order", False)
-    ]
-    pre_order_products_list = [
-        p for p in products
-        if product_docs_map.get(str(p.get("product_id")), {}).get("pre_order", False)
-    ]
+    # Split products into in-stock and pre-order.
+    # Split products (pre_order=True in DB but also have physical stock) can carry
+    # two quantities: `quantity` (stock portion) and `pre_order_quantity` (pre-order portion).
+    in_stock_products = []
+    pre_order_products_list = []
+    for p in products:
+        doc = product_docs_map.get(str(p.get("product_id")), {})
+        qty = int(p.get("quantity") or 0)
+        pre_order_qty = int(p.get("pre_order_quantity") or 0)
+        db_is_pre_order = doc.get("pre_order", False)
+        is_split = db_is_pre_order and (doc.get("stock") or 0) > 0
+
+        if pre_order_qty > 0:
+            # Explicit pre-order portion — goes to pre-order estimate
+            pre_order_products_list.append({**p, "quantity": pre_order_qty})
+
+        if qty > 0:
+            if db_is_pre_order and not is_split:
+                # Pure pre-order product (no stock): stock field holds the ordered qty
+                pre_order_products_list.append(p)
+            else:
+                # In-stock product, or split product's stock portion
+                in_stock_products.append(p)
+        elif pre_order_qty == 0:
+            # Fallback for legacy orders with neither explicit quantity: use DB flag
+            if db_is_pre_order:
+                pre_order_products_list.append(p)
+            else:
+                in_stock_products.append(p)
 
     pre_order_estimate_created = order.get("pre_order_estimate_created", False)
     pre_order_estimate_id = order.get("pre_order_estimate_id", "")

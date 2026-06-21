@@ -3477,3 +3477,115 @@ router.include_router(
     tags=["Admin Chats"],
     dependencies=[Depends(JWTBearer())],
 )
+
+
+# ─── Pre-order bulk management ────────────────────────────────────────────────
+
+@router.get("/pre-order/brands", dependencies=[Depends(JWTBearer())])
+def get_pre_order_brands():
+    """Return brands that have a vendor_id (i.e. can have purchase orders)."""
+    brands = list(db.brands.find(
+        {"vendor_id": {"$exists": True, "$ne": None, "$ne": ""}},
+        {"name": 1, "vendor_id": 1, "_id": 0}
+    ).sort("name", 1))
+    return [{"name": b["name"], "vendor_id": b["vendor_id"]} for b in brands]
+
+
+@router.get("/pre-order/purchase-orders", dependencies=[Depends(JWTBearer())])
+def get_pre_order_purchase_orders(brand: str = Query(...)):
+    """Return purchase orders for the given brand(s)'s vendor(s), newest first.
+    brand may be a single name or comma-separated names (e.g. "Dogfest,Catfest")."""
+    brand_names = [b.strip() for b in brand.split(",") if b.strip()]
+    vendor_ids = []
+    for bname in brand_names:
+        doc = db.brands.find_one({"name": bname}, {"vendor_id": 1})
+        if doc and doc.get("vendor_id"):
+            vendor_ids.append(doc["vendor_id"])
+    if not vendor_ids:
+        raise HTTPException(status_code=404, detail="Brand not found or has no vendor")
+    pos = list(db.purchase_orders.find(
+        {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]}},
+        {"purchaseorder_number": 1, "date": 1, "status": 1, "total": 1, "_id": 0}
+    ).sort("date", -1).limit(50))
+    return serialize_mongo_document(pos)
+
+
+@router.get("/pre-order/line-items", dependencies=[Depends(JWTBearer())])
+def get_pre_order_line_items(po_number: str = Query(...)):
+    """Return line items for a PO, enriched with pre_order status and upcoming_stock from products."""
+    po = db.purchase_orders.find_one(
+        {"purchaseorder_number": po_number},
+        {"line_items": 1, "_id": 0}
+    )
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    line_items = [li for li in po.get("line_items", []) if li.get("item_id")]
+    if not line_items:
+        return []
+
+    item_ids = [li["item_id"] for li in line_items]
+    products_map = {
+        p["item_id"]: p
+        for p in db.products.find(
+            {"item_id": {"$in": item_ids}},
+            {"item_id": 1, "pre_order": 1, "cf_sku_code": 1, "name": 1, "_id": 0}
+        )
+        if p.get("item_id")
+    }
+
+    result = []
+    for li in line_items:
+        iid = li.get("item_id")
+        prod = products_map.get(iid, {})
+        qty = float(li.get("quantity") or 0)
+        qty_received = float(li.get("quantity_received") or 0)
+        result.append({
+            "item_id": iid,
+            "name": li.get("name") or prod.get("name") or "",
+            "sku": prod.get("cf_sku_code") or "",
+            "quantity": qty,
+            "quantity_received": qty_received,
+            "upcoming_stock": max(0, int(qty - qty_received)),
+            "pre_order": prod.get("pre_order", False),
+            "in_products": bool(prod),
+        })
+    return result
+
+
+@router.post("/pre-order/mark", dependencies=[Depends(JWTBearer())])
+def mark_pre_order_products(payload: dict):
+    """
+    Mark item_ids as pre_order=True.
+    If unmark_others=True, set pre_order=False on remaining items from the same PO.
+    """
+    item_ids = payload.get("item_ids", [])
+    po_number = payload.get("po_number", "")
+    unmark_others = payload.get("unmark_others", True)
+
+    marked = 0
+    unmarked = 0
+
+    if item_ids:
+        res = db.products.update_many(
+            {"item_id": {"$in": item_ids}},
+            {"$set": {"pre_order": True}}
+        )
+        marked = res.modified_count
+
+    if unmark_others and po_number:
+        po = db.purchase_orders.find_one(
+            {"purchaseorder_number": po_number},
+            {"line_items": 1}
+        )
+        if po:
+            all_ids = [li["item_id"] for li in po.get("line_items", []) if li.get("item_id")]
+            unmark_ids = [iid for iid in all_ids if iid not in item_ids]
+            if unmark_ids:
+                res2 = db.products.update_many(
+                    {"item_id": {"$in": unmark_ids}},
+                    {"$set": {"pre_order": False}}
+                )
+                unmarked = res2.modified_count
+
+    return {"marked": marked, "unmarked": unmarked}
