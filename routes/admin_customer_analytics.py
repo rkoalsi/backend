@@ -867,6 +867,7 @@ def build_customer_analytics_pipeline(
         "$project": {
             "_id": 0,
             "customerId": 1,
+            "customerMongoId": {"$toString": {"$arrayElemAt": ["$customerDetails._id", 0]}},
             "customerName": 1,
             "companyName": 1,
             "shippingAddress": "$shippingAddressFormatted",

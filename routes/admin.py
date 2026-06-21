@@ -1397,9 +1397,8 @@ def get_customers(
         total_count = customers_collection.count_documents(query)
         customers = [serialize_mongo_document(doc) for doc in cursor]
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
-        # Validate page number
         if page > total_pages and total_pages != 0:
-            raise HTTPException(status_code=400, detail="Page number out of range")
+            customers = []
 
         return {
             "customers": customers,
@@ -1408,6 +1407,8 @@ def get_customers(
             "per_page": limit,
             "total_pages": total_pages,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 

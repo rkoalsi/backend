@@ -284,6 +284,16 @@ def create_bulk_users(data: dict):
     return {"created": created, "errors": errors, "total_created": len(created)}
 
 
+@router.get("/by-customer/{contact_id}")
+def get_user_by_customer(contact_id: str):
+    """Get the user account linked to a Zoho customer by their contact_id."""
+    user = db.users.find_one({"customer_id": contact_id, "role": "customer"})
+    if not user:
+        raise HTTPException(status_code=404, detail="No user account found for this customer")
+    user = serialize_mongo_document(user)
+    return {"user": {"email": user.get("email"), "name": user.get("name"), "_id": user.get("_id")}}
+
+
 @router.get("/{user_id}")
 def get_user(user_id: str):
     """Get a single user by ID."""
