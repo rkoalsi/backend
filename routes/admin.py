@@ -1818,6 +1818,8 @@ async def export_orders(
                 "Products": {"$size": {"$ifNull": ["$products", []]}},
                 "Estimate Url": "$estimate_url",
                 "Estimate Number": "$estimate_number",
+                "Pre-Order Estimate Url": "$pre_order_estimate_url",
+                "Pre-Order Estimate Number": "$pre_order_estimate_number",
                 "Reference Number": "$reference_number",
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
