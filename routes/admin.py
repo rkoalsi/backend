@@ -677,6 +677,18 @@ def get_product_additions_by_type_stats():
         {
             "$unwind": "$products"
         },
+        # Step 2b: Normalize added_by so null/""/unknown all become "sales_person"
+        {
+            "$addFields": {
+                "products.added_by": {
+                    "$cond": {
+                        "if": {"$in": ["$products.added_by", ["customer", "admin"]]},
+                        "then": "$products.added_by",
+                        "else": "sales_person"
+                    }
+                }
+            }
+        },
         # Step 3: Group by added_by to count products by type
         {
             "$group": {
