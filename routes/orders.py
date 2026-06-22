@@ -256,8 +256,8 @@ def update_order(
                     ),
                     "brand": product.get("brand", ""),
                     "product_code": product.get("cf_sku_code", ""),
-                    "quantity": product.get("quantity", 0),
-                    "pre_order_quantity": product.get("pre_order_quantity", 0),
+                    "quantity": int(product.get("quantity") or 0),
+                    "pre_order_quantity": int(product.get("pre_order_quantity") or 0),
                     "name": product.get("item_name") or product.get("name", ""),
                     "image_url": product.get("image_url", ""),
                     "margin": product.get("margin", ""),
@@ -1898,12 +1898,7 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             else:
                 # In-stock product, or split product's stock portion
                 in_stock_products.append(p)
-        elif pre_order_qty == 0:
-            # Fallback for legacy orders with neither explicit quantity: use DB flag
-            if db_is_pre_order:
-                pre_order_products_list.append(p)
-            else:
-                in_stock_products.append(p)
+        # If both qty and pre_order_qty are 0, skip — no line item should be created
 
     pre_order_estimate_created = order.get("pre_order_estimate_created", False)
     pre_order_estimate_id = order.get("pre_order_estimate_id", "")
