@@ -1598,6 +1598,7 @@ def read_all_orders(
     ),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    has_pre_order: Optional[bool] = Query(None, description="Filter orders containing pre-order items"),
 ):
     """
     Retrieve all orders for admin, with pagination and optional filters,
@@ -1635,6 +1636,9 @@ def read_all_orders(
     if amount:
         # Assuming you want to filter for total_amount > 0 when 'amount' is provided
         initial_match_conditions["total_amount"] = {"$gt": 0}
+
+    if has_pre_order:
+        initial_match_conditions["products"] = {"$elemMatch": {"pre_order": True}}
 
     # Now build our aggregation pipeline
     pipeline = [
