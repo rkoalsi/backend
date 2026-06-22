@@ -1887,8 +1887,13 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         db_is_pre_order = doc.get("pre_order", False)
         is_split = db_is_pre_order and (doc.get("stock") or 0) > 0
 
-        if pre_order_qty > 0:
-            # Explicit pre-order portion — goes to pre-order estimate
+        if pre_order_qty > 0 and db_is_pre_order:
+            # Explicit pre-order portion — goes to pre-order estimate.
+            # Guard on the *live* pre_order flag so a stale pre_order_quantity
+            # (left on a draft after admin unmarked the product) is dropped
+            # rather than cutting a phantom pre-order estimate. Products still
+            # flagged pre_order — whether split (stock>0) or pure (stock now 0)
+            # — are unaffected.
             pre_order_products_list.append({**p, "quantity": pre_order_qty})
 
         if qty > 0:
