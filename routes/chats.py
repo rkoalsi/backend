@@ -9,52 +9,88 @@ db = get_database()
 chats = db["chats"]
 
 
+def _collect_media(payload: dict) -> list:
+    """Return any Media0, Media1, ... URLs present in an inbound Plivo payload."""
+    media = []
+    i = 0
+    while True:
+        url = payload.get(f"Media{i}")
+        if not url:
+            break
+        media.append(url)
+        i += 1
+    return media
+
+
 @router.post("/callback")
 async def plivo_callback(request: Request):
     """
-    Receives Plivo WhatsApp delivery status callbacks and incoming messages.
-    Plivo sends form-encoded or JSON payloads depending on the event type.
+    Single endpoint that receives several distinct webhook shapes:
+      1. Meta WABA events    -> {"object": "whatsapp_business_account", "entry": [...]}
+                                (template approvals/archives, account updates)
+      2. Plivo delivery report -> has Status (queued/sent/delivered/read/failed/...)
+      3. Plivo error report    -> has ErrorCode, no Status  -> treated as failed
+      4. Plivo inbound message -> has Body and/or Media{n}   -> stored as "incoming"
     """
     content_type = request.headers.get("content-type", "")
-
     if "application/json" in content_type:
         payload = await request.json()
     else:
         form = await request.form()
         payload = dict(form)
 
+    now = datetime.datetime.now()
+
+    # 1. Meta WhatsApp Business Account events (template status, etc.) -- not a Plivo
+    #    message callback; never touch outgoing message status with these.
+    if isinstance(payload, dict) and (payload.get("object") == "whatsapp_business_account" or "entry" in payload):
+        chats.insert_one({
+            "type": "waba_event",
+            "raw_payload": payload,
+            "created_at": now,
+        })
+        print("[callback] stored waba_event")
+        return {"message": "ok"}
+
     message_uuid = payload.get("MessageUUID") or payload.get("message_uuid")
     from_number = payload.get("From") or payload.get("from_number") or payload.get("from")
     to_number = payload.get("To") or payload.get("to_number") or payload.get("to")
     status = payload.get("Status") or payload.get("status")
+    error_code = payload.get("ErrorCode") or payload.get("error_code")
     body = payload.get("Body") or payload.get("text")
+    media = _collect_media(payload)
 
-    # Determine if this is an incoming message or a delivery callback
-    if body and from_number:
-        chat_type = "incoming"
-    else:
-        chat_type = "callback"
+    # 4. Inbound customer message (text or media). Distinguished by having content.
+    if body or media:
+        chats.insert_one({
+            "type": "incoming",
+            "from": from_number,
+            "to": to_number,
+            "body": body,
+            "media": media or None,
+            "message_uuid": message_uuid,
+            "raw_payload": payload,
+            "created_at": now,
+        })
+        print(f"[callback] incoming from={from_number} body={str(body)[:40]!r} media={len(media)}")
+        return {"message": "ok"}
 
-    doc = {
-        "type": chat_type,
-        "from": from_number,
-        "to": to_number,
-        "body": body,
-        "status": status,
-        "message_uuid": message_uuid,
-        "raw_payload": payload,
-        "created_at": datetime.datetime.now(),
-    }
+    # 2/3. Delivery status or error report. Derive a status even when Plivo omits one.
+    if not status and error_code and str(error_code) != "0":
+        status = "failed"
 
-    print(f"[callback] type={chat_type} uuid={message_uuid} status={status} from={from_number} to={to_number}")
+    if message_uuid:
+        set_fields = {"last_callback_at": now}
+        # Only overwrite status when we actually have one -- never wipe with None.
+        if status:
+            set_fields["status"] = status
+        if error_code:
+            set_fields["error_code"] = str(error_code)
 
-    # If it's a delivery callback, update the matching outgoing message or create one
-    if chat_type == "callback" and message_uuid:
-        now = datetime.datetime.now()
         result = chats.update_one(
             {"type": "outgoing", "message_uuid": message_uuid},
             {
-                "$set": {"status": status, "last_callback_at": now},
+                "$set": set_fields,
                 "$setOnInsert": {
                     "type": "outgoing",
                     "message_uuid": message_uuid,
@@ -66,9 +102,18 @@ async def plivo_callback(request: Request):
             },
             upsert=True,
         )
-        print(f"[callback] update matched={result.matched_count} modified={result.modified_count} upserted={result.upserted_id}")
+        print(f"[callback] status={status} uuid={message_uuid} matched={result.matched_count} modified={result.modified_count} upserted={result.upserted_id}")
     else:
-        chats.insert_one(doc)
+        # Unrecognised shape -- keep it for inspection rather than dropping it.
+        chats.insert_one({
+            "type": "callback",
+            "from": from_number,
+            "to": to_number,
+            "status": status,
+            "raw_payload": payload,
+            "created_at": now,
+        })
+        print("[callback] stored unmatched callback (no message_uuid)")
 
     return {"message": "ok"}
 

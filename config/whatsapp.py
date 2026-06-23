@@ -9,7 +9,17 @@ load_dotenv()
 PLIVO_AUTH_ID = os.getenv("PLIVO_AUTH_ID")
 PLIVO_AUTH_TOKEN = os.getenv("PLIVO_AUTH_TOKEN")
 FROM_NUMBER = os.getenv("FROM_NUMBER")
+# Public base URL of THIS backend (e.g. https://api.pupscribe.in). Plivo POSTs
+# delivery/read status reports here; without it, messages stay "queued" forever.
+CALLBACK_BASE_URL = (os.getenv("CALLBACK_BASE_URL") or "").rstrip("/")
 client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+
+
+def _status_callback_url():
+    """Build the delivery-status callback URL, or None if not configured."""
+    if not CALLBACK_BASE_URL:
+        return None
+    return f"{CALLBACK_BASE_URL}/api/chats/callback"
 
 
 def _get_chats_collection():
@@ -121,12 +131,18 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
     chats_col = _get_chats_collection()
 
     try:
-        response = client.messages.create(
-            type_="whatsapp",
-            src=FROM_NUMBER,
-            dst=dst_phone,
-            template=generate_whatsapp_template(template_doc, params),
-        )
+        create_kwargs = {
+            "type_": "whatsapp",
+            "src": FROM_NUMBER,
+            "dst": dst_phone,
+            "template": generate_whatsapp_template(template_doc, params),
+        }
+        # Request delivery/read status reports so the chat status stops being "queued".
+        callback_url = _status_callback_url()
+        if callback_url:
+            create_kwargs["url"] = callback_url
+            create_kwargs["method"] = "POST"
+        response = client.messages.create(**create_kwargs)
 
         raw_uuid = None
         if isinstance(response, dict):
