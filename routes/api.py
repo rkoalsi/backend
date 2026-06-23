@@ -39,6 +39,7 @@ from .expense_estimates import router as expense_estimates
 from .admin_expense_estimates import router as admin_expense_estimates
 from .cheques import router as cheques
 from .salesperson_customer_logins import router as salesperson_customer_logins
+from .linktree import router as linktree
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -60,6 +61,8 @@ router.include_router(contact_submissions, prefix="/contact_submissions", tags=[
 router.include_router(customer_creation_requests, prefix="/customer_creation_requests", tags=["Customer Creation Requests"])
 # public blog
 router.include_router(blog, prefix="/blog", tags=["Blog"])
+# public link-tree landing page (content managed via /admin/linktree)
+router.include_router(linktree, prefix="/linktree", tags=["Link Tree"])
 # utility helpers (city list etc.) — read-only, non-sensitive
 router.include_router(util, prefix="/util", tags=["Util"])
 # permissions: each endpoint carries its own HTTPBearer dependency

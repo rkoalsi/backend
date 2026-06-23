@@ -33,6 +33,7 @@ from .webhooks import update_stock_lock, run_update_stock
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
+from .admin_linktree import router as admin_linktree_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_brand_leads import router as admin_brand_leads_router
@@ -3444,6 +3445,12 @@ router.include_router(
     admin_external_links_router,
     prefix="/external_links",
     tags=["Admin External Links"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_linktree_router,
+    prefix="/linktree",
+    tags=["Admin Link Tree"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(

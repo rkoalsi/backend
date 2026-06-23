@@ -1,0 +1,101 @@
+from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi.responses import JSONResponse
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+import boto3, uuid, os
+
+from ..config.root import get_database, serialize_mongo_document
+
+load_dotenv()
+router = APIRouter()
+db = get_database()
+
+AWS_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY")
+AWS_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_KEY")
+AWS_S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+AWS_S3_REGION = os.getenv("S3_REGION", "ap-south-1")
+AWS_S3_URL = os.getenv("S3_URL")
+
+s3_client = boto3.client(
+    "s3",
+    region_name=AWS_S3_REGION,
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+)
+
+
+def _default_config() -> dict:
+    return {
+        "is_active": True,
+        "accent_color": "#6366F1",
+        "links": [],
+        "whatsapp": {"enabled": False, "number": "", "message": "", "label": "Chat with us"},
+        "spin_wheel": {
+            "enabled": False,
+            "title": "",
+            "description": "",
+            "cta_text": "Spin",
+            "terms": "",
+            "start_date": None,
+            "end_date": None,
+            "segments": [],
+        },
+    }
+
+
+@router.get("")
+def get_linktree_config():
+    """Return the single link-tree config document, creating a default if missing."""
+    try:
+        doc = db.linktree.find_one({})
+        if not doc:
+            default = _default_config()
+            default["updated_at"] = datetime.now(timezone.utc)
+            db.linktree.insert_one(default)
+            doc = db.linktree.find_one({})
+        return serialize_mongo_document(doc)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.put("")
+def update_linktree_config(config: dict):
+    """Upsert the whole link-tree config in a single call."""
+    try:
+        # Never let the client overwrite Mongo's _id.
+        config.pop("_id", None)
+        config["updated_at"] = datetime.now(timezone.utc)
+
+        db.linktree.update_one({}, {"$set": config}, upsert=True)
+        doc = db.linktree.find_one({})
+        return serialize_mongo_document(doc)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/upload")
+async def upload_linktree_image(file: UploadFile = File(...)):
+    """Upload an image to S3 under the linktree/ prefix and return its public URL."""
+    try:
+        ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+        allowed = {"jpg", "jpeg", "png", "webp"}
+        if ext not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail="Only jpg/jpeg/png/webp files are allowed.",
+            )
+        file_key = f"linktree/{uuid.uuid4()}.{ext}"
+        s3_client.upload_fileobj(
+            file.file,
+            AWS_S3_BUCKET_NAME,
+            file_key,
+            ExtraArgs={
+                "ACL": "public-read",  # public link-tree page must be able to load it
+                "ContentType": file.content_type or "application/octet-stream",
+            },
+        )
+        return {"url": f"{AWS_S3_URL}/{file_key}", "s3_key": file_key}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
