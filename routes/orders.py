@@ -1887,23 +1887,28 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         db_is_pre_order = doc.get("pre_order", False)
         is_split = db_is_pre_order and (doc.get("stock") or 0) > 0
 
-        if pre_order_qty > 0 and db_is_pre_order:
-            # Explicit pre-order portion — goes to pre-order estimate.
-            # Guard on the *live* pre_order flag so a stale pre_order_quantity
-            # (left on a draft after admin unmarked the product) is dropped
-            # rather than cutting a phantom pre-order estimate. Products still
-            # flagged pre_order — whether split (stock>0) or pure (stock now 0)
-            # — are unaffected.
-            pre_order_products_list.append({**p, "quantity": pre_order_qty})
-
-        if qty > 0:
-            if db_is_pre_order and not is_split:
-                # Pure pre-order product (no stock): stock field holds the ordered qty
-                pre_order_products_list.append(p)
-            else:
-                # In-stock product, or split product's stock portion
+        # Mirror the frontend split logic exactly (Review.tsx).
+        if is_split:
+            # Split product: stock portion (`quantity`) -> in-stock estimate,
+            # pre-order portion (`pre_order_quantity`) -> pre-order estimate.
+            # These are two independent quantities on the same product.
+            if qty > 0:
                 in_stock_products.append(p)
-        # If both qty and pre_order_qty are 0, skip — no line item should be created
+            if pre_order_qty > 0:
+                pre_order_products_list.append({**p, "quantity": pre_order_qty})
+        elif db_is_pre_order:
+            # Pure pre-order product (no live stock): the single `quantity`
+            # field is the source of truth and goes entirely to the pre-order
+            # estimate. `pre_order_quantity` is ignored here — a non-split
+            # product can carry a STALE pre_order_quantity (e.g. it used to be
+            # split before its stock dropped to <=0), and adding it would
+            # double-count the line in the pre-order estimate.
+            if qty > 0:
+                pre_order_products_list.append(p)
+        else:
+            # In-stock product.
+            if qty > 0:
+                in_stock_products.append(p)
 
     pre_order_estimate_created = order.get("pre_order_estimate_created", False)
     pre_order_estimate_id = order.get("pre_order_estimate_id", "")
