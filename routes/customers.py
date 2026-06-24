@@ -19,6 +19,44 @@ load_dotenv()
 router = APIRouter()
 
 db = get_database()
+
+
+def build_salesperson_customer_or_conditions(user_code: str):
+    """Mongo `$or` conditions matching customers mapped to a salesperson code.
+
+    Mirrors the mapping used by the customer search bar (`GET /customers`):
+    customers whose `cf_sales_person` contains the salesperson's code, plus the
+    shared "Defaulter" and "Company customers" buckets. Reused by other routes
+    (e.g. orders grouped by salesperson) so the mapping stays consistent.
+    """
+    escaped_user_code = re.escape(user_code)
+    or_conditions = [
+        {"cf_sales_person": user_code},
+        {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
+        {
+            "cf_sales_person": {
+                "$regex": f"(^\\s*|,\\s*){escaped_user_code}(\\s*,|\\s*$)",
+                "$options": "i",
+            }
+        },
+    ]
+
+    for default_value in ["Defaulter", "Company customers"]:
+        escaped_default = re.escape(default_value)
+        or_conditions.extend(
+            [
+                {"cf_sales_person": default_value},
+                {"cf_sales_person": {"$elemMatch": {"$eq": default_value}}},
+                {
+                    "cf_sales_person": {
+                        "$regex": f"(^\\s*|,\\s*){escaped_default}(\\s*,|\\s*$)",
+                        "$options": "i",
+                    }
+                },
+            ]
+        )
+
+    return or_conditions
 org_id = os.getenv("ORG_ID")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
@@ -92,39 +130,7 @@ def get_customers(
     if role == "salesperson":
         query["status"] = "active"
         if user_code:
-            or_conditions = []
-            # Escape special regex characters in user_code
-            escaped_user_code = re.escape(user_code)
-            or_conditions.extend(
-                [
-                    {"cf_sales_person": user_code},
-                    {"cf_sales_person": {"$elemMatch": {"$eq": user_code}}},
-                    {
-                        "cf_sales_person": {
-                            "$regex": f"(^\\s*|,\\s*){escaped_user_code}(\\s*,|\\s*$)",
-                            "$options": "i",
-                        }
-                    },
-                ]
-            )
-
-            default_values = ["Defaulter", "Company customers"]
-            for default_value in default_values:
-                escaped_default = re.escape(default_value)
-                or_conditions.extend(
-                    [
-                        {"cf_sales_person": default_value},
-                        {"cf_sales_person": {"$elemMatch": {"$eq": default_value}}},
-                        {
-                            "cf_sales_person": {
-                                "$regex": f"(^\\s*|,\\s*){escaped_default}(\\s*,|\\s*$)",
-                                "$options": "i",
-                            }
-                        },
-                    ]
-                )
-
-            query["$or"] = or_conditions
+            query["$or"] = build_salesperson_customer_or_conditions(user_code)
 
     if name:
         query["contact_name"] = {"$regex": name, "$options": "i"}

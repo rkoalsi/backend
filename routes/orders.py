@@ -15,6 +15,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from ..config.constants import terms, STATE_CODES 
 from ..config.whatsapp import send_whatsapp
 from .notifications import create_notification, create_notifications_for_roles
+from .customers import build_salesperson_customer_or_conditions
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
@@ -173,11 +174,30 @@ def get_all_orders(
     status: str,
     collection: Collection,
     users_collection: Collection,
+    customer_id: str = "",
 ):
     query = {}
 
+    if customer_id:
+        # Customer-scoped view (e.g. from Customer Logins): show ALL orders for
+        # this customer regardless of which salesperson created them.
+        # The incoming id may be a Mongo ObjectId string or a Zoho contact_id;
+        # orders store customer_id as the customers._id ObjectId, so resolve it.
+        if ObjectId.is_valid(customer_id):
+            resolved_customer_id = ObjectId(customer_id)
+        else:
+            customer = customers_collection.find_one({"contact_id": customer_id})
+            if not customer:
+                return []
+            resolved_customer_id = customer["_id"]
+        query["customer_id"] = resolved_customer_id
+        query["is_deleted"] = {"$exists": False}
+        query["$or"] = [
+            {"total_amount": {"$gte": 0}},
+            {"spreadsheet_created": True},
+        ]
     # Salesperson-specific query
-    if role == "salesperson":
+    elif role == "salesperson":
         if not created_by:
             raise ValueError("Salesperson role requires 'created_by'")
         query["created_by"] = ObjectId(created_by)
@@ -192,9 +212,10 @@ def get_all_orders(
     # Fetch orders
     orders = collection.find(query).sort({"created_at": -1})
 
-    # For admin, populate created_by_info with user information
+    # For admin (or customer-scoped views), populate created_by_info so the
+    # client can show which salesperson created each order.
     orders_with_user_info = []
-    if "admin" in role:
+    if "admin" in role or customer_id:
         for order in orders:
             user_info = users_collection.find_one({"_id": order["created_by"]})
             if user_info:
@@ -1693,6 +1714,72 @@ def get_my_performance(user_id: str):
     }
 
 
+@router.get("/by_salesperson")
+def get_orders_by_salesperson_customers(code: str = "", status: str = ""):
+    """
+    Orders grouped by customer for every customer mapped to the given
+    salesperson `code` (same mapping as the customer search bar). Customers are
+    returned latest-first by their most recent order date, each with the list of
+    their orders (newest first). Used by the salesperson "Customer Orders" page.
+    """
+    if not code:
+        return []
+
+    customer_query = {
+        "status": "active",
+        "$or": build_salesperson_customer_or_conditions(code),
+    }
+    customer_ids = [c["_id"] for c in customers_collection.find(customer_query, {"_id": 1})]
+    if not customer_ids:
+        return []
+
+    order_match = {
+        "customer_id": {"$in": customer_ids},
+        "is_deleted": {"$exists": False},
+        "$or": [
+            {"total_amount": {"$gte": 0}},
+            {"spreadsheet_created": True},
+        ],
+    }
+    if status:
+        order_match["status"] = status
+
+    pipeline = [
+        {"$match": order_match},
+        {"$sort": {"created_at": -1}},
+        {
+            "$group": {
+                "_id": "$customer_id",
+                "customer_name": {"$first": "$customer_name"},
+                "latest_order_date": {"$max": "$created_at"},
+                "order_count": {"$sum": 1},
+                "total_amount": {
+                    "$sum": {"$toDouble": {"$ifNull": ["$total_amount", 0]}}
+                },
+                "orders": {
+                    "$push": {
+                        "_id": "$_id",
+                        "status": "$status",
+                        "total_amount": "$total_amount",
+                        "created_at": "$created_at",
+                        "customer_name": "$customer_name",
+                        "estimate_created": "$estimate_created",
+                        "estimate_number": "$estimate_number",
+                        "pre_order": "$pre_order",
+                        "pre_order_estimate_created": "$pre_order_estimate_created",
+                        "pre_order_estimate_number": "$pre_order_estimate_number",
+                        "spreadsheet_created": "$spreadsheet_created",
+                    }
+                },
+            }
+        },
+        {"$sort": {"latest_order_date": -1}},
+    ]
+
+    groups = orders_collection.aggregate(pipeline, allowDiskUse=True)
+    return [serialize_mongo_document(g) for g in groups]
+
+
 @router.get("/{order_id}")
 def read_order(order_id: str):
     """
@@ -1750,14 +1837,26 @@ def read_order(order_id: str):
 
 # Get all orders
 @router.get("")
-def read_all_orders(role: str = "salesperson", created_by: str = "", status: str = ""):
+def read_all_orders(
+    role: str = "salesperson",
+    created_by: str = "",
+    status: str = "",
+    customer_id: str = "",
+):
     """
     Retrieve all orders.
     If role is 'admin', return all orders.
     If role is 'salesperson', return only orders created by the specified user.
+    If 'customer_id' is provided, return ALL orders for that customer regardless
+    of role/created_by (used by the Customer Logins -> Past Orders view).
     """
     orders = get_all_orders(
-        role, created_by, status, orders_collection, users_collection
+        role,
+        created_by,
+        status,
+        orders_collection,
+        users_collection,
+        customer_id=customer_id,
     )
     return orders
 
