@@ -1747,6 +1747,24 @@ def get_orders_by_salesperson_customers(code: str = "", status: str = ""):
     pipeline = [
         {"$match": order_match},
         {"$sort": {"created_at": -1}},
+        # Resolve the order creator (orders.created_by -> users._id) and flag
+        # orders placed by the customer themselves, i.e. the creator's user
+        # document has role "customer".
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "creator",
+            }
+        },
+        {
+            "$addFields": {
+                "placed_by_customer": {
+                    "$eq": [{"$arrayElemAt": ["$creator.role", 0]}, "customer"]
+                }
+            }
+        },
         {
             "$group": {
                 "_id": "$customer_id",
@@ -1769,6 +1787,7 @@ def get_orders_by_salesperson_customers(code: str = "", status: str = ""):
                         "pre_order_estimate_created": "$pre_order_estimate_created",
                         "pre_order_estimate_number": "$pre_order_estimate_number",
                         "spreadsheet_created": "$spreadsheet_created",
+                        "placed_by_customer": "$placed_by_customer",
                     }
                 },
             }
