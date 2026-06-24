@@ -43,6 +43,7 @@ from .admin_careers import router as admin_careers_router
 from .admin_career_applications import router as admin_career_applications_router
 from .admin_contact_leads import router as admin_contact_submissions_router
 from .admin_chats import router as admin_chats_router
+from .admin_chats import contacts_router as admin_chatbot_customers_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -3505,6 +3506,12 @@ router.include_router(
     admin_chats_router,
     prefix="/chats",
     tags=["Admin Chats"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_chatbot_customers_router,
+    prefix="/chatbot_customers",
+    tags=["Admin Chatbot Customers"],
     dependencies=[Depends(JWTBearer())],
 )
 

@@ -7,6 +7,53 @@ router = APIRouter()
 
 db = get_database()
 chats = db["chats"]
+chatbot_customers = db["chatbot_customers"]
+customers = db["customers"]
+
+
+def _last10(phone) -> str:
+    """Last 10 digits of a phone number, the part that's stable across formats."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _is_b2b(phone) -> bool:
+    """Best-effort: does this sender match an existing B2B customer (phone/mobile)?"""
+    tail = _last10(phone)
+    if len(tail) < 10:
+        return False
+    match = customers.find_one(
+        {"$or": [
+            {"phone": {"$regex": tail}},
+            {"mobile": {"$regex": tail}},
+        ]},
+        {"_id": 1},
+    )
+    return match is not None
+
+
+def _register_b2c_contact(phone, body, now):
+    """Upsert the inbound sender into the self-building B2C contact registry."""
+    if not phone:
+        return
+    chatbot_customers.update_one(
+        {"phone": phone},
+        {
+            "$set": {"last_seen": now, "last_message": body},
+            "$inc": {"message_count": 1},
+            "$setOnInsert": {
+                "phone": phone,
+                "phone_last10": _last10(phone),
+                "name": None,
+                "source": "whatsapp",
+                "is_b2b": _is_b2b(phone),
+                "reviewed": False,
+                "notes": None,
+                "first_seen": now,
+            },
+        },
+        upsert=True,
+    )
 
 
 def _collect_media(payload: dict) -> list:
@@ -72,6 +119,11 @@ async def plivo_callback(request: Request):
             "raw_payload": payload,
             "created_at": now,
         })
+        # Self-building B2C contact registry (B2B clients live in `customers`).
+        try:
+            _register_b2c_contact(from_number, body, now)
+        except Exception as e:
+            print(f"[callback] failed to register b2c contact: {e}")
         print(f"[callback] incoming from={from_number} body={str(body)[:40]!r} media={len(media)}")
         return {"message": "ok"}
 
