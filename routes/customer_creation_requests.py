@@ -920,6 +920,7 @@ async def create_customer_request(
             "place_of_supply": request_data.place_of_supply,
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
+            "in_ex": request_data.in_ex,
             "pincode": request_data.pincode,
             "gst_certificate_url": request_data.gst_certificate_url,
             "pan_card_url": request_data.pan_card_url,
