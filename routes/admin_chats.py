@@ -161,6 +161,13 @@ def reply_to_chat(payload: dict = Body(...)):
     resp = send_whatsapp_text(phone, message)
     if resp is None:
         raise HTTPException(status_code=502, detail="Failed to send WhatsApp message (see server logs).")
+
+    # A human has now responded -> reset the auto-fallback guard so the bot can
+    # send the "team will get back" line again for a future unanswered question.
+    chatbot_customers.update_one(
+        {"phone_last10": _last10(phone)},
+        {"$set": {"awaiting_human": False}},
+    )
     return {"status": "sent"}
 
 

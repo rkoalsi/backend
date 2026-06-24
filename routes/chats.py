@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request, Query, Depends
 from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import JWTBearer
+from ..config.whatsapp import send_whatsapp_text
 import datetime
 
 router = APIRouter()
@@ -9,6 +10,18 @@ db = get_database()
 chats = db["chats"]
 chatbot_customers = db["chatbot_customers"]
 customers = db["customers"]
+chatbot_answers = db["chatbot_answers"]
+
+# --- Auto-responder configuration -----------------------------------------
+GREETINGS = {
+    "hi", "hii", "hiii", "hey", "heyy", "hello", "helo", "hellow",
+    "yo", "namaste", "hi there", "hey there", "hello there", "start",
+}
+GREETING_REPLY = "Hello! How may I help you today?"
+FALLBACK_REPLY = (
+    "Thanks for your message! A member of our team will get back to you "
+    "with an answer shortly."
+)
 
 
 def _last10(phone) -> str:
@@ -67,6 +80,51 @@ def _register_b2c_contact(phone, body, now):
     )
 
 
+def _is_greeting(text: str) -> bool:
+    t = (text or "").strip().lower().strip("!.?, ")
+    return t in GREETINGS
+
+
+def _match_answer(text: str):
+    """Look up a canned answer whose keyword appears in the message. Empty KB -> None."""
+    t = (text or "").lower()
+    if not t:
+        return None
+    for ans in chatbot_answers.find({"is_active": True}):
+        keywords = ans.get("keywords") or []
+        if any(str(kw).lower() in t for kw in keywords if kw):
+            return ans.get("answer")
+    return None
+
+
+def _auto_respond(phone: str, body: str, now):
+    """Greeting -> greeting reply; known question -> canned answer; otherwise a
+    'team will get back' reply, sent only once until a human replies (no spam)."""
+    if not phone or not body:
+        return  # ignore media-only / empty messages
+
+    if _is_greeting(body):
+        send_whatsapp_text(phone, GREETING_REPLY, sent_by="bot")
+        return
+
+    answer = _match_answer(body)
+    if answer:
+        send_whatsapp_text(phone, answer, sent_by="bot")
+        chatbot_customers.update_one({"phone": phone}, {"$set": {"awaiting_human": False}})
+        return
+
+    # No answer available. Tell them a human will follow up -- but only once,
+    # so a burst of unanswered messages doesn't repeat the line every time.
+    contact = chatbot_customers.find_one({"phone": phone}, {"awaiting_human": 1})
+    if contact and contact.get("awaiting_human"):
+        return
+    send_whatsapp_text(phone, FALLBACK_REPLY, sent_by="bot")
+    chatbot_customers.update_one(
+        {"phone": phone},
+        {"$set": {"awaiting_human": True, "awaiting_human_since": now}},
+    )
+
+
 def _collect_media(payload: dict) -> list:
     """Return any Media0, Media1, ... URLs present in an inbound Plivo payload."""
     media = []
@@ -120,6 +178,13 @@ async def plivo_callback(request: Request):
 
     # 4. Inbound customer message (text or media). Distinguished by having content.
     if body or media:
+        # Guard against Plivo webhook retries delivering the same message twice.
+        if message_uuid and chats.count_documents(
+            {"type": "incoming", "message_uuid": message_uuid}, limit=1
+        ):
+            print(f"[callback] duplicate incoming uuid={message_uuid}, skipping")
+            return {"message": "ok (duplicate)"}
+
         chats.insert_one({
             "type": "incoming",
             "from": from_number,
@@ -135,6 +200,11 @@ async def plivo_callback(request: Request):
             _register_b2c_contact(from_number, body, now)
         except Exception as e:
             print(f"[callback] failed to register b2c contact: {e}")
+        # Auto-reply (greeting / canned answer / 'team will respond' fallback).
+        try:
+            _auto_respond(from_number, body, now)
+        except Exception as e:
+            print(f"[callback] auto-respond failed: {e}")
         print(f"[callback] incoming from={from_number} body={str(body)[:40]!r} media={len(media)}")
         return {"message": "ok"}
 
