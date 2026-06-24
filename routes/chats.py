@@ -17,36 +17,47 @@ def _last10(phone) -> str:
     return digits[-10:] if len(digits) >= 10 else digits
 
 
-def _is_b2b(phone) -> bool:
-    """Best-effort: does this sender match an existing B2B customer (phone/mobile)?"""
+def _match_b2b_contacts(phone) -> list:
+    """Best-effort: all B2B customer contact_ids whose phone/mobile match this sender.
+    There may be more than one customer record per number, so we return every match."""
     tail = _last10(phone)
     if len(tail) < 10:
-        return False
-    match = customers.find_one(
+        return []
+    matches = customers.find(
         {"$or": [
             {"phone": {"$regex": tail}},
             {"mobile": {"$regex": tail}},
         ]},
-        {"_id": 1},
+        {"contact_id": 1},
     )
-    return match is not None
+    contact_ids = [m.get("contact_id") for m in matches if m.get("contact_id")]
+    # de-dupe while preserving order
+    seen = set()
+    return [cid for cid in contact_ids if not (cid in seen or seen.add(cid))]
 
 
 def _register_b2c_contact(phone, body, now):
     """Upsert the inbound sender into the self-building B2C contact registry."""
     if not phone:
         return
+    b2b_contact_ids = _match_b2b_contacts(phone)
     chatbot_customers.update_one(
         {"phone": phone},
         {
-            "$set": {"last_seen": now, "last_message": body},
+            # is_b2b / b2b_contact_ids kept fresh on every inbound, since a matching
+            # customer record may be created in Zoho after this contact first appears.
+            "$set": {
+                "last_seen": now,
+                "last_message": body,
+                "is_b2b": len(b2b_contact_ids) > 0,
+                "b2b_contact_ids": b2b_contact_ids,
+            },
             "$inc": {"message_count": 1},
             "$setOnInsert": {
                 "phone": phone,
                 "phone_last10": _last10(phone),
                 "name": None,
                 "source": "whatsapp",
-                "is_b2b": _is_b2b(phone),
                 "reviewed": False,
                 "notes": None,
                 "first_seen": now,

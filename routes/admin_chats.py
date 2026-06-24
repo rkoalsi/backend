@@ -3,8 +3,17 @@ import datetime
 from fastapi import APIRouter, Query, Body, HTTPException
 from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
+from ..config.whatsapp import send_whatsapp_text
+
+# WhatsApp only allows free-form replies within 24h of the user's last message.
+SERVICE_WINDOW_SECONDS = 24 * 60 * 60
 
 router = APIRouter()
+
+
+def _last10(phone) -> str:
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
 
 # Separate router for the self-building B2C contact registry, mounted at
 # /admin/chatbot_customers (B2B clients live in the `customers` collection).
@@ -76,6 +85,83 @@ def get_admin_chats(
         "limit": limit,
         "skip": skip,
     }
+
+
+def _last_inbound_at(phone: str):
+    """Most recent inbound message timestamp from this number, or None."""
+    tail = _last10(phone)
+    if not tail:
+        return None
+    doc = chats_col.find_one(
+        {"type": "incoming", "from": {"$regex": tail}},
+        {"created_at": 1},
+        sort=[("created_at", -1)],
+    )
+    return doc.get("created_at") if doc else None
+
+
+@router.get("/window")
+def chat_service_window(phone: str = Query(..., description="Phone number to check")):
+    """Whether a free-form reply can be sent now (inside the 24h service window)."""
+    last_in = _last_inbound_at(phone)
+    if not last_in:
+        return {"open": False, "last_inbound_at": None, "reason": "no_inbound"}
+    age = (datetime.datetime.now() - last_in).total_seconds()
+    return {
+        "open": age <= SERVICE_WINDOW_SECONDS,
+        "last_inbound_at": serialize_mongo_document({"v": last_in})["v"],
+        "seconds_remaining": max(0, int(SERVICE_WINDOW_SECONDS - age)),
+    }
+
+
+@router.get("/conversation")
+def get_conversation(
+    phone: str = Query(..., description="Phone number to load the thread for"),
+    limit: int = Query(200, le=1000),
+):
+    """Full incoming + outgoing message thread for one number, oldest first."""
+    tail = _last10(phone)
+    if not tail:
+        return {"data": []}
+    rx = {"$regex": tail}
+    raw = list(
+        chats_col.find(
+            {"type": {"$in": ["incoming", "outgoing"]}, "$or": [{"from": rx}, {"to": rx}]},
+            {"raw_payload": 0},
+        )
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    raw.reverse()  # chronological for display
+    enriched = [_enrich_outgoing(c) if c.get("type") == "outgoing" else c for c in raw]
+    return {"data": serialize_mongo_document(enriched)}
+
+
+@router.post("/reply")
+def reply_to_chat(payload: dict = Body(...)):
+    """Send a manual free-form WhatsApp reply (e.g. when the bot has no answer)."""
+    phone = (payload.get("phone") or "").strip()
+    message = (payload.get("message") or "").strip()
+    if not phone or not message:
+        raise HTTPException(status_code=400, detail="phone and message are required")
+
+    last_in = _last_inbound_at(phone)
+    if not last_in:
+        raise HTTPException(
+            status_code=409,
+            detail="No inbound message from this number — free-form replies aren't allowed. Use an approved template.",
+        )
+    age = (datetime.datetime.now() - last_in).total_seconds()
+    if age > SERVICE_WINDOW_SECONDS:
+        raise HTTPException(
+            status_code=409,
+            detail="Outside the 24-hour WhatsApp service window — free-form reply not allowed. Use an approved template.",
+        )
+
+    resp = send_whatsapp_text(phone, message)
+    if resp is None:
+        raise HTTPException(status_code=502, detail="Failed to send WhatsApp message (see server logs).")
+    return {"status": "sent"}
 
 
 # ---------------------------------------------------------------------------
