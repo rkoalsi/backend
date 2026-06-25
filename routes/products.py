@@ -494,9 +494,10 @@ def get_products(
             pos = list(db.purchase_orders.find(
                 {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]},
                  "line_items": {"$elemMatch": {"item_id": {"$in": list(item_id_to_vendor.keys())}}}},
-                {"vendor_id": 1, "line_items": 1, "date": 1}
+                {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
             ).sort("date", -1))
             upcoming_by_item: dict = {}
+            po_number_by_item: dict = {}
             seen_iids: set = set()
             for po in pos:
                 for li in po.get("line_items", []):
@@ -506,10 +507,29 @@ def get_products(
                     qty = float(li.get("quantity") or 0)
                     qty_received = float(li.get("quantity_received") or 0)
                     upcoming_by_item[iid] = max(0, int(qty - qty_received))
+                    if po.get("purchaseorder_number"):
+                        po_number_by_item[iid] = po["purchaseorder_number"]
                     seen_iids.add(iid)
+            # Join to brand_orders (logistics tracking) for inward / ETA-at-port dates
+            dates_by_po: dict = {}
+            po_numbers = list(set(po_number_by_item.values()))
+            if po_numbers:
+                for bo in db.brand_orders.find(
+                    {"purchaseorder_number": {"$in": po_numbers}},
+                    {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
+                ):
+                    dates_by_po[bo["purchaseorder_number"]] = {
+                        "inward_date": bo.get("inward_date"),
+                        "eta_port_date": bo.get("eta_port_date"),
+                    }
             for p in all_products:
-                if p.get("pre_order") and p.get("item_id") in upcoming_by_item:
-                    p["upcoming_stock"] = upcoming_by_item[p["item_id"]]
+                iid = p.get("item_id")
+                if p.get("pre_order") and iid in upcoming_by_item:
+                    p["upcoming_stock"] = upcoming_by_item[iid]
+                    dates = dates_by_po.get(po_number_by_item.get(iid))
+                    if dates:
+                        p["inward_date"] = dates.get("inward_date")
+                        p["eta_port_date"] = dates.get("eta_port_date")
 
     try:
         total_products = db.products.count_documents(query)

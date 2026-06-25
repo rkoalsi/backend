@@ -76,8 +76,10 @@ users_collection = db["users"]
 def get_upcoming_stock_for_products(pre_order_products: list) -> dict:
     """
     For a list of pre-order products, return a dict mapping product _id (str)
-    to upcoming stock quantity sourced from the latest open/non-cancelled
-    purchase order whose vendor matches the product's brand.
+    to a dict {"upcoming_stock", "inward_date", "eta_port_date"} sourced from
+    the latest open/non-cancelled purchase order whose vendor matches the
+    product's brand. The inward / ETA-at-port dates come from the matching
+    brand_orders document (joined on purchaseorder_number).
     """
     if not pre_order_products:
         return {}
@@ -119,11 +121,12 @@ def get_upcoming_stock_for_products(pre_order_products: list) -> dict:
             "status": {"$nin": ["cancelled"]},
             "line_items": {"$elemMatch": {"item_id": {"$in": open_item_ids}}},
         },
-        {"vendor_id": 1, "line_items": 1, "date": 1}
+        {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
     ).sort("date", -1))
 
     # Walk POs newest-first; take the first match per item_id
     upcoming_by_item: dict = {}
+    po_number_by_item: dict = {}
     seen: set = set()
     for po in pos:
         po_vendor = po.get("vendor_id")
@@ -136,13 +139,33 @@ def get_upcoming_stock_for_products(pre_order_products: list) -> dict:
             qty = float(li.get("quantity") or 0)
             qty_received = float(li.get("quantity_received") or 0)
             upcoming_by_item[iid] = max(0, int(qty - qty_received))
+            if po.get("purchaseorder_number"):
+                po_number_by_item[iid] = po["purchaseorder_number"]
             seen.add(iid)
 
+    # Join to brand_orders for inward / ETA-at-port dates (keyed by PO number)
+    dates_by_po: dict = {}
+    po_numbers = list(set(po_number_by_item.values()))
+    if po_numbers:
+        for bo in db.brand_orders.find(
+            {"purchaseorder_number": {"$in": po_numbers}},
+            {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
+        ):
+            dates_by_po[bo["purchaseorder_number"]] = {
+                "inward_date": bo.get("inward_date"),
+                "eta_port_date": bo.get("eta_port_date"),
+            }
+
     # Map back to product _id
-    return {
-        item_id_to_product_id[iid]: upcoming_by_item.get(iid, 0)
-        for iid in item_id_to_product_id
-    }
+    result = {}
+    for iid, pid in item_id_to_product_id.items():
+        dates = dates_by_po.get(po_number_by_item.get(iid)) or {}
+        result[pid] = {
+            "upcoming_stock": upcoming_by_item.get(iid, 0),
+            "inward_date": dates.get("inward_date"),
+            "eta_port_date": dates.get("eta_port_date"),
+        }
+    return result
 
 
 # Connect to attendance database
@@ -1170,7 +1193,10 @@ def get_products(
             upcoming_map = get_upcoming_stock_for_products(pre_order_prods)
             for p in products:
                 if p.get("pre_order"):
-                    p["upcoming_stock"] = upcoming_map.get(p["_id"], 0)
+                    info = upcoming_map.get(p["_id"]) or {}
+                    p["upcoming_stock"] = info.get("upcoming_stock", 0)
+                    p["inward_date"] = info.get("inward_date")
+                    p["eta_port_date"] = info.get("eta_port_date")
 
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
         # Validate page number
@@ -3561,6 +3587,14 @@ def get_pre_order_line_items(po_number: str = Query(...)):
     if not line_items:
         return []
 
+    # Logistics dates for this PO (inward / ETA at port), if tracked in brand_orders
+    brand_order = db.brand_orders.find_one(
+        {"purchaseorder_number": po_number},
+        {"inward_date": 1, "eta_port_date": 1, "_id": 0}
+    ) or {}
+    inward_date = brand_order.get("inward_date")
+    eta_port_date = brand_order.get("eta_port_date")
+
     item_ids = [li["item_id"] for li in line_items]
     products_map = {
         p["item_id"]: p
@@ -3586,6 +3620,8 @@ def get_pre_order_line_items(po_number: str = Query(...)):
             "upcoming_stock": max(0, int(qty - qty_received)),
             "pre_order": prod.get("pre_order", False),
             "in_products": bool(prod),
+            "inward_date": inward_date,
+            "eta_port_date": eta_port_date,
         })
     return result
 
