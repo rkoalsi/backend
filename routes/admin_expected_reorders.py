@@ -22,6 +22,70 @@ users_collection = db["users"]
 expected_reorders_collection = db["expected_reorders"]
 
 
+def has_ordered_stages():
+    """Aggregation stages that compute `has_ordered` on the fly.
+
+    An expected_reorder counts as ordered when there exists an *invoiced* order
+    for the same customer (orders.customer_id == expected_reorders.customer_id,
+    both are customers._id) whose linked estimate is dated after the
+    expected_reorder's created_at. The estimate date is day-level, so a same-day
+    order will only count from the following day onwards.
+
+    A manually set has_ordered=true is preserved.
+    """
+    return [
+        {
+            "$lookup": {
+                "from": "orders",
+                "let": {
+                    "rid": "$customer_id",
+                    "rdate": "$created_at",
+                },
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$customer_id", "$$rid"]},
+                                    {"$eq": ["$status", "invoiced"]},
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "$lookup": {
+                            "from": "estimates",
+                            "localField": "estimate_id",
+                            "foreignField": "estimate_id",
+                            "as": "estimate",
+                        }
+                    },
+                    {
+                        "$unwind": {
+                            "path": "$estimate",
+                            "preserveNullAndEmptyArrays": False,
+                        }
+                    },
+                    {"$match": {"$expr": {"$gt": ["$estimate.date", "$$rdate"]}}},
+                    {"$limit": 1},
+                ],
+                "as": "_matched_orders",
+            }
+        },
+        {
+            "$addFields": {
+                "has_ordered": {
+                    "$or": [
+                        {"$eq": ["$has_ordered", True]},
+                        {"$gt": [{"$size": "$_matched_orders"}, 0]},
+                    ]
+                }
+            }
+        },
+        {"$project": {"_matched_orders": 0}},
+    ]
+
+
 def format_address(address):
     if not isinstance(address, dict):
         return ""
@@ -87,15 +151,18 @@ def get_expected_reorders(
                     "preserveNullAndEmptyArrays": True,
                 }
             },
+            *has_ordered_stages(),
             {"$match": match_statement},
             {"$skip": page * limit},
             {"$limit": limit},
         ]
-        cursor = db.expected_reorders.aggregate(pipeline)
+        cursor = db.expected_reorders.aggregate(pipeline, allowDiskUse=True)
         cat = [serialize_mongo_document(doc) for doc in cursor]
         del pipeline[-2:]
         total_count = list(
-            db.expected_reorders.aggregate([*pipeline, {"$count": "total"}])
+            db.expected_reorders.aggregate(
+                [*pipeline, {"$count": "total"}], allowDiskUse=True
+            )
         )
         total = total_count[0] if len(total_count) > 0 else {"total": 0}
         total_count = total.get("total", 0)
@@ -133,6 +200,7 @@ def get_expected_reorders_report(
             }
         },
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
+        *has_ordered_stages(),
     ]
     match_statement = {}
     date_filter = {}
@@ -156,7 +224,7 @@ def get_expected_reorders_report(
         match_statement["has_ordered"] = has_ordered
     query.append({"$match": match_statement})
     # Fetch matching customers
-    customers_cursor = db.expected_reorders.aggregate(query)
+    customers_cursor = db.expected_reorders.aggregate(query, allowDiskUse=True)
     customers = [serialize_mongo_document(doc) for doc in customers_cursor]
 
     # Create an Excel workbook using openpyxl
