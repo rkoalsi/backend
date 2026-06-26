@@ -384,7 +384,14 @@ async def download_pdf_by_zoho_id(zoho_invoice_id: str):
                 media_type="application/pdf",
                 headers={"Content-Disposition": f"attachment; filename=invoice_{zoho_invoice_id}.pdf"},
             )
-        raise HTTPException(status_code=response.status_code, detail=f"Failed to fetch PDF: {response.text}")
+        # Do NOT propagate Zoho's status code verbatim: a 401/403 from Zoho
+        # (expired OAuth token, wrong org, etc.) would otherwise reach the
+        # browser and the axios interceptor would log the user out. Surface
+        # upstream failures as a gateway error instead.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch PDF from Zoho ({response.status_code}): {response.text}",
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -420,14 +427,18 @@ async def download_pdf(invoice_id: str = ""):
             )
         elif response.status_code == 307:
             raise HTTPException(
-                status_code=307,
+                status_code=502,
                 detail="Redirect encountered. Check Zoho endpoint or token.",
             )
         else:
-            # Raise an exception if Zoho's API returns an error
+            # Do NOT propagate Zoho's status code verbatim. A 401/403 from Zoho
+            # (expired OAuth token, wrong org, etc.) would reach the browser and
+            # the axios interceptor would treat it as the customer's session
+            # expiring and log them out. Surface upstream failures as a gateway
+            # error so the client just sees a failed download.
             raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to fetch PDF: {response.text}",
+                status_code=502,
+                detail=f"Failed to fetch PDF from Zoho ({response.status_code}): {response.text}",
             )
 
     except HTTPException as e:
