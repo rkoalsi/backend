@@ -26,11 +26,33 @@ def _default_footer() -> dict:
     return {
         "tagline": "BarkButler – House of Brands for Pets",
         "stat": "700+ Retail Stores Across India",
-        "copyright": "© 2026 BarkButler",
+        "copyright": "© 2026 Pupscribe Enterprises Private Limited",
         "links": [
             {"id": "email", "icon": "email", "label": "Email Us", "url": "mailto:info@barkbutler.in"},
             {"id": "partner", "icon": "store", "label": "Become a Retail Partner", "url": "https://www.pupscribe.in/#contact"},
         ],
+        # --- blog footer (barkbutler.in) ---
+        "shop": {
+            "label": "Shop",
+            "url": "https://www.amazon.in/stores/page/39059D39-A60C-4518-B0DF-23C77F797F79",
+        },
+        "nav_links": [
+            {"id": "blog", "label": "Blog", "url": "/"},
+            {"id": "website", "label": "Website", "url": "https://pupscribe.in"},
+        ],
+        "social": {
+            "instagram": "https://www.instagram.com/barkbutler/",
+            "facebook": "https://www.facebook.com/BarkButler",
+            "linkedin": "https://www.linkedin.com/company/barkbutler/mycompany/",
+            "youtube": "https://www.youtube.com/@barkbutler",
+            "website": "https://pupscribe.in",
+            "email": "info@barkbutler.in",
+            "retail": True,
+        },
+        "legal": {
+            "label": "Privacy Policy | Terms and Conditions",
+            "url": "https://d31mkmby5gvlu4.cloudfront.net/public/Pupscribe-Terms-Conditions-Privacy-Policy.pdf",
+        },
     }
 
 
