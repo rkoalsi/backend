@@ -86,6 +86,7 @@ def _default_config() -> dict:
         "header": _default_header(),
         "footer": _default_footer(),
         "links": [],
+        "pixel_code": "",
         "whatsapp": {"enabled": False, "number": "", "message": "", "label": "Chat with us"},
         "spin_wheel": {
             "enabled": False,
