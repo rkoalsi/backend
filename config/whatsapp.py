@@ -116,6 +116,69 @@ def _log_chat(chats_col, dst_phone: str, template_doc: dict, params: dict, messa
         print(f"Failed to log WhatsApp chat: {log_err}")
 
 
+def send_template_message(to: str, template_doc: dict, params: dict, campaign_id=None):
+    """
+    Like send_whatsapp(), but returns a structured result the campaign engine can
+    persist per recipient: {"message_uuid", "status", "error", "dst"}. Still logs
+    to `chats` (so the conversation view keeps working) and tags the chat row with
+    campaign_id for cross-referencing.
+    """
+    phone_str = str(to).strip()
+    if phone_str.startswith("+"):
+        dst_phone = phone_str
+    else:
+        cleaned_phone = "".join(ch for ch in phone_str if ch.isdigit())
+        if not cleaned_phone:
+            return {"message_uuid": None, "status": "failed", "error": "invalid_phone", "dst": to}
+        dst_phone = f"+91{cleaned_phone}"
+
+    chats_col = _get_chats_collection()
+
+    def _log(message_uuid=None, status="queued", error=None):
+        doc = {
+            "type": "outgoing",
+            "from": FROM_NUMBER,
+            "to": dst_phone,
+            "template_name": template_doc.get("name"),
+            "params": params,
+            "message_uuid": message_uuid,
+            "status": status,
+            "created_at": datetime.datetime.now(),
+        }
+        if campaign_id:
+            doc["campaign_id"] = str(campaign_id)
+        if error:
+            doc["error"] = error
+        try:
+            chats_col.insert_one(doc)
+        except Exception as log_err:
+            print(f"Failed to log campaign chat: {log_err}")
+
+    try:
+        create_kwargs = {
+            "type_": "whatsapp",
+            "src": FROM_NUMBER,
+            "dst": dst_phone,
+            "template": generate_whatsapp_template(template_doc, params),
+        }
+        callback_url = _status_callback_url()
+        if callback_url:
+            create_kwargs["url"] = callback_url
+            create_kwargs["method"] = "POST"
+        response = client.messages.create(**create_kwargs)
+        uuid_val = _extract_uuid(response)
+        _log(message_uuid=uuid_val, status="queued")
+        return {"message_uuid": uuid_val, "status": "queued", "error": None, "dst": dst_phone}
+    except plivo.exceptions.AuthenticationError as e:
+        _log(status="failed", error=str(e))
+        return {"message_uuid": None, "status": "failed", "error": str(e), "dst": dst_phone}
+    except Exception as e:
+        error_msg = str(e)
+        status = "rate_limit_exceeded" if "rate limit" in error_msg.lower() else "failed"
+        _log(status=status, error=error_msg)
+        return {"message_uuid": None, "status": status, "error": error_msg, "dst": dst_phone}
+
+
 def send_whatsapp(to: str, template_doc: dict, params: dict):
     # Resolve phone number before try/except so we can log failures
     phone_str = str(to).strip()

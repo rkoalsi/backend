@@ -34,11 +34,16 @@ def _resolve_body(template_body: str, params: dict) -> str:
     return re.sub(r"\{\{(\d+)\}\}", replacer, template_body)
 
 
-def _enrich_outgoing(chat: dict) -> dict:
+def _enrich_outgoing(chat: dict, templates_map: dict | None = None) -> dict:
     template_name = chat.get("template_name")
     params = chat.get("params") or {}
     if template_name:
-        tmpl = templates_col.find_one({"name": template_name}, {"body": 1, "header": 1})
+        if templates_map is not None:
+            tmpl = templates_map.get(template_name)
+        else:
+            tmpl = templates_col.find_one(
+                {"name": template_name}, {"body": 1, "header": 1}
+            )
         if tmpl:
             body = tmpl.get("body", "")
             if body and params:
@@ -73,10 +78,27 @@ def get_admin_chats(
     )
     total = chats_col.count_documents(query)
 
+    # Batch-load all referenced templates once to avoid an N+1 query per
+    # outgoing chat (otherwise large exports do tens of thousands of lookups).
+    template_names = {
+        chat.get("template_name")
+        for chat in raw
+        if chat.get("type") == "outgoing" and chat.get("template_name")
+    }
+    templates_map = {}
+    if template_names:
+        templates_map = {
+            t["name"]: t
+            for t in templates_col.find(
+                {"name": {"$in": list(template_names)}},
+                {"name": 1, "body": 1, "header": 1},
+            )
+        }
+
     enriched = []
     for chat in raw:
         if chat.get("type") == "outgoing":
-            chat = _enrich_outgoing(chat)
+            chat = _enrich_outgoing(chat, templates_map)
         enriched.append(chat)
 
     return {

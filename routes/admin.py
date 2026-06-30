@@ -45,6 +45,9 @@ from .admin_career_applications import router as admin_career_applications_route
 from .admin_contact_leads import router as admin_contact_submissions_router
 from .admin_chats import router as admin_chats_router
 from .admin_chats import contacts_router as admin_chatbot_customers_router
+from .admin_templates import router as admin_templates_router
+from .admin_segments import router as admin_segments_router
+from .admin_campaigns import router as admin_campaigns_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -3558,6 +3561,24 @@ router.include_router(
     admin_chatbot_customers_router,
     prefix="/chatbot_customers",
     tags=["Admin Chatbot Customers"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_templates_router,
+    prefix="/templates",
+    tags=["Admin WhatsApp Templates"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_segments_router,
+    prefix="/segments",
+    tags=["Admin Customer Segments"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_campaigns_router,
+    prefix="/campaigns",
+    tags=["Admin WhatsApp Campaigns"],
     dependencies=[Depends(JWTBearer())],
 )
 
