@@ -2123,21 +2123,23 @@ async def submit_self_service_profile(
         },
     )
 
-    # Notify ALL admins (in-app) that details were submitted for customer creation.
-    # TEMP: commented out for testing — re-enable once the flow is confirmed.
-    # try:
-    #     from .notifications import create_notifications_for_roles
-    #
-    #     create_notifications_for_roles(
-    #         db,
-    #         ["admin", "sales_admin"],
-    #         "customer_request_submitted",
-    #         f"B2B details submitted: {body.shop_name}",
-    #         f"{body.customer_name} submitted their business details and is awaiting approval.",
-    #         "/admin/customer_requests",
-    #     )
-    # except Exception as e:
-    #     logger.error(f"Failed to notify admins of self-service profile: {e}")
+    # Notify (in-app) that details were submitted for customer creation.
+    # TESTING: scoped to a single recipient instead of all admins.
+    try:
+        from .notifications import create_notification
+
+        target = db.users.find_one({"email": "rkoalsi2000@gmail.com"}, {"_id": 1})
+        if target:
+            create_notification(
+                db,
+                str(target["_id"]),
+                "customer_request_submitted",
+                f"B2B details submitted: {body.shop_name}",
+                f"{body.customer_name} submitted their business details and is awaiting approval.",
+                "/admin/customer_requests",
+            )
+    except Exception as e:
+        logger.error(f"Failed to notify of self-service profile: {e}")
 
     return {
         "message": "Your details have been submitted and are awaiting approval.",

@@ -3682,3 +3682,19 @@ def mark_pre_order_products(payload: dict):
                 unmarked = res2.modified_count
 
     return {"marked": marked, "unmarked": unmarked}
+
+
+# ── App settings (admin-configurable) ────────────────────────────────────────
+from .app_settings import get_settings as _get_app_settings, update_settings as _update_app_settings
+
+
+@router.get("/settings")
+def admin_get_settings():
+    """Return the admin-configurable app settings (e.g. min order value)."""
+    return _get_app_settings()
+
+
+@router.put("/settings")
+def admin_update_settings(payload: dict):
+    """Update app settings. Only known keys are persisted."""
+    return _update_app_settings(payload or {})

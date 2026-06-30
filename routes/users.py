@@ -703,23 +703,25 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
     user = users_collection.find_one({"phone": int(phone10)})
     authenticated = serialize_mongo_document(user)
 
-    # Notify all admins that a new B2B user verified on the purchase portal.
-    # TEMP: commented out for testing — re-enable once the flow is confirmed.
-    # if not existing:
-    #     try:
-    #         from .notifications import create_notifications_for_roles
-    #
-    #         create_notifications_for_roles(
-    #             db,
-    #             ["admin", "sales_admin"],
-    #             "b2b_user_verified",
-    #             f"New B2B signup verified: +91 {phone10}",
-    #             "A new customer verified their mobile number on the purchase portal. "
-    #             "They’ll appear under Leads once they submit their business details.",
-    #             "/admin/leads?tab=b2b",
-    #         )
-    #     except Exception as e:
-    #         print(f"Failed to notify admins of B2B verification: {e}")
+    # Notify that a new B2B user verified on the purchase portal.
+    # TESTING: scoped to a single recipient instead of all admins.
+    if not existing:
+        try:
+            from .notifications import create_notification
+
+            target = db.users.find_one({"email": "rkoalsi2000@gmail.com"}, {"_id": 1})
+            if target:
+                create_notification(
+                    db,
+                    str(target["_id"]),
+                    "b2b_user_verified",
+                    f"New B2B signup verified: +91 {phone10}",
+                    "A new customer verified their mobile number on the purchase portal. "
+                    "They’ll appear under Leads once they submit their business details.",
+                    "/admin/leads?tab=b2b",
+                )
+        except Exception as e:
+            print(f"Failed to notify of B2B verification: {e}")
 
     # Log the user in (same session/cookie as password & OTP login).
     access_token = create_access_token(data={"data": _minimal_payload(authenticated)})

@@ -225,3 +225,11 @@ def get_cron_status():
             content={"error": str(e), "scheduler_running": False},
             status_code=500
         )
+
+
+@router.get("/order-config")
+def order_config():
+    """Public order-form config (e.g. minimum order value for self-registered customers)."""
+    from .app_settings import get_settings
+    s = get_settings()
+    return {"min_order_value_self_registered": s.get("min_order_value_self_registered", 0)}
