@@ -97,11 +97,24 @@ def _match_answer(text: str):
     return None
 
 
+STOP_KEYWORDS = {"stop", "unsubscribe", "stop promotions", "opt out", "optout"}
+
+
 def _auto_respond(phone: str, body: str, now):
     """Greeting -> greeting reply; known question -> canned answer; otherwise a
     'team will get back' reply, sent only once until a human replies (no spam)."""
     if not phone or not body:
         return  # ignore media-only / empty messages
+
+    # Marketing opt-out: STOP/UNSUBSCRIBE removes them from all future campaigns.
+    if body.strip().lower() in STOP_KEYWORDS:
+        try:
+            from .admin_campaigns import record_opt_out
+            record_opt_out(phone)
+            send_whatsapp_text(phone, "You've been unsubscribed from promotional messages.", sent_by="bot")
+        except Exception as e:
+            print(f"[callback] opt-out failed: {e}")
+        return
 
     if _is_greeting(body):
         send_whatsapp_text(phone, GREETING_REPLY, sent_by="bot")
@@ -138,6 +151,23 @@ def _collect_media(payload: dict) -> list:
     return media
 
 
+def _apply_waba_template_events(payload: dict):
+    """Parse Meta's `message_template_status_update` events and update the local
+    `templates` mirror so admins see approval status without a manual sync."""
+    from .admin_templates import apply_template_status
+
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
+            if change.get("field") != "message_template_status_update":
+                continue
+            value = change.get("value", {}) or {}
+            apply_template_status(
+                name=value.get("message_template_name"),
+                status=value.get("event"),
+                rejected_reason=value.get("reason"),
+            )
+
+
 @router.post("/callback")
 async def plivo_callback(request: Request):
     """
@@ -165,6 +195,11 @@ async def plivo_callback(request: Request):
             "raw_payload": payload,
             "created_at": now,
         })
+        # Reflect template approval/rejection transitions onto the local mirror.
+        try:
+            _apply_waba_template_events(payload)
+        except Exception as e:
+            print(f"[callback] waba template status update failed: {e}")
         print("[callback] stored waba_event")
         return {"message": "ok"}
 
@@ -235,6 +270,13 @@ async def plivo_callback(request: Request):
             },
             upsert=True,
         )
+        # Mirror the delivery status onto the matching campaign recipient (if any).
+        if status:
+            try:
+                from .admin_campaigns import apply_campaign_status
+                apply_campaign_status(message_uuid, status)
+            except Exception as e:
+                print(f"[callback] campaign status update failed: {e}")
         print(f"[callback] status={status} uuid={message_uuid} matched={result.matched_count} modified={result.modified_count} upserted={result.upserted_id}")
     else:
         # Unrecognised shape -- keep it for inspection rather than dropping it.
