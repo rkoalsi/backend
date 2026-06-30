@@ -100,6 +100,17 @@ def get_product_counts():
         )
         result["Pre Orders"] = {"All Products": pre_orders_count}
 
+        # Add count for "Clearance" — products marked clearance=true with stock
+        clearance_count = db.products.count_documents(
+            {
+                "clearance": True,
+                "stock": {"$gt": 0},
+                "is_deleted": {"$exists": False},
+            }
+        )
+        if clearance_count > 0:
+            result["Clearance"] = {"All Products": clearance_count}
+
         return result
 
     except Exception as e:
@@ -300,6 +311,9 @@ def get_products(
     pre_order: Optional[bool] = Query(
         False, description="Filter to show only pre-order products"
     ),
+    clearance: Optional[bool] = Query(
+        False, description="Filter to show only clearance/sale products"
+    ),
 ):
     """
     Retrieves paginated products with optional filters.
@@ -311,10 +325,14 @@ def get_products(
     if not pre_order:
         query["stock"] = {"$gt": 0}
 
-    # Don't filter by brand when pre_order or new_only is true
+    # Clearance items are real stock on sale — keep the stock>0 filter (set above)
+    if clearance:
+        query["clearance"] = True
+
+    # Don't filter by brand when pre_order, new_only or clearance is true
     if pre_order:
         query["pre_order"] = True
-    elif not new_only and brand:
+    elif not new_only and not clearance and brand:
         query["brand"] = brand
 
     if category:

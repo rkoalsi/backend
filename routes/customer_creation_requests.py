@@ -40,6 +40,152 @@ def validate_gstin_full(gst_number: str) -> dict:
     return {"valid": True}
 
 
+def send_account_approved_email(to_email: str, customer_name: str, shop_name: str) -> bool:
+    """Email a self-registered B2B customer that their account is approved and they
+    can start ordering. Sent via Resend, branded to the Pupscribe order portal."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        logger.warning("RESEND_API_KEY not set; skipping approval email")
+        return False
+
+    login_url = f"{os.getenv('FRONTEND_URL', 'https://orderform.pupscribe.in').rstrip('/')}/login"
+    first_name = (customer_name or "there").split()[0]
+    shop_line = (
+        f"<strong>{shop_name}</strong> is now set up on the Pupscribe order portal."
+        if shop_name
+        else "Your account is now set up on the Pupscribe order portal."
+    )
+
+    html = f"""
+    <div style="margin:0;padding:0;background-color:#f4f5f7;">
+      <div style="max-width:600px;margin:0 auto;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;">
+        <div style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(15,25,35,0.08);">
+          <!-- Header -->
+          <div style="background:#ffffff;padding:32px 32px 24px;text-align:center;border-bottom:1px solid #eef0f2;">
+            <img src="https://assets.pupscribe.in/branding/pupscribe_logo.jpg" alt="Pupscribe" width="190" style="display:block;width:190px;max-width:62%;height:auto;margin:0 auto;border:0;" />
+            <h1 style="margin:18px 0 0;color:#0f1923;font-size:22px;font-weight:700;">You're approved! 🎉</h1>
+          </div>
+          <!-- Body -->
+          <div style="padding:32px;">
+            <p style="margin:0 0 16px;color:#1a2533;font-size:16px;">Hi {first_name},</p>
+            <p style="margin:0 0 16px;color:#44515f;font-size:15px;line-height:1.7;">
+              Great news — your B2B account has been verified and approved. {shop_line}
+            </p>
+            <p style="margin:0 0 28px;color:#44515f;font-size:15px;line-height:1.7;">
+              You can now sign in and start placing your orders right away.
+            </p>
+            <div style="text-align:center;margin:0 0 28px;">
+              <a href="{login_url}"
+                 style="background:#2B4864;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:600;display:inline-block;">
+                Start ordering
+              </a>
+            </div>
+            <p style="margin:0;color:#8a96a3;font-size:13px;line-height:1.6;">
+              Sign in with your registered mobile number and the OTP we send to your WhatsApp.
+            </p>
+          </div>
+          <!-- Footer -->
+          <div style="border-top:1px solid #eef0f2;padding:20px 32px;text-align:center;">
+            <p style="margin:0;color:#aab2bd;font-size:12px;">© Pupscribe. All rights reserved.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": "no-reply@no-reply.pupscribe.in",
+                "to": [to_email],
+                "subject": "Your Pupscribe account is approved — start ordering",
+                "html": html,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info(f"✅ Approval email sent to {to_email}: {resp.json().get('id')}")
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Approval email failed for {to_email}: {e}")
+        return False
+
+
+def send_account_rejected_email(to_email: str, customer_name: str, shop_name: str, reason: str = "") -> bool:
+    """Email a self-registered B2B customer that their details need changes, with a
+    CTA back to the portal where they can edit and resubmit. Sent via Resend."""
+    api_key = os.getenv("RESEND_API_KEY")
+    if not api_key:
+        logger.warning("RESEND_API_KEY not set; skipping rejection email")
+        return False
+
+    login_url = f"{os.getenv('FRONTEND_URL', 'https://orderform.pupscribe.in').rstrip('/')}/customer/account"
+    first_name = (customer_name or "there").split()[0]
+    shop_line = f"for <strong>{shop_name}</strong> " if shop_name else ""
+    reason_block = (
+        f'<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px 16px;margin:0 0 24px;">'
+        f'<p style="margin:0;color:#9a3412;font-size:14px;line-height:1.6;"><strong>Reason:</strong> {reason}</p></div>'
+        if reason else ""
+    )
+
+    html = f"""
+    <div style="margin:0;padding:0;background-color:#f4f5f7;">
+      <div style="max-width:600px;margin:0 auto;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;">
+        <div style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(15,25,35,0.08);">
+          <div style="background:#ffffff;padding:32px 32px 24px;text-align:center;border-bottom:1px solid #eef0f2;">
+            <img src="https://assets.pupscribe.in/branding/pupscribe_logo.jpg" alt="Pupscribe" width="190" style="display:block;width:190px;max-width:62%;height:auto;margin:0 auto;border:0;" />
+            <h1 style="margin:18px 0 0;color:#0f1923;font-size:22px;font-weight:700;">Your details need a quick update</h1>
+          </div>
+          <div style="padding:32px;">
+            <p style="margin:0 0 16px;color:#1a2533;font-size:16px;">Hi {first_name},</p>
+            <p style="margin:0 0 16px;color:#44515f;font-size:15px;line-height:1.7;">
+              Thanks for registering with Pupscribe. We reviewed the business details {shop_line}and
+              weren’t able to approve them just yet.
+            </p>
+            {reason_block}
+            <p style="margin:0 0 28px;color:#44515f;font-size:15px;line-height:1.7;">
+              Please sign in, review your business details and resubmit — we’ll take another look right away.
+            </p>
+            <div style="text-align:center;margin:0 0 28px;">
+              <a href="{login_url}"
+                 style="background:#2B4864;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:600;display:inline-block;">
+                Update my details
+              </a>
+            </div>
+            <p style="margin:0;color:#8a96a3;font-size:13px;line-height:1.6;">
+              Need a hand? Just reply to this email and our team will help.
+            </p>
+          </div>
+          <div style="border-top:1px solid #eef0f2;padding:20px 32px;text-align:center;">
+            <p style="margin:0;color:#aab2bd;font-size:12px;">© Pupscribe. All rights reserved.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": "no-reply@no-reply.pupscribe.in",
+                "to": [to_email],
+                "subject": "Action needed — update your Pupscribe account details",
+                "html": html,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info(f"✅ Rejection email sent to {to_email}: {resp.json().get('id')}")
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Rejection email failed for {to_email}: {e}")
+        return False
+
+
 # Zoho configuration from environment variables
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
@@ -524,7 +670,7 @@ def map_custom_fields(
         custom_fields.append(
             {
                 "index": field_map["Business email Id"],
-                "value": customer_data.get("customer_mail_id", ""),
+                "value": customer_data.get("customer_mail_id") or customer_data.get("email", ""),
             }
         )
 
@@ -664,7 +810,7 @@ def create_zoho_contact(
     contact_payload["custom_fields"] = custom_fields
 
     # Add contact person
-    if customer_data.get("customer_name") or customer_data.get("customer_mail_id"):
+    if customer_data.get("customer_name") or customer_data.get("customer_mail_id") or customer_data.get("email"):
         # Split the customer name into first and last name
         full_name = customer_data.get("customer_name", "").strip()
         if full_name:
@@ -687,7 +833,7 @@ def create_zoho_contact(
             {
                 "first_name": first_name,
                 "last_name": last_name,
-                "email": customer_data.get("customer_mail_id", ""),
+                "email": customer_data.get("customer_mail_id") or customer_data.get("email", ""),
                 "mobile": customer_data.get("whatsapp_no", ""),
                 "is_primary_contact": True,
             }
@@ -1285,6 +1431,85 @@ async def update_request_status(
                 status_code=404, detail="Request not found or no changes made"
             )
 
+        # Activate the self-registered login (if any) once the Zoho contact exists.
+        # Links the pending users record to the new customer and unblocks login/order.
+        linked_user_id = request_doc.get("linked_user_id")
+        if linked_user_id and final_status == "created_on_zoho" and zoho_contact_id:
+            db.users.update_one(
+                {"_id": linked_user_id},
+                {
+                    "$set": {
+                        "status": "active",
+                        "customer_id": zoho_contact_id,
+                        "customer_name": request_doc.get("shop_name", ""),
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+
+            # Email the self-registered customer that their account is approved.
+            try:
+                to_email = request_doc.get("email") or request_doc.get("customer_mail_id")
+                if not to_email:
+                    linked_user = db.users.find_one({"_id": linked_user_id}, {"email": 1})
+                    to_email = linked_user.get("email") if linked_user else None
+                if to_email:
+                    send_account_approved_email(
+                        to_email,
+                        request_doc.get("customer_name", "there"),
+                        request_doc.get("shop_name", ""),
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send approval email: {e}")
+
+        # On rejection of a self-registered request: let them edit/resubmit again
+        # (reset profile_completed) and email them that changes are needed.
+        if status == "rejected" and request_doc.get("self_registered"):
+            reject_user_id = request_doc.get("linked_user_id")
+            if reject_user_id:
+                db.users.update_one(
+                    {"_id": reject_user_id},
+                    {"$set": {"profile_completed": False, "updated_at": datetime.now()}},
+                )
+            try:
+                to_email = request_doc.get("email") or request_doc.get("customer_mail_id")
+                if not to_email and reject_user_id:
+                    linked_user = db.users.find_one({"_id": reject_user_id}, {"email": 1})
+                    to_email = linked_user.get("email") if linked_user else None
+                if to_email:
+                    send_account_rejected_email(
+                        to_email,
+                        request_doc.get("customer_name", "there"),
+                        request_doc.get("shop_name", ""),
+                    )
+            except Exception as e:
+                logger.error(f"Failed to send rejection email: {e}")
+
+        # WhatsApp the customer when their request is approved or rejected.
+        # Templates (db.templates / WhatsApp): customer_request_approved,
+        # customer_request_rejected — each expects body vars {{1}}=name, {{2}}=shop.
+        try:
+            cust_phone = request_doc.get("whatsapp_no")
+            if cust_phone and (final_status == "created_on_zoho" or status == "rejected"):
+                tmpl_name = (
+                    "customer_request_approved"
+                    if final_status == "created_on_zoho"
+                    else "customer_request_rejected"
+                )
+                cust_template = db.templates.find_one({"name": tmpl_name})
+                if cust_template:
+                    cust_first_name = (request_doc.get("customer_name") or "there").split()[0]
+                    send_whatsapp(
+                        cust_phone,
+                        cust_template,
+                        {
+                            "name": cust_first_name,
+                            "shop": request_doc.get("shop_name", "your shop"),
+                        },
+                    )
+        except Exception as e:
+            logger.error(f"Failed to send customer WhatsApp notification: {e}")
+
         # Send WhatsApp notification to sales person when status is approved or rejected
         try:
             if status in ["approved", "rejected"] or final_status == "created_on_zoho":
@@ -1699,3 +1924,222 @@ async def update_customer_request(
     except Exception as e:
         print(f"Error updating customer request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Self-service profile (B2B self-registered customers) ──────────────────────
+# Customers who self-registered (phone + OTP) complete their own business details
+# from the Account Settings page. This mirrors the salesperson customer-creation
+# form but omits internal-only fields (tier / payment terms / margin / sales
+# person / gst treatment) — admins set those at approval. One request per user,
+# keyed by linked_user_id; resubmitting updates it until it is created in Zoho.
+
+class SelfServiceProfile(BaseModel):
+    shop_name: str
+    customer_name: str
+    email: str                       # required — needed for Zoho invoicing
+    gst_no: Optional[str] = None
+    pan_card_no: Optional[str] = None
+    multiple_branches: Optional[str] = None   # "yes" | "no"
+    billing_address: AddressModel
+    shipping_address: Optional[AddressModel] = None
+    gst_certificate_url: Optional[str] = None
+    pan_card_url: Optional[str] = None
+    aadhar_url: Optional[str] = None
+    # Note: place_of_supply, pincode, gst_treatment, tax treatment, margin, payment
+    # terms and tier are NOT taken from the customer — they are derived server-side
+    # (see below) to match Zoho's expectations and keep the form short.
+
+
+def _require_self_registered_customer(current_user: dict) -> ObjectId:
+    """Return the caller's user ObjectId, asserting they are a self-registered customer."""
+    db = get_database()
+    user_data = current_user.get("data", {})
+    uid = user_data.get("_id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+    user = db.users.find_one({"_id": ObjectId(uid)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.get("self_registered"):
+        raise HTTPException(status_code=403, detail="Not a self-registered account")
+    return ObjectId(uid)
+
+
+@router.get("/mine")
+async def get_my_self_service_request(current_user: dict = Depends(get_current_user)):
+    """Fetch the caller's own customer-creation request (for prefilling the form
+    and showing approval status). Returns null if they haven't submitted yet."""
+    db = get_database()
+    user_id = _require_self_registered_customer(current_user)
+    doc = db.customer_creation_requests.find_one({"linked_user_id": user_id})
+    return {"request": serialize_mongo_document(doc) if doc else None}
+
+
+@router.get("/my-customer")
+async def get_my_customer(current_user: dict = Depends(get_current_user)):
+    """Read-only view of the caller's own linked Zoho customer record + addresses.
+    Works for any customer who has a `customer_id` (self-registered-and-approved
+    OR an existing internal customer). Returns null if not yet linked."""
+    db = get_database()
+    user_data = current_user.get("data", {})
+    uid = user_data.get("_id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+    user = db.users.find_one({"_id": ObjectId(uid)}, {"customer_id": 1})
+    customer_id = user.get("customer_id") if user else None
+    if not customer_id:
+        return {"customer": None}
+
+    customer = db.customers.find_one({"contact_id": customer_id})
+    if not customer:
+        return {"customer": None}
+
+    return {
+        "customer": {
+            "contact_id": customer.get("contact_id"),
+            "company_name": customer.get("company_name") or customer.get("contact_name"),
+            "contact_name": customer.get("contact_name"),
+            "email": customer.get("email"),
+            "phone": customer.get("phone") or customer.get("mobile"),
+            "gst_no": customer.get("gst_no"),
+            "pan_no": customer.get("pan_no"),
+            "gst_treatment": customer.get("gst_treatment"),
+            "addresses": customer.get("addresses", []),
+        }
+    }
+
+
+@router.post("/self-service")
+async def submit_self_service_profile(
+    body: SelfServiceProfile,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create/update the caller's onboarding request and mark their profile complete."""
+    db = get_database()
+    user_id = _require_self_registered_customer(current_user)
+
+    has_gst = bool(body.gst_no and body.gst_no.strip())
+    has_pan = bool(body.pan_card_no and body.pan_card_no.strip())
+
+    if not body.email or not body.email.strip():
+        raise HTTPException(status_code=422, detail="Email is required.")
+    # At least one tax identifier is required to purchase.
+    if not has_gst and not has_pan:
+        raise HTTPException(status_code=422, detail="Either a GSTIN or a PAN is required.")
+    if has_gst:
+        result = validate_gstin_full(body.gst_no)
+        if not result["valid"]:
+            raise HTTPException(status_code=422, detail=f"GSTIN validation failed: {result['error']}")
+
+    # Submit-once, EXCEPT a rejected request can be corrected and resubmitted.
+    existing = db.customer_creation_requests.find_one({"linked_user_id": user_id})
+    if existing:
+        if existing.get("status") == "created_on_zoho":
+            raise HTTPException(
+                status_code=400,
+                detail="Your account is already active; contact support to change business details.",
+            )
+        if existing.get("status") != "rejected":
+            raise HTTPException(
+                status_code=400,
+                detail="Your details have already been submitted and are awaiting approval.",
+            )
+        # rejected → fall through and let them update + resubmit
+
+    # Reuse the logged-in customer's mobile number as the contact number.
+    phone = None
+    user = db.users.find_one({"_id": user_id}, {"phone": 1})
+    if user and user.get("phone") is not None:
+        phone = str(user["phone"])
+
+    billing = body.billing_address.model_dump()
+    shipping = body.shipping_address.model_dump() if body.shipping_address else billing
+
+    # ── Server-side derivations (kept off the form, aligned to Zoho) ──────────
+    # Place of supply + pincode come from the SHIPPING address.
+    place_of_supply = shipping.get("state")
+    pincode = shipping.get("zip")
+    # GST treatment: GST (with or without PAN) → Business GST; PAN only → Consumer.
+    gst_treatment = "Business GST" if has_gst else "Consumer"
+    # Tier follows GST treatment: business → C, consumer → D.
+    tier_category = "C" if has_gst else "D"
+    # Normalise the multiple-branches answer to match the admin form (Yes/No).
+    multiple_branches = "Yes" if str(body.multiple_branches or "").lower() == "yes" else "No"
+
+    request_doc = {
+        "shop_name": body.shop_name,
+        "customer_name": body.customer_name,
+        "email": body.email,
+        # Alias kept so the admin customer-requests page (and Zoho mapping, which
+        # reads customer_mail_id) display the email without extra changes.
+        "customer_mail_id": body.email,
+        "whatsapp_no": phone,
+        "gst_no": body.gst_no,
+        "pan_card_no": body.pan_card_no,
+        "billing_address": billing,
+        "shipping_address": shipping,
+        "place_of_supply": place_of_supply,
+        "pincode": pincode,
+        "gst_treatment": gst_treatment,
+        "tier_category": tier_category,
+        "multiple_branches": multiple_branches,
+        "in_ex": "Exclusive",        # tax treatment is always exclusive
+        "margin_details": "40",      # fixed 40% margin (no % symbol)
+        "payment_terms": "Upfront",
+        "gst_certificate_url": body.gst_certificate_url,
+        "pan_card_url": body.pan_card_url,
+        "aadhar_url": body.aadhar_url,
+        "self_registered": True,
+        "source": "self_registration",
+        "linked_user_id": user_id,
+        "created_by": None,
+        "created_by_name": f"{body.customer_name} (self-registered)",
+        "updated_at": datetime.now(),
+    }
+
+    if existing:
+        # Resubmission of a previously rejected request.
+        db.customer_creation_requests.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {**request_doc, "status": "pending"}},
+        )
+        request_id = existing["_id"]
+    else:
+        request_doc["created_at"] = datetime.now()
+        request_doc["status"] = "pending"
+        request_id = db.customer_creation_requests.insert_one(request_doc).inserted_id
+
+    # Mark profile complete + sync display fields onto the user record.
+    db.users.update_one(
+        {"_id": user_id},
+        {
+            "$set": {
+                "profile_completed": True,
+                "name": body.customer_name,
+                "email": body.email,
+                "customer_name": body.shop_name,
+                "updated_at": datetime.now(),
+            }
+        },
+    )
+
+    # Notify ALL admins (in-app) that details were submitted for customer creation.
+    # TEMP: commented out for testing — re-enable once the flow is confirmed.
+    # try:
+    #     from .notifications import create_notifications_for_roles
+    #
+    #     create_notifications_for_roles(
+    #         db,
+    #         ["admin", "sales_admin"],
+    #         "customer_request_submitted",
+    #         f"B2B details submitted: {body.shop_name}",
+    #         f"{body.customer_name} submitted their business details and is awaiting approval.",
+    #         "/admin/customer_requests",
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Failed to notify admins of self-service profile: {e}")
+
+    return {
+        "message": "Your details have been submitted and are awaiting approval.",
+        "request_id": str(request_id),
+    }
