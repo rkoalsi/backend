@@ -498,26 +498,67 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
     )
     _log_transaction("verify_success", order_id, razorpay_payment_id=rzp_payment_id)
 
-    # Create the DRAFT estimate (idempotent).
-    estimate_message = ""
-    already_accepted = (
+    # Kick off DRAFT estimate creation in the BACKGROUND so this endpoint returns
+    # immediately (signature check is instant; the Zoho estimate call can take
+    # tens of seconds). The frontend shows a loader and polls
+    # GET /payments/order/{id}/status until the estimate is created.
+    already_created = (
         order.get("estimate_created")
         or str(order.get("status", "")).lower() == "accepted"
     )
-    if not already_accepted:
-        try:
-            result = await _create_draft_estimate_on_payment(order_id, request, background_tasks)
-            estimate_message = (result or {}).get("message", "") if isinstance(result, dict) else ""
-            _log_transaction("verify_estimate_accepted", order_id, result=result)
-        except Exception as e:
-            _log_transaction("verify_estimate_error", order_id, error=str(e))
-            print(f"[razorpay] estimate creation failed for order {order_id}: {e}")
+    if not already_created:
+        background_tasks.add_task(
+            _safe_create_draft_estimate, order_id, request, background_tasks
+        )
 
     return {
         "success": True,
         "order_id": str(order_id),
         "payment_id": rzp_payment_id,
-        "message": estimate_message,
+        "payment_status": "paid",
+        "estimate_created": bool(already_created),
+        "estimate_pending": not already_created,
+    }
+
+
+async def _safe_create_draft_estimate(order_id: str, request: Request, background_tasks: BackgroundTasks):
+    """Background wrapper around estimate creation — never raises (logged instead)."""
+    try:
+        result = await _create_draft_estimate_on_payment(order_id, request, background_tasks)
+        _log_transaction("verify_estimate_accepted", order_id, result=result)
+    except Exception as e:
+        _log_transaction("verify_estimate_error", order_id, error=str(e))
+        print(f"[razorpay] background estimate creation failed for order {order_id}: {e}")
+
+
+@router.get("/order/{order_id}/status")
+def order_payment_status(order_id: str):
+    """
+    Poll target for the Checkout popup. Reports the live payment + estimate state
+    so the frontend can show a loader until the (backgrounded) estimate is ready.
+    Estimate status is read from the `estimates` collection — the point of truth,
+    kept current by the Zoho webhook.
+    """
+    order = _get_order_or_404(order_id)
+    payment_status = (order.get("payment") or {}).get("status", "")
+    estimate_created = bool(order.get("estimate_created") or order.get("pre_order_estimate_created"))
+    est_number = order.get("estimate_number", "") or order.get("pre_order_estimate_number", "")
+
+    estimate_status = ""
+    if est_number:
+        est = db.estimates.find_one({"estimate_number": est_number}, {"status": 1})
+        if est:
+            estimate_status = est.get("status", "")
+
+    # Resolved once payment is settled AND (for paid orders) the estimate exists.
+    done = (payment_status == "paid" and estimate_created) or payment_status == "failed"
+    return {
+        "order_id": str(order_id),
+        "payment_status": payment_status,
+        "estimate_created": estimate_created,
+        "estimate_number": est_number,
+        "estimate_status": estimate_status,
+        "done": done,
     }
 
 

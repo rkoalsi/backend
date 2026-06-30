@@ -2407,6 +2407,19 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         sp_link = f"/orders/past/{order_id}"
         is_first_create = not estimate_created  # True only on the very first submit
 
+        # Live estimate status from the estimates collection (point of truth — kept
+        # current by the Zoho webhook). Carried as `extra.estimate_number` so the
+        # notifications API can re-resolve the status on every read.
+        est_status = ""
+        if est_number:
+            _est_doc = db.estimates.find_one(
+                {"estimate_number": est_number}, {"status": 1}
+            )
+            if _est_doc:
+                est_status = _est_doc.get("status", "")
+        est_status_label = (est_status or status or "draft").replace("_", " ").title()
+        est_extra = {"estimate_number": est_number} if est_number else None
+
         # Notify salesperson — skip if the order was placed by the customer themselves
         if created_by and user and user.get("role") != "customer":
             if is_first_create:
@@ -2415,8 +2428,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                     str(created_by),
                     "order_placed",
                     f"Estimate {est_number} created",
-                    f"Order for {customer_name} has been finalised.",
+                    f"Order for {customer_name} has been finalised. Status: {est_status_label}.",
                     sp_link,
+                    est_extra,
                 )
             else:
                 create_notification(
@@ -2424,8 +2438,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                     str(created_by),
                     "order_edited",
                     f"Order {est_number} updated",
-                    f"Order for {customer_name} has been updated.",
+                    f"Order for {customer_name} has been updated. Status: {est_status_label}.",
                     sp_link,
+                    est_extra,
                 )
 
         # Notify the customer only on the first submit, not on every update
@@ -2440,8 +2455,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                         str(customer_user["_id"]),
                         "order_placed",
                         f"Your order {est_number} is confirmed",
-                        f"Your estimate {est_number} has been created successfully.",
+                        f"Your estimate {est_number} has been created. Status: {est_status_label}.",
                         f"/orders/new/{order_id}",
+                        est_extra,
                     )
 
         # Notify Invoicee users whenever a customer saves or updates an order
@@ -2457,8 +2473,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 if is_first_create
                 else f"Customer {customer_name} has updated order {est_number}."
             )
+            notif_body = f"{notif_body} Status: {est_status_label}."
             for invoicee in db.users.find({"designation": "Invoicee", "status": "active"}, {"_id": 1}):
-                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link)
+                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link, est_extra)
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 
