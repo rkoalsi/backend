@@ -22,6 +22,7 @@ from .admin_trainings import router as admin_trainings_router
 from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
 from .admin_special_margins import router as admin_special_margins_router
+from .admin_inventory_aging import router as admin_inventory_aging_router
 from .admin_announcements import router as admin_announcements_router
 from .admin_daily_visits import router as admin_daily_visits_router
 from .admin_hooks_categories import router as admin_hooks_categories_router
@@ -3411,6 +3412,12 @@ router.include_router(
     admin_special_margins_router,
     prefix="/customer/special_margins",
     tags=["Admin Sales People"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_inventory_aging_router,
+    prefix="/inventory_aging",
+    tags=["Admin Inventory Aging"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
