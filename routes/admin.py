@@ -1756,8 +1756,12 @@ def read_all_orders(
                 },
                 "created_by_info.id": {"$toString": "$created_by_info._id"},
                 "created_by_info.name": "$created_by_info.name",
+                "created_by_info.first_name": "$created_by_info.first_name",
+                "created_by_info.last_name": "$created_by_info.last_name",
                 "created_by_info.email": "$created_by_info.email",
                 "created_by_info.code": "$created_by_info.code",
+                "created_by_info.self_registered": "$created_by_info.self_registered",
+                "created_by_info.role": "$created_by_info.role",
             }
         }
     )
