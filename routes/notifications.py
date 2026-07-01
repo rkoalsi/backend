@@ -164,18 +164,58 @@ def get_notifications(
 
     query = {"recipient_id": ObjectId(user_id)}
     total = db.order_form_notifications.count_documents(query)
-    docs = (
+    docs = list(
         db.order_form_notifications.find(query)
         .sort([("read", 1), ("created_at", -1)])
         .skip(page * limit)
         .limit(limit)
     )
+    _enrich_estimate_status(db, docs)
     return {
-        "notifications": serialize_mongo_document(list(docs)),
+        "notifications": serialize_mongo_document(docs),
         "total": total,
         "page": page,
         "limit": limit,
     }
+
+
+def _enrich_estimate_status(db, docs: list):
+    """
+    For notifications tied to an estimate (extra.estimate_number), re-resolve the
+    live status from the `estimates` collection — the point of truth, kept current
+    by the Zoho webhook — so the bell always reflects the current estimate state
+    even when it changed after the notification was created.
+    """
+    nums = {
+        d["extra"]["estimate_number"]
+        for d in docs
+        if isinstance(d.get("extra"), dict) and d["extra"].get("estimate_number")
+    }
+    if not nums:
+        return
+    statuses = {
+        e["estimate_number"]: (e.get("status") or "")
+        for e in db.estimates.find(
+            {"estimate_number": {"$in": list(nums)}},
+            {"estimate_number": 1, "status": 1},
+        )
+    }
+    for d in docs:
+        extra = d.get("extra")
+        if not isinstance(extra, dict):
+            continue
+        num = extra.get("estimate_number")
+        if not num or num not in statuses:
+            continue
+        status = statuses[num]
+        extra["estimate_status"] = status
+        label = (status or "draft").replace("_", " ").title()
+        # Keep the body's trailing "Status: ..." sentence current.
+        import re as _re
+        new_body = _re.sub(r"Status:\s*[^.]*\.", f"Status: {label}.", d.get("body", ""))
+        if "Status:" not in new_body:
+            new_body = f"{new_body} Status: {label}.".strip()
+        d["body"] = new_body
 
 
 @router.patch("/{notification_id}/read")

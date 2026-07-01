@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
 from bson.objectid import ObjectId
-import os, time
+import os, time, secrets, hashlib, hmac
+from typing import Optional
 from collections import defaultdict
 
 router = APIRouter()
@@ -17,6 +18,7 @@ db = get_database()
 # Issue 7: reduced from 7 days → 24 hours
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))
 PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = 60
+# (registration token removed — OTP verification now creates the account directly)
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
@@ -24,6 +26,30 @@ FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL")
 
 users_collection = db["users"]
 password_resets_collection = db["password_resets"]
+otp_collection = db["otp_codes"]
+# Funnel capture for B2B self-registration: one doc per number the moment an OTP
+# is requested (before any account exists), so drop-offs are still recorded.
+b2b_leads_collection = db["b2b_leads"]
+
+# ── OTP / mobile-auth constants ────────────────────────────────────────────────
+OTP_EXPIRE_SECONDS = int(os.getenv("OTP_EXPIRE_SECONDS", 300))          # 5 minutes
+OTP_MAX_VERIFY_ATTEMPTS = 5
+# Plivo/WhatsApp template (must be approved in Plivo + present in db.templates)
+# carrying a single body parameter for the 6-digit code.
+OTP_TEMPLATE_NAME = os.getenv("OTP_TEMPLATE_NAME", "otp_verification")
+# Minimum seconds between OTP sends to the same number (anti-spam / anti-enumeration).
+OTP_RESEND_COOLDOWN_SECONDS = int(os.getenv("OTP_RESEND_COOLDOWN_SECONDS", 30))
+
+# Harden the OTP store:
+#  • TTL index → Mongo auto-deletes each code the moment it expires (no stale codes
+#    linger, even after a crash that skips the in-code cleanup).
+#  • unique (phone, purpose) → at most one live code per number+purpose, so a new
+#    request always supersedes the old one (matches the upsert in issue_otp).
+try:
+    otp_collection.create_index("expires_at", expireAfterSeconds=0)
+    otp_collection.create_index([("phone", 1), ("purpose", 1)], unique=True)
+except Exception:
+    pass
 
 
 # ── Issue 9: simple in-memory rate limiter (no extra dependencies) ─────────────
@@ -50,6 +76,7 @@ class _RateLimiter:
 
 _login_limiter = _RateLimiter(max_attempts=5, window_seconds=300)       # 5 / 5 min
 _reset_limiter = _RateLimiter(max_attempts=3, window_seconds=3600)       # 3 / 1 hr
+_otp_limiter = _RateLimiter(max_attempts=5, window_seconds=600)          # 5 / 10 min per phone
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -149,10 +176,144 @@ def send_reset_email(to_email: str, reset_link: str) -> bool:
         return False
 
 
+# ── OTP / mobile-auth helpers ──────────────────────────────────────────────────
+def normalize_phone(raw) -> str:
+    """Reduce any phone input to its last 10 digits (Indian mobile).
+    Mirrors the last-10-digit matching used elsewhere (chatbot is_b2b match)."""
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def find_user_by_phone(phone10: str) -> Optional[dict]:
+    """Find an active account whose stored phone matches these last-10 digits.
+    Works for any role (customer / sales_person / admin). `phone` is stored as an
+    int by existing flows, so match both int and string representations."""
+    if not phone10 or len(phone10) != 10:
+        return None
+    candidates = [phone10]
+    try:
+        candidates.append(int(phone10))
+    except ValueError:
+        pass
+    # Require an active account — mirrors email/password login (authenticate_user),
+    # and keeps pending self-registered users blocked until an admin approves them.
+    return db.users.find_one({"phone": {"$in": candidates}, "status": "active"})
+
+
+def capture_b2b_lead(phone10: str) -> None:
+    """Record a B2B self-registration lead in the `b2b_leads` collection the moment
+    a number is entered for OTP — BEFORE any user account exists. This captures
+    drop-offs (people who request an OTP but never verify). Idempotent per number."""
+    now = datetime.utcnow()
+    b2b_leads_collection.update_one(
+        {"phone": int(phone10)},
+        {
+            "$setOnInsert": {"phone": int(phone10), "created_at": now, "verified": False},
+            "$set": {"updated_at": now},
+            "$inc": {"otp_requests": 1},
+        },
+        upsert=True,
+    )
+
+
+def _hash_otp(code: str) -> str:
+    # Keyed (HMAC) hash so a leaked DB row can't be brute-forced without SECRET_KEY,
+    # and codes are never stored in plaintext.
+    return hmac.new(
+        (SECRET_KEY or "").encode(), code.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def otp_on_cooldown(phone10: str, purpose: str) -> bool:
+    """True if a code was issued to this number+purpose within the resend window."""
+    entry = otp_collection.find_one(
+        {"phone": phone10, "purpose": purpose}, {"created_at": 1}
+    )
+    if not entry or not entry.get("created_at"):
+        return False
+    age = (datetime.utcnow() - entry["created_at"]).total_seconds()
+    return age < OTP_RESEND_COOLDOWN_SECONDS
+
+
+def issue_otp(phone10: str, purpose: str) -> str:
+    """Generate, store (hashed) and return a 6-digit OTP for this phone+purpose."""
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    otp_collection.update_one(
+        {"phone": phone10, "purpose": purpose},
+        {
+            "$set": {
+                "phone": phone10,
+                "purpose": purpose,
+                "code_hash": _hash_otp(code),
+                "expires_at": datetime.utcnow() + timedelta(seconds=OTP_EXPIRE_SECONDS),
+                "attempts": 0,
+                "consumed": False,
+                "created_at": datetime.utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    return code
+
+
+def verify_otp(phone10: str, code: str, purpose: str) -> bool:
+    """Validate an OTP; consumes it on success, counts attempts, enforces expiry."""
+    entry = otp_collection.find_one({"phone": phone10, "purpose": purpose})
+    if not entry or entry.get("consumed"):
+        return False
+    if entry["expires_at"] < datetime.utcnow():
+        otp_collection.delete_one({"_id": entry["_id"]})
+        return False
+    if entry.get("attempts", 0) >= OTP_MAX_VERIFY_ATTEMPTS:
+        otp_collection.delete_one({"_id": entry["_id"]})
+        return False
+    # Constant-time comparison to avoid leaking the code via timing.
+    if not hmac.compare_digest(entry["code_hash"], _hash_otp(code)):
+        otp_collection.update_one({"_id": entry["_id"]}, {"$inc": {"attempts": 1}})
+        return False
+    # Single-use: delete on success so the code can never be replayed.
+    otp_collection.delete_one({"_id": entry["_id"]})
+    return True
+
+
+def send_otp_whatsapp(phone10: str, code: str) -> bool:
+    """Deliver the OTP over WhatsApp via Plivo. Falls back to a log line if the
+    template is not configured (so dev environments still work)."""
+    try:
+        template = db.templates.find_one({"name": OTP_TEMPLATE_NAME})
+        if not template:
+            print(f"⚠️  OTP template '{OTP_TEMPLATE_NAME}' not found; OTP for {phone10} = {code}")
+            return False
+        from ..config.whatsapp import send_whatsapp
+
+        send_whatsapp(phone10, template, {"otp": code})
+        return True
+    except Exception as e:
+        print(f"❌ Failed to send OTP WhatsApp to {phone10}: {e}")
+        return False
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
+
+
+class OtpRequest(BaseModel):
+    phone: str
+    # "login"  → must already map to an account
+    # "register" → must NOT map to an account (new B2B onboarding)
+    purpose: str = "login"
+
+
+class OtpLogin(BaseModel):
+    phone: str
+    code: str
+
+
+class OtpVerify(BaseModel):
+    phone: str
+    code: str
 
 
 class UserLogin(BaseModel):
@@ -391,3 +552,185 @@ async def reset_password(confirm: PasswordResetConfirm):
     )
     password_resets_collection.delete_one({"_id": reset_entry["_id"]})
     return {"message": "Password has been reset successfully"}
+
+
+# ── Mobile / OTP authentication ────────────────────────────────────────────────
+# Works for ANY existing account (customer / sales_person / admin) as an
+# alternative to email+password, and as the verification step for new B2B
+# self-registration. The number must be reachable on WhatsApp (that is how the
+# code is delivered) and — for login — must already belong to an account.
+
+@router.post("/otp/request")
+async def request_otp(body: OtpRequest):
+    phone10 = normalize_phone(body.phone)
+    if len(phone10) != 10:
+        raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number")
+
+    if _otp_limiter.is_limited(phone10):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many OTP requests. Please wait a few minutes and try again.",
+        )
+
+    purpose = body.purpose if body.purpose in ("login", "register") else "login"
+
+    if otp_on_cooldown(phone10, purpose):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {OTP_RESEND_COOLDOWN_SECONDS}s before requesting another OTP.",
+        )
+
+    if purpose == "login":
+        # Must belong to an existing account, otherwise there is nothing to log in to.
+        if not find_user_by_phone(phone10):
+            raise HTTPException(
+                status_code=404,
+                detail="No account is registered with this mobile number.",
+            )
+    else:  # register
+        if find_user_by_phone(phone10):
+            raise HTTPException(
+                status_code=409,
+                detail="This mobile number already has an account. Please log in instead.",
+            )
+        # Capture the lead immediately so drop-offs (before completing the form)
+        # are still recorded under /admin/leads.
+        capture_b2b_lead(phone10)
+
+    code = issue_otp(phone10, purpose)
+    send_otp_whatsapp(phone10, code)
+    # Never leak the code in the response.
+    return {"message": "OTP sent to your WhatsApp number", "phone": phone10}
+
+
+@router.post("/otp/login")
+async def login_with_otp(
+    body: OtpLogin,
+    response: Response,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    phone10 = normalize_phone(body.phone)
+    if not verify_otp(phone10, body.code, "login"):
+        raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+
+    user = find_user_by_phone(phone10)
+    if not user:
+        raise HTTPException(status_code=404, detail="No account is registered with this mobile number.")
+
+    authenticated = serialize_mongo_document(user)
+    access_token = create_access_token(data={"data": _minimal_payload(authenticated)})
+    _set_auth_cookie(response, access_token)
+
+    # Log login activity for customer accounts (mirrors email/password login)
+    if authenticated.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+
+        ip, ua = extract_client_info(request)
+        customer_name = (
+            authenticated.get("contact_name")
+            or authenticated.get("customer_name")
+            or f"{authenticated.get('first_name', '')} {authenticated.get('last_name', '')}".strip()
+        )
+        background_tasks.add_task(
+            log_activity,
+            action="login",
+            category="auth",
+            user_id=authenticated.get("_id"),
+            customer_id=authenticated.get("customer_id"),
+            customer_name=customer_name,
+            email=authenticated.get("email"),
+            metadata={"method": "otp"},
+            ip_address=ip,
+            user_agent=ua,
+        )
+
+    authenticated.pop("password", None)
+    return {
+        "message": "Login successful",
+        "user_id": authenticated["_id"],
+        "user": authenticated,
+        "access_token": access_token,
+    }
+
+
+@router.post("/otp/verify")
+async def verify_registration_otp(body: OtpVerify, response: Response):
+    """Verify a registration OTP, create the B2B account (no business details yet)
+    and log the user straight in.
+
+    The customer enters nothing but their mobile number here — all business
+    details (shop name, GST/PAN, addresses) are filled in later from the
+    Account Settings page (mirrors the salesperson customer-creation-request form).
+    Until those details are completed and an admin approves, the user has no
+    `customer_id` so they can browse but not place orders."""
+    phone10 = normalize_phone(body.phone)
+    if not verify_otp(phone10, body.code, "register"):
+        raise HTTPException(status_code=401, detail="Invalid or expired OTP")
+
+    now = datetime.utcnow()
+
+    # Mark the lead verified (funnel tracking in b2b_leads).
+    b2b_leads_collection.update_one(
+        {"phone": int(phone10)},
+        {"$set": {"verified": True, "verified_at": now, "updated_at": now}},
+        upsert=True,
+    )
+
+    # Create the user account on first verification (idempotent on re-verify).
+    # No business details captured here — only the verified mobile number.
+    existing = find_user_by_phone(phone10)
+    if not existing:
+        users_collection.update_one(
+            {"phone": int(phone10)},
+            {
+                "$setOnInsert": {
+                    "phone": int(phone10),
+                    "role": "customer",
+                    "status": "active",          # can log in immediately
+                    "self_registered": True,     # ← flag for B2B self-onboarded clients
+                    "auth_method": "otp",
+                    "phone_verified": True,
+                    "profile_completed": False,  # details still pending (Account Settings)
+                    "customer_id": None,         # no Zoho contact until approved → no ordering
+                    "created_at": now,
+                },
+                "$set": {"updated_at": now},
+            },
+            upsert=True,
+        )
+
+    user = users_collection.find_one({"phone": int(phone10)})
+    authenticated = serialize_mongo_document(user)
+
+    # Notify that a new B2B user verified on the purchase portal.
+    # TESTING: scoped to a single recipient instead of all admins.
+    if not existing:
+        try:
+            from .notifications import create_notification
+
+            target = db.users.find_one({"email": "rkoalsi2000@gmail.com"}, {"_id": 1})
+            if target:
+                create_notification(
+                    db,
+                    str(target["_id"]),
+                    "b2b_user_verified",
+                    f"New B2B signup verified: +91 {phone10}",
+                    "A new customer verified their mobile number on the purchase portal. "
+                    "They’ll appear under Leads once they submit their business details.",
+                    "/admin/leads?tab=b2b",
+                )
+        except Exception as e:
+            print(f"Failed to notify of B2B verification: {e}")
+
+    # Log the user in (same session/cookie as password & OTP login).
+    access_token = create_access_token(data={"data": _minimal_payload(authenticated)})
+    _set_auth_cookie(response, access_token)
+
+    authenticated.pop("password", None)
+    return {
+        "message": "Mobile number verified",
+        "user_id": authenticated["_id"],
+        "user": authenticated,
+        "access_token": access_token,
+    }

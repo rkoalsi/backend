@@ -572,7 +572,7 @@ def update_permission_roles(
     _ = Depends(require_admin_role)
 ):
     """Update a permission document's allowed_roles (admin only)"""
-    allowed_fields = {"allowed_roles", "is_active", "order"}
+    allowed_fields = {"allowed_roles", "is_active", "order", "category"}
     filtered = {k: v for k, v in permission_data.items() if k in allowed_fields}
     if not filtered:
         raise HTTPException(status_code=400, detail="No valid fields to update")

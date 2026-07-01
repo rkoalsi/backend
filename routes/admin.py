@@ -22,6 +22,7 @@ from .admin_trainings import router as admin_trainings_router
 from .admin_catalogues import router as admin_catalogues_router
 from .admin_salespeople import router as admin_salespeople_router
 from .admin_special_margins import router as admin_special_margins_router
+from .admin_inventory_aging import router as admin_inventory_aging_router
 from .admin_announcements import router as admin_announcements_router
 from .admin_daily_visits import router as admin_daily_visits_router
 from .admin_hooks_categories import router as admin_hooks_categories_router
@@ -37,6 +38,7 @@ from .admin_linktree import router as admin_linktree_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_brand_leads import router as admin_brand_leads_router
+from .admin_b2b_registrations import router as admin_b2b_registrations_router
 from .admin_attendance import router as admin_attendance_router
 from .admin_users import router as admin_users_router
 from .admin_careers import router as admin_careers_router
@@ -1115,6 +1117,7 @@ def get_products(
     new_arrivals: Optional[bool] = None,
     missing_info_products: Optional[bool] = None,
     pre_order: Optional[bool] = None,
+    clearance: Optional[bool] = None,
     sort_by: Optional[str] = None,
 ):
     """
@@ -1147,6 +1150,9 @@ def get_products(
 
         if pre_order:
             query["pre_order"] = True
+
+        if clearance:
+            query["clearance"] = True
 
         if missing_info_products:
             query["$and"] = [
@@ -1186,7 +1192,7 @@ def get_products(
             .skip(skip)
             .limit(limit)
         )
-        print(json.dumps(query, indent=4))
+        print(json.dumps(query, indent=4, default=str))
         total_count = products_collection.count_documents(query)
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
 
@@ -3233,6 +3239,8 @@ async def update_product(
     status: Optional[str] = Form(None),
     catalogue_order: Optional[int] = Form(None),
     pre_order: Optional[str] = Form(None),
+    clearance: Optional[str] = Form(None),
+    clearance_margin: Optional[float] = Form(None),
     files: Optional[List[UploadFile]] = File(None),
     replace_images: Optional[bool] = Form(False)  # Whether to replace all images or append
 ):
@@ -3280,6 +3288,13 @@ async def update_product(
 
         if pre_order is not None:
             update_dict["pre_order"] = pre_order.lower() == "true"
+
+        if clearance is not None:
+            update_dict["clearance"] = clearance.lower() == "true"
+
+        # clearance_margin is sent as 0 (not null) to clear it, so this is safe
+        if clearance_margin is not None:
+            update_dict["clearance_margin"] = clearance_margin
 
         # Handle image uploads if files are provided
         uploaded_image_urls = []
@@ -3400,6 +3415,12 @@ router.include_router(
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
+    admin_inventory_aging_router,
+    prefix="/inventory_aging",
+    tags=["Admin Inventory Aging"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
     admin_salespeople_router,
     prefix="/salespeople",
     tags=["Admin Sales People"],
@@ -3505,6 +3526,12 @@ router.include_router(
     admin_brand_leads_router,
     prefix="/brand_leads",
     tags=["Brand Leads"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_b2b_registrations_router,
+    prefix="/b2b_registrations",
+    tags=["B2B Registrations"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
@@ -3683,3 +3710,19 @@ def mark_pre_order_products(payload: dict):
                 unmarked = res2.modified_count
 
     return {"marked": marked, "unmarked": unmarked}
+
+
+# ── App settings (admin-configurable) ────────────────────────────────────────
+from .app_settings import get_settings as _get_app_settings, update_settings as _update_app_settings
+
+
+@router.get("/settings")
+def admin_get_settings():
+    """Return the admin-configurable app settings (e.g. min order value)."""
+    return _get_app_settings()
+
+
+@router.put("/settings")
+def admin_update_settings(payload: dict):
+    """Update app settings. Only known keys are persisted."""
+    return _update_app_settings(payload or {})

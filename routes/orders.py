@@ -551,6 +551,23 @@ async def safe_execute(operation_name: str, func, critical: bool = True):
             raise HTTPException(status_code=500, detail=error_msg)
         return None, error_msg
 
+def effective_margin(base_margin, product: Dict) -> str:
+    """Return the margin string ('NN%') for a product, adding the clearance
+    bonus (additive percentage points, capped at 100) when the product is on
+    clearance. `base_margin` is the customer/special margin that already won
+    the precedence chain. Mirrors the frontend getEffectiveMargin helper."""
+    try:
+        base = int(str(base_margin).replace("%", "").strip())
+    except (ValueError, AttributeError):
+        base = 40
+    if product.get("clearance"):
+        try:
+            base += int(product.get("clearance_margin") or 0)
+        except (ValueError, TypeError):
+            pass
+    return f"{min(base, 100)}%"
+
+
 def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict, cart_products: List[Dict] = None) -> Dict[str, List]:
     """Prepare all data upfront with cart quantities pre-filled"""
     brand_data = {}
@@ -572,10 +589,11 @@ def prepare_brand_data(brands: Dict, customer: Dict, special_margins: Dict, cart
         ]]
 
         for idx, product in enumerate(products, start=2):
-            margin = special_margins.get(
+            base_margin = special_margins.get(
                 str(product.get("_id")),
                 customer.get("cf_margin", "40%")
             )
+            margin = effective_margin(base_margin, product)
             try:
                 margin_value = int(margin.replace("%", "")) / 100
             except:
@@ -1834,6 +1852,71 @@ def read_order(order_id: str):
             # Pricing context is an enhancement — never fail the order fetch over it
             print(f"Error embedding pricing context on order {order_id}: {e}")
 
+    # Enrich each order line with the current clearance flag/bonus from the
+    # products collection (order lines don't persist these) so the frontend can
+    # compute the effective margin — base margin plus the clearance bonus — when
+    # no estimate exists yet.
+    item_id_by_pid: dict = {}
+    try:
+        prod_ids = [
+            ObjectId(p["product_id"])
+            for p in order.get("products", [])
+            if p.get("product_id")
+        ]
+        if prod_ids:
+            product_docs = {
+                str(d["_id"]): d
+                for d in db.products.find(
+                    {"_id": {"$in": prod_ids}},
+                    {"item_id": 1, "clearance": 1, "clearance_margin": 1},
+                )
+            }
+            for p in order.get("products", []):
+                doc = product_docs.get(str(p.get("product_id")))
+                if not doc:
+                    continue
+                if doc.get("item_id"):
+                    item_id_by_pid[str(p.get("product_id"))] = str(doc["item_id"])
+                p["clearance"] = doc.get("clearance", False)
+                p["clearance_margin"] = doc.get("clearance_margin", 0)
+    except Exception as e:
+        print(f"Error embedding clearance context on order {order_id}: {e}")
+
+    # Embed the live per-line discount (margin) from the stored Zoho estimate(s)
+    # so the order detail page shows the actual estimate margin rather than the
+    # margin captured on the order line at save time. Only relevant once an
+    # estimate exists. This discount already bakes in any clearance bonus.
+    if order.get("estimate_created") or order.get("pre_order_estimate_created"):
+        try:
+            margin_by_item_id: dict = {}
+            margin_by_name: dict = {}
+            for est in db.estimates.find(
+                {"order_id": ObjectId(order_id)}, {"line_items": 1}
+            ):
+                for li in est.get("line_items", []):
+                    disc = li.get("discount")
+                    if disc in (None, ""):
+                        continue
+                    if li.get("item_id"):
+                        margin_by_item_id[str(li["item_id"])] = disc
+                    if li.get("name"):
+                        margin_by_name[str(li["name"]).strip().lower()] = disc
+
+            if margin_by_item_id or margin_by_name:
+                # Order lines store the Mongo product_id, estimate lines store the
+                # Zoho item_id — bridge them via the map built above, with a name
+                # match as a fallback.
+                for p in order.get("products", []):
+                    iid = item_id_by_pid.get(str(p.get("product_id")))
+                    margin = margin_by_item_id.get(iid) if iid else None
+                    if margin is None and p.get("name"):
+                        margin = margin_by_name.get(str(p["name"]).strip().lower())
+                    if margin is not None:
+                        p["estimate_margin"] = margin
+        except Exception as e:
+            # Margin display is an enhancement — never fail the order fetch over it
+            print(f"Error embedding estimate margins on order {order_id}: {e}")
+
     # Embed live estimate statuses from the estimates collection (kept current by webhook)
     est_num = order.get("estimate_number")
     po_est_num = order.get("pre_order_estimate_number")
@@ -2041,9 +2124,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             special_margin = special_margin_dict.get(
                 product_id_str, customer.get("cf_margin", "40%")
             )
-            discount_value = special_margin
-            if not discount_value.endswith("%"):
-                discount_value = f"{discount_value}%"
+            # Clearance items add their bonus margin on top of the base margin
+            # (additive percentage points). effective_margin always returns 'NN%'.
+            discount_value = effective_margin(special_margin, item)
             tax_prefs = item.get("item_tax_preferences") or []
             description = (
                 f"PRE-ORDER | SOH:{item.get('stock')}"
@@ -2324,6 +2407,19 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         sp_link = f"/orders/past/{order_id}"
         is_first_create = not estimate_created  # True only on the very first submit
 
+        # Live estimate status from the estimates collection (point of truth — kept
+        # current by the Zoho webhook). Carried as `extra.estimate_number` so the
+        # notifications API can re-resolve the status on every read.
+        est_status = ""
+        if est_number:
+            _est_doc = db.estimates.find_one(
+                {"estimate_number": est_number}, {"status": 1}
+            )
+            if _est_doc:
+                est_status = _est_doc.get("status", "")
+        est_status_label = (est_status or status or "draft").replace("_", " ").title()
+        est_extra = {"estimate_number": est_number} if est_number else None
+
         # Notify salesperson — skip if the order was placed by the customer themselves
         if created_by and user and user.get("role") != "customer":
             if is_first_create:
@@ -2332,8 +2428,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                     str(created_by),
                     "order_placed",
                     f"Estimate {est_number} created",
-                    f"Order for {customer_name} has been finalised.",
+                    f"Order for {customer_name} has been finalised. Status: {est_status_label}.",
                     sp_link,
+                    est_extra,
                 )
             else:
                 create_notification(
@@ -2341,8 +2438,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                     str(created_by),
                     "order_edited",
                     f"Order {est_number} updated",
-                    f"Order for {customer_name} has been updated.",
+                    f"Order for {customer_name} has been updated. Status: {est_status_label}.",
                     sp_link,
+                    est_extra,
                 )
 
         # Notify the customer only on the first submit, not on every update
@@ -2357,8 +2455,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                         str(customer_user["_id"]),
                         "order_placed",
                         f"Your order {est_number} is confirmed",
-                        f"Your estimate {est_number} has been created successfully.",
+                        f"Your estimate {est_number} has been created. Status: {est_status_label}.",
                         f"/orders/new/{order_id}",
+                        est_extra,
                     )
 
         # Notify Invoicee users whenever a customer saves or updates an order
@@ -2374,8 +2473,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 if is_first_create
                 else f"Customer {customer_name} has updated order {est_number}."
             )
+            notif_body = f"{notif_body} Status: {est_status_label}."
             for invoicee in db.users.find({"designation": "Invoicee", "status": "active"}, {"_id": 1}):
-                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link)
+                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link, est_extra)
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 
