@@ -163,6 +163,9 @@ def _notify_customer_payment_success(order: dict):
         )
         if claim.modified_count == 0:
             return  # already notified by the other path
+        # Re-fetch so we use the estimate_number set during estimate creation
+        # (this runs after the estimate exists), not the raw order id.
+        order = orders_collection.find_one({"_id": order["_id"]}) or order
         contact = _customer_contact(order)
         phone = contact.get("contact")
         customer_name = contact.get("name") or "Customer"
@@ -552,9 +555,6 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
     )
     _log_transaction("verify_success", order_id, razorpay_payment_id=rzp_payment_id)
 
-    # Confirm the order to the customer over WhatsApp + in-app (never blocks/raises).
-    _notify_customer_payment_success(order)
-
     # Kick off DRAFT estimate creation in the BACKGROUND so this endpoint returns
     # immediately (signature check is instant; the Zoho estimate call can take
     # tens of seconds). The frontend shows a loader and polls
@@ -564,9 +564,14 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
         or str(order.get("status", "")).lower() == "accepted"
     )
     if not already_created:
+        # The customer confirmation is sent from the background task once the
+        # estimate exists, so the message carries the estimate number.
         background_tasks.add_task(
             _safe_create_draft_estimate, order_id, request, background_tasks
         )
+    else:
+        # Estimate already exists -> confirm now (order already has its number).
+        _notify_customer_payment_success(order)
 
     return {
         "success": True,
@@ -579,13 +584,23 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
 
 
 async def _safe_create_draft_estimate(order_id: str, request: Request, background_tasks: BackgroundTasks):
-    """Background wrapper around estimate creation — never raises (logged instead)."""
+    """Background wrapper around estimate creation — never raises (logged instead).
+    Sends the customer confirmation afterwards (in `finally`) so the message uses
+    the freshly-created estimate number; falls back to the order id if creation
+    failed (payment already succeeded, so the customer must still be confirmed)."""
     try:
         result = await _create_draft_estimate_on_payment(order_id, request, background_tasks)
         _log_transaction("verify_estimate_accepted", order_id, result=result)
     except Exception as e:
         _log_transaction("verify_estimate_error", order_id, error=str(e))
         print(f"[razorpay] background estimate creation failed for order {order_id}: {e}")
+    finally:
+        try:
+            order = orders_collection.find_one({"_id": ObjectId(order_id)})
+            if order:
+                _notify_customer_payment_success(order)
+        except Exception as e:
+            print(f"[razorpay] failed to send post-estimate confirmation for {order_id}: {e}")
 
 
 @router.get("/order/{order_id}/status")
@@ -734,14 +749,14 @@ async def razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
 
     # ── Successful payment: create the DRAFT estimate (idempotent) ──
     if paid:
-        # Confirm the order to the customer (idempotent vs the verify endpoint).
-        _notify_customer_payment_success(order)
         already_accepted = (
             order.get("estimate_created")
             or str(order.get("status", "")).lower() == "accepted"
         )
         if already_accepted:
             _log_transaction("webhook_estimate_skipped", order_id, reason="already_created")
+            # Estimate already exists -> confirm now (order already has its number).
+            _notify_customer_payment_success(order)
         else:
             try:
                 result = await _create_draft_estimate_on_payment(order_id, request, background_tasks)
@@ -750,6 +765,11 @@ async def razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
                 # Record the failure; payment is captured so this needs manual follow-up.
                 _log_transaction("webhook_estimate_error", order_id, error=str(e))
                 print(f"[razorpay] estimate creation failed for order {order_id}: {e}")
+            finally:
+                # Confirm to the customer AFTER estimate creation so the message
+                # carries the estimate number (idempotent vs the verify path).
+                fresh = orders_collection.find_one({"_id": order["_id"]}) or order
+                _notify_customer_payment_success(fresh)
 
     # ── Failed / cancelled / expired: do NOT create an estimate ──
     elif failed:
