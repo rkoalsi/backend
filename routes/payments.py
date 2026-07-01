@@ -30,7 +30,9 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 
-from ..config.root import get_database
+from ..config.root import get_database, serialize_mongo_document
+from ..config.whatsapp import send_whatsapp
+from .notifications import create_notification
 
 load_dotenv()
 
@@ -144,6 +146,58 @@ def _customer_contact(order: dict) -> dict:
     if phone:
         contact["contact"] = str(phone)
     return contact
+
+
+def _notify_customer_payment_success(order: dict):
+    """Send the customer a WhatsApp 'order confirmation' after a successful payment,
+    plus an in-app notification. Never raises — payment must never fail because a
+    notification did. Skips quietly if the template hasn't been created yet.
+
+    Idempotent: both the Checkout verify endpoint and the payment-link webhook can
+    fire for the same payment, so we atomically claim the notification first and
+    only the first caller actually sends."""
+    try:
+        claim = orders_collection.update_one(
+            {"_id": order["_id"], "payment.customer_notified": {"$ne": True}},
+            {"$set": {"payment.customer_notified": True}},
+        )
+        if claim.modified_count == 0:
+            return  # already notified by the other path
+        contact = _customer_contact(order)
+        phone = contact.get("contact")
+        customer_name = contact.get("name") or "Customer"
+        order_ref = order.get("estimate_number") or f"#{str(order.get('_id'))[-6:]}"
+        try:
+            amount = float(order.get("total_amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0
+        amount_str = f"₹{amount:,.0f}"
+
+        template_doc = db.templates.find_one({"name": "order_confirmation"})
+        if template_doc and phone:
+            template = serialize_mongo_document(dict(template_doc))
+            # Approved template has exactly 2 body vars: {{1}}=name, {{2}}=order.
+            params = {
+                "customer_name": customer_name,
+                "order_number": order_ref,
+            }
+            send_whatsapp(phone, {**template}, {**params})
+        elif not template_doc:
+            print("Template 'order_confirmation' not found, skipping customer WhatsApp")
+
+        # In-app notification for the customer who placed the order.
+        created_by = order.get("created_by")
+        if created_by:
+            create_notification(
+                db,
+                str(created_by),
+                "order_confirmation",
+                f"Payment received for order {order_ref}",
+                f"We've received your payment of {amount_str}. Your order {order_ref} is confirmed.",
+                f"/orders/past/{order.get('_id')}",
+            )
+    except Exception as e:
+        print(f"[payments] failed to notify customer of payment success: {e}")
 
 
 @router.post("/order/{order_id}/payment_link")
@@ -498,6 +552,9 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
     )
     _log_transaction("verify_success", order_id, razorpay_payment_id=rzp_payment_id)
 
+    # Confirm the order to the customer over WhatsApp + in-app (never blocks/raises).
+    _notify_customer_payment_success(order)
+
     # Kick off DRAFT estimate creation in the BACKGROUND so this endpoint returns
     # immediately (signature check is instant; the Zoho estimate call can take
     # tens of seconds). The frontend shows a loader and polls
@@ -677,6 +734,8 @@ async def razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
 
     # ── Successful payment: create the DRAFT estimate (idempotent) ──
     if paid:
+        # Confirm the order to the customer (idempotent vs the verify endpoint).
+        _notify_customer_payment_success(order)
         already_accepted = (
             order.get("estimate_created")
             or str(order.get("status", "")).lower() == "accepted"
