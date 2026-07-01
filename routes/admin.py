@@ -1739,6 +1739,7 @@ def read_all_orders(
                 "reference_number": 1,
                 "spreadsheet_url": 1,
                 "spreadsheet_created": 1,
+                "payment": 1,
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
@@ -1777,6 +1778,121 @@ def read_all_orders(
         "page": page,
         "per_page": limit,
         "total_pages": total_pages,
+    }
+
+
+@router.get("/pg_payments")
+def read_pg_payments(
+    page: int = Query(0, ge=0, description="0-based page index"),
+    limit: int = Query(20, ge=1, description="Number of items per page"),
+    action: Optional[str] = Query(None, description="Filter by transaction action"),
+    search: Optional[str] = Query(
+        None, description="Search by order id / razorpay payment id / link id"
+    ),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+):
+    """
+    Payment-gateway audit log: every Razorpay interaction (create-link
+    request/response, checkout verify, webhook callbacks, errors) persisted to
+    the `razorpay_transactions` collection, enriched with the linked order's
+    customer/estimate info. Intended for finance reconciliation and debugging
+    of failed / orphaned payments.
+    """
+    razorpay_transactions = db["razorpay_transactions"]
+
+    match_conditions: dict = {}
+
+    if action:
+        match_conditions["action"] = action
+
+    date_filter = {}
+    if start_date:
+        date_filter["$gte"] = datetime.strptime(start_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+    if end_date:
+        date_filter["$lte"] = datetime.strptime(end_date, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=timezone.utc
+        )
+    if date_filter:
+        match_conditions["created_at"] = date_filter
+
+    if search:
+        term = search.strip()
+        or_conditions = [
+            {"razorpay_payment_id": {"$regex": re.escape(term), "$options": "i"}},
+            {"payment_link_id": {"$regex": re.escape(term), "$options": "i"}},
+        ]
+        # order_id is stored as an ObjectId when valid; match both forms.
+        if ObjectId.is_valid(term):
+            or_conditions.append({"order_id": ObjectId(term)})
+        or_conditions.append({"order_id": term})
+        match_conditions["$or"] = or_conditions
+
+    pipeline = [
+        {"$match": match_conditions},
+        {"$sort": {"created_at": -1}},
+        # Join the order to surface customer / estimate context for the payment.
+        {
+            "$lookup": {
+                "from": "orders",
+                "localField": "order_id",
+                "foreignField": "_id",
+                "as": "order_info",
+            }
+        },
+        {"$unwind": {"path": "$order_info", "preserveNullAndEmptyArrays": True}},
+    ]
+
+    count_pipeline = list(pipeline)
+    count_pipeline.append({"$count": "total"})
+    total_count_result = list(razorpay_transactions.aggregate(count_pipeline))
+    total_count = total_count_result[0]["total"] if total_count_result else 0
+
+    pipeline.append({"$skip": page * limit})
+    pipeline.append({"$limit": limit})
+    pipeline.append(
+        {
+            "$project": {
+                "action": 1,
+                "order_id": {"$toString": "$order_id"},
+                "razorpay_payment_id": 1,
+                "razorpay_order_id": 1,
+                "payment_link_id": 1,
+                "status": 1,
+                "status_code": 1,
+                "reason": 1,
+                "error": 1,
+                "customer_name": "$order_info.customer_name",
+                "estimate_number": "$order_info.estimate_number",
+                "order_total": "$order_info.total_amount",
+                "payment_status": "$order_info.payment.status",
+                "created_at": {
+                    "$dateToString": {
+                        "date": "$created_at",
+                        "format": "%Y-%m-%d %H:%M:%S",
+                        "timezone": "Asia/Kolkata",
+                    }
+                },
+            }
+        }
+    )
+
+    txns = [serialize_mongo_document(doc) for doc in razorpay_transactions.aggregate(pipeline)]
+
+    total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+
+    # Distinct action list for the frontend filter dropdown.
+    actions = razorpay_transactions.distinct("action")
+
+    return {
+        "payments": txns,
+        "total_count": total_count,
+        "page": page,
+        "per_page": limit,
+        "total_pages": total_pages,
+        "actions": sorted(a for a in actions if a),
     }
 
 
