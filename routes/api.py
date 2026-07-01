@@ -41,6 +41,7 @@ from .cheques import router as cheques
 from .salesperson_customer_logins import router as salesperson_customer_logins
 from .linktree import router as linktree
 from .payments import router as payments
+from .tracking import router as tracking
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -68,6 +69,10 @@ router.include_router(linktree, prefix="/linktree", tags=["Link Tree"])
 router.include_router(payments, prefix="/payments", tags=["Payments"])
 # utility helpers (city list etc.) — read-only, non-sensitive
 router.include_router(util, prefix="/util", tags=["Util"])
+# public shipment tracking redirect (opened from WhatsApp "Track here" button).
+# Path matches the approved order_shipped template URL: /api/shipments/track/{n}.
+# Mounted separately (no JWT) even though the main /shipments router is protected.
+router.include_router(tracking, prefix="/shipments/track", tags=["Tracking"])
 # permissions: each endpoint carries its own HTTPBearer dependency
 router.include_router(permissions_router, prefix="/permissions", tags=["Permissions"])
 # webhooks: authenticated by Zoho IP / HMAC — NOT by user JWT

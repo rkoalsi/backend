@@ -1234,6 +1234,56 @@ def handle_customer(data: dict):
             print("No updates required for the customer.")
 
 
+def _resolve_customer_phone(customer_doc: dict) -> str:
+    """Best-effort phone lookup from a customers-collection document."""
+    if not customer_doc:
+        return ""
+    person = (customer_doc.get("contact_persons") or [{}])[0] if customer_doc.get("contact_persons") else {}
+    phone = (
+        customer_doc.get("mobile")
+        or customer_doc.get("phone")
+        or person.get("mobile")
+        or person.get("phone")
+    )
+    return str(phone) if phone else ""
+
+
+def notify_customer_whatsapp(contact_id: str, template_name: str, params: dict,
+                            notif: dict = None):
+    """Send a customer-facing WhatsApp template (looked up by name) to the customer
+    identified by their Zoho contact_id, plus an optional in-app notification to the
+    linked user account. Best-effort — never raises, and skips quietly if the
+    template hasn't been created/approved yet or the customer has no phone."""
+    try:
+        if not contact_id:
+            return
+        customer_doc = db.customers.find_one({"contact_id": contact_id})
+        phone = _resolve_customer_phone(customer_doc)
+        template_doc = db.templates.find_one({"name": template_name})
+        if not template_doc:
+            print(f"Template '{template_name}' not found, skipping customer WhatsApp")
+        elif phone:
+            template = serialize_mongo_document(dict(template_doc))
+            send_whatsapp(phone, {**template}, {**params})
+        else:
+            print(f"No phone for customer {contact_id}, skipping '{template_name}' WhatsApp")
+
+        # In-app notification for the linked (self-registered) customer user, if any.
+        if notif:
+            user_doc = db.users.find_one({"customer_id": contact_id}, {"_id": 1})
+            if user_doc:
+                create_notification(
+                    db,
+                    str(user_doc["_id"]),
+                    notif.get("type", "order_update"),
+                    notif.get("title", "Order update"),
+                    notif.get("body", ""),
+                    notif.get("link", "/customer/orders"),
+                )
+    except Exception as e:
+        print(f"[webhooks] failed to notify customer {contact_id} ({template_name}): {e}")
+
+
 def handle_accepted_estimate(data: dict):
     estimate = data.get("estimate")
     estimate_id = estimate.get("estimate_id", "")
@@ -1262,6 +1312,21 @@ def handle_accepted_estimate(data: dict):
                 f"Estimate {estimate_number} has been accepted by the customer.",
                 "/admin/orders",
             )
+
+        # Notify the customer that their order has been accepted.
+        customer_contact_id = estimate.get("customer_id", "")
+        customer_name = estimate.get("customer_name", "Customer")
+        notify_customer_whatsapp(
+            customer_contact_id,
+            "order_accepted",
+            {"customer_name": customer_name, "estimate_number": estimate_number},
+            notif={
+                "type": "order_accepted",
+                "title": f"Order accepted — {estimate_number}",
+                "body": f"Your order {estimate_number} has been accepted and is being processed.",
+                "link": "/customer/orders",
+            },
+        )
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
@@ -1543,6 +1608,55 @@ def handle_shipment(data: dict):
                     send_whatsapp(phone, {**template}, {**params})
                 except Exception as e:
                     print(f"Failed to send WhatsApp to {name}: {e}")
+
+        # Notify the customer of dispatch / delivery.
+        try:
+            customer_contact_id = invoice.get("customer_id", "")
+            ref_number = invoice_number if invoice_number != "" else salesorder_number
+            if shipment.get("status", "") == "delivered":
+                notify_customer_whatsapp(
+                    customer_contact_id,
+                    "order_delivered",
+                    {
+                        # Body order per approved template: {{1}}=name, {{2}}=order,
+                        # {{3}}=delivery_date, {{4}}=carrier_name, {{5}}=awb_no.
+                        "customer_name": customer_name,
+                        "invoice_number": ref_number,
+                        "delivery_date": params.get("delivery_date", ""),
+                        "carrier_name": tracking_partner,
+                        "awb_no": tracking_number,
+                    },
+                    notif={
+                        "type": "order_delivered",
+                        "title": f"Order delivered — {ref_number}",
+                        "body": f"Your order {ref_number} has been delivered. Thank you for shopping with us!",
+                        "link": "/customer/orders",
+                    },
+                )
+            else:
+                notify_customer_whatsapp(
+                    customer_contact_id,
+                    "order_shipped",
+                    {
+                        # Body params ({{1}}=customer_name, {{2}}=invoice_number,
+                        # {{3}}=tracking_number). `button_url` is NOT a body param —
+                        # it fills the "Track order" URL button, which points at our
+                        # public /track/{{1}} redirect so one button works for every
+                        # carrier domain.
+                        "customer_name": customer_name,
+                        "invoice_number": ref_number,
+                        "tracking_number": tracking_number,
+                        "button_url": tracking_number,
+                    },
+                    notif={
+                        "type": "order_shipped",
+                        "title": f"Order shipped — {ref_number}",
+                        "body": f"Your order {ref_number} is on its way. Tracking: {tracking_number}.",
+                        "link": "/customer/orders",
+                    },
+                )
+        except Exception as e:
+            print(f"[webhooks] failed to notify customer of shipment: {e}")
 
         # In-app notification for shipment → all valid recipients by user lookup
         try:
