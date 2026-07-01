@@ -396,3 +396,28 @@ async def download_customer_statement(
     except Exception as e:
         print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/addresses")
+def get_customer_addresses(
+    customer_id: str = Query(..., description="Zoho contact_id of the customer"),
+):
+    """
+    Return all addresses stored on the customer record.
+    """
+    customer = db.customers.find_one(
+        {"contact_id": customer_id},
+        {"addresses": 1, "billing_address": 1, "shipping_address": 1},
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    addresses = customer.get("addresses") or []
+    billing = customer.get("billing_address")
+    shipping = customer.get("shipping_address")
+
+    return {
+        "addresses": addresses,
+        "billing_address": billing,
+        "shipping_address": shipping,
+    }

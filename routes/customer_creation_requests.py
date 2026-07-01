@@ -6,6 +6,7 @@ from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import get_current_user
 from ..config.whatsapp import send_whatsapp
+from .notifications import create_notification
 import os
 import requests
 import logging
@@ -919,6 +920,7 @@ async def create_customer_request(
             "place_of_supply": request_data.place_of_supply,
             "customer_mail_id": request_data.customer_mail_id,
             "gst_treatment": request_data.gst_treatment,
+            "in_ex": request_data.in_ex,
             "pincode": request_data.pincode,
             "gst_certificate_url": request_data.gst_certificate_url,
             "pan_card_url": request_data.pan_card_url,
@@ -954,10 +956,20 @@ async def create_customer_request(
                         # "button_url": str(result.inserted_id)
                     }
 
-                    send_whatsapp(admin_user.get("phone"), template, params)
-                    logger.info(
-                        f"WhatsApp notification sent to admin: {admin_user.get('email')}"
-                    )
+                    # send_whatsapp(admin_user.get("phone"), template, params)
+                    # logger.info(
+                    #     f"WhatsApp notification sent to admin: {admin_user.get('email')}"
+                    # )
+
+                # In-app notification to admin
+                create_notification(
+                    db,
+                    str(admin_user["_id"]),
+                    "customer_request_submitted",
+                    f"New customer request: {request_data.customer_name}",
+                    f"{sp_first_name} submitted a new customer creation request.",
+                    f"/admin/customer_requests",
+                )
         except Exception as e:
             logger.error(f"Failed to send WhatsApp notification to admin: {e}")
 
@@ -1316,10 +1328,20 @@ async def update_request_status(
                                 "customer_contact_name": customer_contact_name,
                             }
 
-                            send_whatsapp(sp_user.get("phone"), template, params)
-                            logger.info(
-                                f"WhatsApp notification sent to sales person: {sp_user.get('email')}"
-                            )
+                            # send_whatsapp(sp_user.get("phone"), template, params)
+                            # logger.info(
+                            #     f"WhatsApp notification sent to sales person: {sp_user.get('email')}"
+                            # )
+
+                        # In-app notification to salesperson
+                        create_notification(
+                            db,
+                            str(sp_user["_id"]),
+                            "customer_request_status",
+                            f"Customer request {status_text}: {submitted_customer_name}",
+                            f"Your customer creation request has been {status_text.lower()}.",
+                            f"/customer_requests",
+                        )
         except Exception as e:
             logger.error(f"Failed to send WhatsApp notification to sales person: {e}")
 
@@ -1410,10 +1432,19 @@ async def add_comment(
                             "button_url": request_id,
                         }
 
-                        # Send WhatsApp message
-                        send_whatsapp(salesperson.get("phone"), template, params)
-                        print(
-                            f"WhatsApp notification sent to salesperson: {salesperson.get('email')}"
+                        # send_whatsapp(salesperson.get("phone"), template, params)
+                        # print(
+                        #     f"WhatsApp notification sent to salesperson: {salesperson.get('email')}"
+                        # )
+
+                        # In-app notification to salesperson
+                        create_notification(
+                            db,
+                            str(salesperson["_id"]),
+                            "customer_request_comment",
+                            f"Comment on customer request",
+                            f"{admin_name} added a comment on your customer request.",
+                            f"/customer_requests",
                         )
         except Exception as e:
             print(f"Failed to send WhatsApp notification: {e}")
@@ -1497,10 +1528,19 @@ async def add_reply(
                                 "button_url": request_id,
                             }
 
-                            # Send WhatsApp message
-                            send_whatsapp(admin.get("phone"), template, params)
-                            print(
-                                f"WhatsApp notification sent to admin: {admin.get('email')}"
+                            # send_whatsapp(admin.get("phone"), template, params)
+                            # print(
+                            #     f"WhatsApp notification sent to admin: {admin.get('email')}"
+                            # )
+
+                            # In-app notification to admin
+                            create_notification(
+                                db,
+                                str(admin["_id"]),
+                                "customer_request_reply",
+                                f"Reply on customer request",
+                                f"{reply_data.user_name} replied to your comment.",
+                                f"/admin/customer_requests",
                             )
         except Exception as e:
             print(f"Failed to send WhatsApp notification: {e}")

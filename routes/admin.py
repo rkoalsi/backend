@@ -33,6 +33,7 @@ from .webhooks import update_stock_lock, run_update_stock
 from .admin_return_orders import router as admin_return_orders_router
 from .admin_sales_by_customer import router as admin_sales_by_customer_router
 from .admin_external_links import router as admin_external_links_router
+from .admin_linktree import router as admin_linktree_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_brand_leads import router as admin_brand_leads_router
@@ -42,6 +43,10 @@ from .admin_careers import router as admin_careers_router
 from .admin_career_applications import router as admin_career_applications_router
 from .admin_contact_leads import router as admin_contact_submissions_router
 from .admin_chats import router as admin_chats_router
+from .admin_chats import contacts_router as admin_chatbot_customers_router
+from .admin_templates import router as admin_templates_router
+from .admin_segments import router as admin_segments_router
+from .admin_campaigns import router as admin_campaigns_router
 from ..config.auth import JWTBearer
 import pandas as pd
 from io import BytesIO
@@ -62,10 +67,109 @@ org_id = os.getenv("ORG_ID")
 client = get_client()
 db = get_database()
 
+# Module-level cache for /stats — avoids hammering the DB on every page load
+_stats_cache: dict = {"data": None, "ts": 0.0}
+_STATS_TTL = 60  # seconds
+
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
 users_collection = db["users"]
+
+def get_upcoming_stock_for_products(pre_order_products: list) -> dict:
+    """
+    For a list of pre-order products, return a dict mapping product _id (str)
+    to a dict {"upcoming_stock", "inward_date", "eta_port_date"} sourced from
+    the latest open/non-cancelled purchase order whose vendor matches the
+    product's brand. The inward / ETA-at-port dates come from the matching
+    brand_orders document (joined on purchaseorder_number).
+    """
+    if not pre_order_products:
+        return {}
+
+    brand_names = list({p.get("brand") for p in pre_order_products if p.get("brand")})
+    item_id_to_product_id = {
+        p.get("item_id"): str(p["_id"])
+        for p in pre_order_products
+        if p.get("item_id")
+    }
+
+    if not brand_names or not item_id_to_product_id:
+        return {}
+
+    # brand name → vendor_id
+    brand_docs = list(db.brands.find(
+        {"name": {"$in": brand_names}},
+        {"name": 1, "vendor_id": 1}
+    ))
+    brand_to_vendor = {b["name"]: b.get("vendor_id") for b in brand_docs if b.get("vendor_id")}
+
+    vendor_ids = list(set(brand_to_vendor.values()))
+    if not vendor_ids:
+        return {}
+
+    # product item_id → vendor_id expected for that product
+    item_id_to_vendor = {}
+    for p in pre_order_products:
+        iid = p.get("item_id")
+        brand = p.get("brand")
+        if iid and brand and brand in brand_to_vendor:
+            item_id_to_vendor[iid] = brand_to_vendor[brand]
+
+    # Fetch open/non-cancelled POs for these vendors that contain these items
+    open_item_ids = list(item_id_to_vendor.keys())
+    pos = list(db.purchase_orders.find(
+        {
+            "vendor_id": {"$in": vendor_ids},
+            "status": {"$nin": ["cancelled"]},
+            "line_items": {"$elemMatch": {"item_id": {"$in": open_item_ids}}},
+        },
+        {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
+    ).sort("date", -1))
+
+    # Walk POs newest-first; take the first match per item_id
+    upcoming_by_item: dict = {}
+    po_number_by_item: dict = {}
+    seen: set = set()
+    for po in pos:
+        po_vendor = po.get("vendor_id")
+        for li in po.get("line_items", []):
+            iid = li.get("item_id")
+            if not iid or iid in seen:
+                continue
+            if item_id_to_vendor.get(iid) != po_vendor:
+                continue
+            qty = float(li.get("quantity") or 0)
+            qty_received = float(li.get("quantity_received") or 0)
+            upcoming_by_item[iid] = max(0, int(qty - qty_received))
+            if po.get("purchaseorder_number"):
+                po_number_by_item[iid] = po["purchaseorder_number"]
+            seen.add(iid)
+
+    # Join to brand_orders for inward / ETA-at-port dates (keyed by PO number)
+    dates_by_po: dict = {}
+    po_numbers = list(set(po_number_by_item.values()))
+    if po_numbers:
+        for bo in db.brand_orders.find(
+            {"purchaseorder_number": {"$in": po_numbers}},
+            {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
+        ):
+            dates_by_po[bo["purchaseorder_number"]] = {
+                "inward_date": bo.get("inward_date"),
+                "eta_port_date": bo.get("eta_port_date"),
+            }
+
+    # Map back to product _id
+    result = {}
+    for iid, pid in item_id_to_product_id.items():
+        dates = dates_by_po.get(po_number_by_item.get(iid)) or {}
+        result[pid] = {
+            "upcoming_stock": upcoming_by_item.get(iid, 0),
+            "inward_date": dates.get("inward_date"),
+            "eta_port_date": dates.get("eta_port_date"),
+        }
+    return result
+
 
 # Connect to attendance database
 attendance_db = client.get_database("attendance")
@@ -299,6 +403,9 @@ def get_attendance_stats(start_of_today_ist, now_ist):
 
 @router.get("/stats")
 async def get_stats():
+    if _stats_cache["data"] and (time.time() - _stats_cache["ts"]) < _STATS_TTL:
+        return _stats_cache["data"]
+
     try:
         # Pre-calculate common date values
         ist = tz("Asia/Kolkata")
@@ -373,6 +480,9 @@ async def get_stats():
             **attendance_stats,
             **product_additions_stats
         }
+
+        _stats_cache["data"] = result
+        _stats_cache["ts"] = time.time()
 
         return result
 
@@ -594,6 +704,18 @@ def get_product_additions_by_type_stats():
         # Step 2: Unwind the products array to work with individual products
         {
             "$unwind": "$products"
+        },
+        # Step 2b: Normalize added_by so null/""/unknown all become "sales_person"
+        {
+            "$addFields": {
+                "products.added_by": {
+                    "$cond": {
+                        "if": {"$in": ["$products.added_by", ["customer", "admin"]]},
+                        "then": "$products.added_by",
+                        "else": "sales_person"
+                    }
+                }
+            }
         },
         # Step 3: Group by added_by to count products by type
         {
@@ -992,6 +1114,7 @@ def get_products(
     stock: Optional[str] = None,  # e.g. 'zero' or 'gt_zero'
     new_arrivals: Optional[bool] = None,
     missing_info_products: Optional[bool] = None,
+    pre_order: Optional[bool] = None,
     sort_by: Optional[str] = None,
 ):
     """
@@ -1017,14 +1140,13 @@ def get_products(
 
         # 3) New Arrivals (depending on how you define "new")
         if new_arrivals:
-            # If your DB has a boolean field `is_new`
-            # query["is_new"] = True
-
-            # Or if it's based on creation date (last 30 days, etc.)
             from datetime import datetime, timedelta
 
             ninty_days_ago = datetime.now() - timedelta(days=90)
             query["created_at"] = {"$gte": ninty_days_ago}
+
+        if pre_order:
+            query["pre_order"] = True
 
         if missing_info_products:
             query["$and"] = [
@@ -1051,19 +1173,34 @@ def get_products(
         # Pagination
         skip = page * limit
 
+        if sort_by == "catalogue":
+            sort_spec = [("catalogue_order", 1)]
+        elif sort_by == "latest":
+            sort_spec = [("created_at", -1)]
+        else:
+            sort_spec = [("status", 1), ("name", 1)]
+
         docs_cursor = (
             products_collection.find(query)
-            .sort(
-                [("catalogue_order", 1)]
-                if sort_by == "catalogue"
-                else [("status", 1), ("name", 1)]
-            )
+            .sort(sort_spec)
             .skip(skip)
             .limit(limit)
         )
         print(json.dumps(query, indent=4))
         total_count = products_collection.count_documents(query)
         products = [serialize_mongo_document(doc) for doc in docs_cursor]
+
+        # Enrich pre-order products with upcoming stock from purchase orders
+        pre_order_prods = [p for p in products if p.get("pre_order")]
+        if pre_order_prods:
+            upcoming_map = get_upcoming_stock_for_products(pre_order_prods)
+            for p in products:
+                if p.get("pre_order"):
+                    info = upcoming_map.get(p["_id"]) or {}
+                    p["upcoming_stock"] = info.get("upcoming_stock", 0)
+                    p["inward_date"] = info.get("inward_date")
+                    p["eta_port_date"] = info.get("eta_port_date")
+
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
         # Validate page number
         if page > total_pages and total_pages != 0:
@@ -1303,9 +1440,8 @@ def get_customers(
         total_count = customers_collection.count_documents(query)
         customers = [serialize_mongo_document(doc) for doc in cursor]
         total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
-        # Validate page number
         if page > total_pages and total_pages != 0:
-            raise HTTPException(status_code=400, detail="Page number out of range")
+            customers = []
 
         return {
             "customers": customers,
@@ -1314,6 +1450,8 @@ def get_customers(
             "per_page": limit,
             "total_pages": total_pages,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
 
@@ -1491,6 +1629,7 @@ def read_all_orders(
     ),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    has_pre_order: Optional[bool] = Query(None, description="Filter orders containing pre-order items"),
 ):
     """
     Retrieve all orders for admin, with pagination and optional filters,
@@ -1528,6 +1667,9 @@ def read_all_orders(
     if amount:
         # Assuming you want to filter for total_amount > 0 when 'amount' is provided
         initial_match_conditions["total_amount"] = {"$gt": 0}
+
+    if has_pre_order:
+        initial_match_conditions["products"] = {"$elemMatch": {"pre_order": True}}
 
     # Now build our aggregation pipeline
     pipeline = [
@@ -1584,6 +1726,10 @@ def read_all_orders(
                 "estimate_created": 1,
                 "estimate_number": 1,
                 "estimate_id": 1,
+                "pre_order_estimate_url": 1,
+                "pre_order_estimate_created": 1,
+                "pre_order_estimate_number": 1,
+                "pre_order_estimate_id": 1,
                 "reference_number": 1,
                 "spreadsheet_url": 1,
                 "spreadsheet_created": 1,
@@ -1703,6 +1849,8 @@ async def export_orders(
                 "Products": {"$size": {"$ifNull": ["$products", []]}},
                 "Estimate Url": "$estimate_url",
                 "Estimate Number": "$estimate_number",
+                "Pre-Order Estimate Url": "$pre_order_estimate_url",
+                "Pre-Order Estimate Number": "$pre_order_estimate_number",
                 "Reference Number": "$reference_number",
                 # ... include any other fields you want
                 # Convert the "created_at" date to a string in IST
@@ -1801,25 +1949,18 @@ def read_all_orders(
     today_str = date.today().isoformat()
     today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Query to match invoices with a due_date less than today
-    # Handle both string and date formats for due_date
+    # Broad pre-filter: unpaid invoices past due (mixed string/date types)
     base_query = {
         "$or": [
-            # Case 1: due_date is a string
-            {
-                "due_date": {"$type": "string", "$lt": today_str}
-            },
-            # Case 2: due_date is a date
-            {
-                "due_date": {"$type": "date", "$lt": today_date}
-            }
+            {"due_date": {"$type": "string", "$lt": today_str}},
+            {"due_date": {"$type": "date", "$lt": today_date}},
         ],
         "status": {"$nin": ["paid", "void"]}
     }
 
     # Additional filters
     additional_conditions = []
-    
+
     if sales_person:
         escaped_sales_person = re.escape(sales_person)
         additional_conditions.append({
@@ -1853,28 +1994,51 @@ def read_all_orders(
     else:
         query = base_query
 
-    # Basic query stage for the aggregation pipeline
-    match_stage = {"$match": query}
+    # Compute overdue_by_days early so we can filter and sort on it reliably
+    overdue_days_expr = {
+        "$dateDiff": {
+            "startDate": {
+                "$cond": {
+                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                    "then": {"$dateFromString": {"dateString": "$due_date"}},
+                    "else": "$due_date",
+                }
+            },
+            "endDate": "$$NOW",
+            "unit": "day",
+        }
+    }
 
-    # Count total invoices matching the query (for frontend pagination)
-    total_count = db.invoices.count_documents(query)
+    # Accurate count: compute overdue_by_days then filter to <= 365
+    count_pipeline = [
+        {"$match": query},
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$count": "total"},
+    ]
+    count_result = list(db.invoices.aggregate(count_pipeline))
+    total_count = count_result[0]["total"] if count_result else 0
 
     # Build the aggregation pipeline
     pipeline = [
-        match_stage,
-        # Project only the necessary fields
+        {"$match": query},
+        # Compute overdue_by_days before lookups so we can filter on it
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        # Enforce 365-day cap reliably on the computed field
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
         {
@@ -1887,16 +2051,14 @@ def read_all_orders(
         },
         {
             "$unwind": {
-                "path": "$user_created_by",  # note the change from "$note_created_by" to "$user_created_by"
+                "path": "$user_created_by",
                 "preserveNullAndEmptyArrays": True,
             }
         },
-        # Project the necessary fields and replace created_by with the user's first name
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                # Handle both string and date formats for due_date
                 "due_date": {
                     "$cond": {
                         "if": {"$eq": [{"$type": "$due_date"}, "string"]},
@@ -1915,31 +2077,16 @@ def read_all_orders(
                 "invoice_id": 1,
                 "line_items": 1,
                 "created_by_name": 1,
-                "overdue_by_days": {
-                    "$dateDiff": {
-                        "startDate": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                                "then": {"$dateFromString": {"dateString": "$due_date"}},
-                                "else": "$due_date"
-                            }
-                        },
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                    }
-                },
+                "overdue_by_days": 1,
                 "invoice_notes": 1,
-                # Replace the invoice note's created_by with the user's first name
                 "note_created_by_name": "$user_created_by.first_name",
             }
         },
-        # Now sort by the converted due_date
-        {"$sort": {"due_date": -1}},
-        {"$skip": page * limit},  # Skip the appropriate number of documents
-        {"$limit": limit},  # Limit the number of documents returned
+        {"$skip": page * limit},
+        {"$limit": limit},
     ]
     # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline)
+    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
 
     # Convert each Mongo document to a JSON-serializable Python dict
     inv = [serialize_mongo_document(doc) for doc in invoices_cursor]
@@ -1958,6 +2105,80 @@ def read_all_orders(
     }
 
 
+@router.get("/payments_due/aging_stats")
+def get_payments_due_aging_stats(
+    sales_person: str = Query(None, description="Filter by sales person"),
+):
+    """
+    Return aggregate aging bucket stats (counts + balances) across ALL overdue invoices.
+    Buckets: 0-30, 31-60, 61+ days overdue.
+    """
+    today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    due_date_filter = {"$or": [
+        {"due_date": {"$type": "string", "$lt": today_str}},
+        {"due_date": {"$type": "date", "$lt": today_date}},
+    ]}
+
+    and_clauses = [due_date_filter, {"status": {"$nin": ["paid", "void"]}}]
+
+    if sales_person:
+        escaped = re.escape(sales_person)
+        and_clauses.append({"$or": [
+            {"cf_sales_person": {"$regex": f"^{escaped}$", "$options": "i"}},
+            {"salesperson_name": {"$regex": f"^{escaped}$", "$options": "i"}},
+        ]})
+
+    base_query = {"$and": and_clauses}
+
+    pipeline = [
+        {"$match": base_query},
+        {"$project": {
+            "balance": 1,
+            "overdue_by_days": {
+                "$dateDiff": {
+                    "startDate": {
+                        "$cond": {
+                            "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                            "then": {"$dateFromString": {"dateString": "$due_date"}},
+                            "else": "$due_date",
+                        }
+                    },
+                    "endDate": "$$NOW",
+                    "unit": "day",
+                }
+            },
+        }},
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$group": {
+            "_id": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$lte": ["$overdue_by_days", 30]}, "then": "current"},
+                        {"case": {"$lte": ["$overdue_by_days", 60]}, "then": "overdue30"},
+                    ],
+                    "default": "overdue60",
+                }
+            },
+            "count": {"$sum": 1},
+            "balance": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}},
+        }},
+    ]
+
+    rows = list(db.invoices.aggregate(pipeline))
+    result = {
+        "current": {"count": 0, "balance": 0},
+        "overdue30": {"count": 0, "balance": 0},
+        "overdue60": {"count": 0, "balance": 0},
+    }
+    for row in rows:
+        key = row["_id"]
+        if key in result:
+            result[key] = {"count": row["count"], "balance": round(row["balance"], 2)}
+    return result
+
+
 @router.get("/payments_due/download_csv")
 def download_payments_due_csv(sales_person: str):
     """
@@ -1967,18 +2188,11 @@ def download_payments_due_csv(sales_person: str):
     today_str = date.today().isoformat()
     today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Query to match invoices with a due_date less than today and status not in ["paid"]
-    # Handle both string and date formats for due_date
+    # Broad pre-filter: unpaid invoices past due
     base_query = {
         "$or": [
-            # Case 1: due_date is a string
-            {
-                "due_date": {"$type": "string", "$lt": today_str}
-            },
-            # Case 2: due_date is a date
-            {
-                "due_date": {"$type": "date", "$lt": today_date}
-            }
+            {"due_date": {"$type": "string", "$lt": today_str}},
+            {"due_date": {"$type": "date", "$lt": today_date}},
         ],
         "status": {"$nin": ["paid", "void"]}
     }
@@ -2005,36 +2219,42 @@ def download_payments_due_csv(sales_person: str):
         match_stage,
         {
             "$addFields": {
-                # Normalize due_date for sorting
-                "normalized_due_date": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
+                "overdue_by_days": {
+                    "$dateDiff": {
+                        "startDate": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                                "then": {"$dateFromString": {"dateString": "$due_date"}},
+                                "else": "$due_date",
+                            }
+                        },
+                        "endDate": "$$NOW",
+                        "unit": "day",
                     }
                 }
             }
         },
-        {"$sort": {"normalized_due_date": -1}},
+        # Enforce 365-day cap on the computed field
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
         {
             "$project": {
                 "created_at": 1,
                 "total": 1,
-                # Handle both string and date formats for due_date
                 "due_date": {
                     "$cond": {
                         "if": {"$eq": [{"$type": "$due_date"}, "string"]},
@@ -2043,7 +2263,6 @@ def download_payments_due_csv(sales_person: str):
                     }
                 },
                 "balance": 1,
-                # For CSV purposes, you may output the status directly if needed
                 "status": {"$toString": "overdue"},
                 "cf_sales_person": 1,
                 "created_by_name": 1,
@@ -2054,26 +2273,14 @@ def download_payments_due_csv(sales_person: str):
                 "invoice_number": 1,
                 "invoice_id": 1,
                 "line_items": 1,
-                "overdue_by_days": {
-                    "$dateDiff": {
-                        "startDate": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                                "then": {"$dateFromString": {"dateString": "$due_date"}},
-                                "else": "$due_date"
-                            }
-                        },
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                    }
-                },
+                "overdue_by_days": 1,
                 "invoice_notes": 1,
             }
         },
     ]
 
     # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline)
+    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
     invoices = [serialize_mongo_document(doc) for doc in invoices_cursor]
 
     # Create a CSV in memory
@@ -2308,9 +2515,13 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
             # Add new image to the end of the array
             updated_images = current_images + [s3_url]
 
+            # Keep image_url in sync with the first image in the array
+            primary_image = updated_images[0]
+
             # Update the product with the new images array
             products_collection.update_one(
-                {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+                {"_id": ObjectId(product_id)},
+                {"$set": {"images": updated_images, "image_url": primary_image}},
             )
 
             return {
@@ -2383,10 +2594,12 @@ async def delete_image(product_id: str = Form(...), image_url: str = Form(...)):
 
         # Remove image from array
         updated_images = [img for img in current_images if img != image_url]
+        new_primary = updated_images[0] if updated_images else None
 
         # Update the product
+        update_fields = {"images": updated_images, "image_url": new_primary}
         result = products_collection.update_one(
-            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+            {"_id": ObjectId(product_id)}, {"$set": update_fields}
         )
 
         if result.modified_count > 0:
@@ -2430,7 +2643,8 @@ async def make_primary_image(product_id: str = Form(...), image_url: str = Form(
 
         # Update the product
         result = products_collection.update_one(
-            {"_id": ObjectId(product_id)}, {"$set": {"images": updated_images}}
+            {"_id": ObjectId(product_id)},
+            {"$set": {"images": updated_images, "image_url": image_url}},
         )
 
         if result.modified_count > 0:
@@ -3018,6 +3232,7 @@ async def update_product(
     stock: Optional[int] = Form(None),
     status: Optional[str] = Form(None),
     catalogue_order: Optional[int] = Form(None),
+    pre_order: Optional[str] = Form(None),
     files: Optional[List[UploadFile]] = File(None),
     replace_images: Optional[bool] = Form(False)  # Whether to replace all images or append
 ):
@@ -3046,22 +3261,25 @@ async def update_product(
         # Build update dict from form fields
         form_data = {
             "name": name,
-            "brand": brand, 
+            "brand": brand,
             "category": category,
             "sub_category": sub_category,
             "series": series,
             "cf_sku_code": cf_sku_code,
-            "upc_code": upc_code,  # Added this field to the form_data dict
-            "catalogue_page": catalogue_page,  # Added this field too if needed
+            "upc_code": upc_code,
+            "catalogue_page": catalogue_page,
             "rate": rate,
             "stock": stock,
             "status": status,
             "catalogue_order": catalogue_order
         }
-        
+
         for field, value in form_data.items():
             if value is not None:
                 update_dict[field] = value
+
+        if pre_order is not None:
+            update_dict["pre_order"] = pre_order.lower() == "true"
 
         # Handle image uploads if files are provided
         uploaded_image_urls = []
@@ -3260,6 +3478,12 @@ router.include_router(
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
+    admin_linktree_router,
+    prefix="/linktree",
+    tags=["Admin Link Tree"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
     admin_customer_analytics_router,
     prefix="/customer_analytics",
     tags=["Admin Customer Analytics"],
@@ -3313,3 +3537,149 @@ router.include_router(
     tags=["Admin Chats"],
     dependencies=[Depends(JWTBearer())],
 )
+router.include_router(
+    admin_chatbot_customers_router,
+    prefix="/chatbot_customers",
+    tags=["Admin Chatbot Customers"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_templates_router,
+    prefix="/templates",
+    tags=["Admin WhatsApp Templates"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_segments_router,
+    prefix="/segments",
+    tags=["Admin Customer Segments"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_campaigns_router,
+    prefix="/campaigns",
+    tags=["Admin WhatsApp Campaigns"],
+    dependencies=[Depends(JWTBearer())],
+)
+
+
+# ─── Pre-order bulk management ────────────────────────────────────────────────
+
+@router.get("/pre-order/brands", dependencies=[Depends(JWTBearer())])
+def get_pre_order_brands():
+    """Return brands that have a vendor_id (i.e. can have purchase orders)."""
+    brands = list(db.brands.find(
+        {"vendor_id": {"$exists": True, "$ne": None, "$ne": ""}},
+        {"name": 1, "vendor_id": 1, "_id": 0}
+    ).sort("name", 1))
+    return [{"name": b["name"], "vendor_id": b["vendor_id"]} for b in brands]
+
+
+@router.get("/pre-order/purchase-orders", dependencies=[Depends(JWTBearer())])
+def get_pre_order_purchase_orders(brand: str = Query(...)):
+    """Return purchase orders for the given brand(s)'s vendor(s), newest first.
+    brand may be a single name or comma-separated names (e.g. "Dogfest,Catfest")."""
+    brand_names = [b.strip() for b in brand.split(",") if b.strip()]
+    vendor_ids = []
+    for bname in brand_names:
+        doc = db.brands.find_one({"name": bname}, {"vendor_id": 1})
+        if doc and doc.get("vendor_id"):
+            vendor_ids.append(doc["vendor_id"])
+    if not vendor_ids:
+        raise HTTPException(status_code=404, detail="Brand not found or has no vendor")
+    pos = list(db.purchase_orders.find(
+        {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]}},
+        {"purchaseorder_number": 1, "date": 1, "status": 1, "total": 1, "_id": 0}
+    ).sort("date", -1).limit(50))
+    return serialize_mongo_document(pos)
+
+
+@router.get("/pre-order/line-items", dependencies=[Depends(JWTBearer())])
+def get_pre_order_line_items(po_number: str = Query(...)):
+    """Return line items for a PO, enriched with pre_order status and upcoming_stock from products."""
+    po = db.purchase_orders.find_one(
+        {"purchaseorder_number": po_number},
+        {"line_items": 1, "_id": 0}
+    )
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    line_items = [li for li in po.get("line_items", []) if li.get("item_id")]
+    if not line_items:
+        return []
+
+    # Logistics dates for this PO (inward / ETA at port), if tracked in brand_orders
+    brand_order = db.brand_orders.find_one(
+        {"purchaseorder_number": po_number},
+        {"inward_date": 1, "eta_port_date": 1, "_id": 0}
+    ) or {}
+    inward_date = brand_order.get("inward_date")
+    eta_port_date = brand_order.get("eta_port_date")
+
+    item_ids = [li["item_id"] for li in line_items]
+    products_map = {
+        p["item_id"]: p
+        for p in db.products.find(
+            {"item_id": {"$in": item_ids}},
+            {"item_id": 1, "pre_order": 1, "cf_sku_code": 1, "name": 1, "_id": 0}
+        )
+        if p.get("item_id")
+    }
+
+    result = []
+    for li in line_items:
+        iid = li.get("item_id")
+        prod = products_map.get(iid, {})
+        qty = float(li.get("quantity") or 0)
+        qty_received = float(li.get("quantity_received") or 0)
+        result.append({
+            "item_id": iid,
+            "name": li.get("name") or prod.get("name") or "",
+            "sku": prod.get("cf_sku_code") or "",
+            "quantity": qty,
+            "quantity_received": qty_received,
+            "upcoming_stock": max(0, int(qty - qty_received)),
+            "pre_order": prod.get("pre_order", False),
+            "in_products": bool(prod),
+            "inward_date": inward_date,
+            "eta_port_date": eta_port_date,
+        })
+    return result
+
+
+@router.post("/pre-order/mark", dependencies=[Depends(JWTBearer())])
+def mark_pre_order_products(payload: dict):
+    """
+    Mark item_ids as pre_order=True.
+    If unmark_others=True, set pre_order=False on remaining items from the same PO.
+    """
+    item_ids = payload.get("item_ids", [])
+    po_number = payload.get("po_number", "")
+    unmark_others = payload.get("unmark_others", True)
+
+    marked = 0
+    unmarked = 0
+
+    if item_ids:
+        res = db.products.update_many(
+            {"item_id": {"$in": item_ids}},
+            {"$set": {"pre_order": True}}
+        )
+        marked = res.modified_count
+
+    if unmark_others and po_number:
+        po = db.purchase_orders.find_one(
+            {"purchaseorder_number": po_number},
+            {"line_items": 1}
+        )
+        if po:
+            all_ids = [li["item_id"] for li in po.get("line_items", []) if li.get("item_id")]
+            unmark_ids = [iid for iid in all_ids if iid not in item_ids]
+            if unmark_ids:
+                res2 = db.products.update_many(
+                    {"item_id": {"$in": unmark_ids}},
+                    {"$set": {"pre_order": False}}
+                )
+                unmarked = res2.modified_count
+
+    return {"marked": marked, "unmarked": unmarked}

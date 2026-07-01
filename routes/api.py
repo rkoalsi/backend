@@ -35,6 +35,12 @@ from .blog import router as blog
 from .customer_activity import router as customer_activity
 from .customer_address_details import router as customer_address_details
 from .chats import router as chats
+from .notifications import router as notifications
+from .expense_estimates import router as expense_estimates
+from .admin_expense_estimates import router as admin_expense_estimates
+from .cheques import router as cheques
+from .salesperson_customer_logins import router as salesperson_customer_logins
+from .linktree import router as linktree
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -56,6 +62,8 @@ router.include_router(contact_submissions, prefix="/contact_submissions", tags=[
 router.include_router(customer_creation_requests, prefix="/customer_creation_requests", tags=["Customer Creation Requests"])
 # public blog
 router.include_router(blog, prefix="/blog", tags=["Blog"])
+# public link-tree landing page (content managed via /admin/linktree)
+router.include_router(linktree, prefix="/linktree", tags=["Link Tree"])
 # utility helpers (city list etc.) — read-only, non-sensitive
 router.include_router(util, prefix="/util", tags=["Util"])
 # permissions: each endpoint carries its own HTTPBearer dependency
@@ -112,7 +120,7 @@ router.include_router(
     external_links, prefix="/external_links", tags=["External Links"], dependencies=_jwt
 )
 router.include_router(
-    attendance, prefix="/attendance", tags=["Attendance"], dependencies=_jwt
+    attendance, prefix="/attendance", tags=["Attendance"]
 )
 router.include_router(
     customer_analytics, prefix="/customer_analytics", tags=["Customer Analytics"], dependencies=_jwt
@@ -130,7 +138,25 @@ router.include_router(
     customer_address_details, prefix="/customer_address_details", tags=["Customer Address Details"], dependencies=_jwt
 )
 router.include_router(
-    chats, prefix="/chats", tags=["Chats"], dependencies=_jwt
+    chats, prefix="/chats", tags=["Chats"]
+)
+router.include_router(
+    notifications, prefix="/notifications", tags=["Notifications"], dependencies=_jwt
+)
+router.include_router(
+    expense_estimates, prefix="/expense-estimates", tags=["Expense Estimates"], dependencies=_jwt
+)
+router.include_router(
+    admin_expense_estimates, prefix="/admin/expense-estimates", tags=["Admin Expense Estimates"], dependencies=_jwt
+)
+router.include_router(
+    cheques, prefix="/cheques", tags=["Cheques"], dependencies=_jwt
+)
+router.include_router(
+    salesperson_customer_logins,
+    prefix="/salesperson/customer-logins",
+    tags=["Salesperson Customer Logins"],
+    dependencies=_jwt,
 )
 
 @router.get("/")

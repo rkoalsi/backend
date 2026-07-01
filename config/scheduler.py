@@ -4,6 +4,7 @@ import logging, os, smtplib
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dotenv import load_dotenv
 from .whatsapp import send_whatsapp
@@ -37,10 +38,43 @@ def _job_event_listener(event):
         logging.info(f"Job {event.job_id} completed successfully!")
 
 
+def dispatch_scheduled_campaigns():
+    """Recurring job: dispatch any WhatsApp campaigns whose scheduled time has
+    arrived. Runs each due campaign's send loop in-process. Lazy-imports the
+    campaign engine to avoid an import cycle at module load."""
+    try:
+        from ..routes.admin_campaigns import campaigns_col, _run_campaign_send
+        from datetime import datetime as _dt
+
+        now = _dt.now()
+        due = list(campaigns_col.find({"status": "scheduled", "scheduled_at": {"$lte": now}}))
+        for c in due:
+            cid = str(c["_id"])
+            # Claim it first so a slow send doesn't get re-dispatched next tick.
+            campaigns_col.update_one(
+                {"_id": c["_id"], "status": "scheduled"},
+                {"$set": {"status": "sending", "started_at": now}},
+            )
+            logging.info(f"[campaigns] dispatching scheduled campaign {cid}")
+            _run_campaign_send(cid)
+    except Exception as e:
+        logging.error(f"[campaigns] scheduled dispatch failed: {e}")
+
+
 def notification_scheduler_startup():
     logging.info("Starting Payment Reminders Notifications Scheduler...")
     scheduler.start()
     scheduler.add_listener(_job_event_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
+    # Poll for due WhatsApp campaigns once a minute.
+    scheduler.add_job(
+        func=dispatch_scheduled_campaigns,
+        trigger=IntervalTrigger(minutes=1),
+        id="dispatch_scheduled_campaigns",
+        replace_existing=True,
+        misfire_grace_time=120,
+        coalesce=True,
+        max_instances=1,
+    )
     logging.info("Scheduler started.")
 
 

@@ -3,6 +3,7 @@ from ..config.root import get_database, serialize_mongo_document
 from ..config.scheduler import schedule_job, remove_scheduled_jobs
 from ..config.whatsapp import send_whatsapp
 from .helpers import get_access_token
+from .notifications import create_notification
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
 from dateutil.parser import parse
@@ -322,6 +323,17 @@ def handle_item(data: dict, background_tasks: BackgroundTasks):
                     template_doc=template,
                     params=params,
                 )
+                if person.get("phone"):
+                    user_doc = db.users.find_one({"phone": person["phone"]}, {"_id": 1})
+                    if user_doc:
+                        create_notification(
+                            db,
+                            str(user_doc["_id"]),
+                            "new_product",
+                            f"New product: {item.get('name', '')}",
+                            f"{brand_name} — {item.get('name', '')} has been added.",
+                            "/admin/products",
+                        )
 
             background_tasks.add_task(run_update_stock)
         else:
@@ -485,174 +497,49 @@ def get_zoho_stock(day=None, month=None, year=None, col_name="zoho Stock"):
     sheet_name = f'{now_date.strftime("%b")} {year}'
     print(f"Fetching stock for {now_date.strftime('%b')}-{year} with date {to_date}")
 
-    warehouse_stock = []
+    _PUPSCRIBE_LOCATION_ID = "3220178000000403010"
     access_token = get_access_token('inventory')
     headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-    # Define target warehouse names (both formats for compatibility)
-    target_warehouses = {
-        "pupscribe enterprises private limited",
-        "Pupscribe Enterprises Private Limited",
-    }
-
-    try:
-        # Fetch the total number of pages
-        response = fetch_with_retries(
-            url=TOTAL_WAREHOUSE_URL.format(date1=to_date, org_id=org_id),
-            headers=headers,
-            retries=3,
-            timeout=10,
-            page_number="Total Pages",
-        )
-        if response is None:
-            print("Failed to retrieve the total number of pages.")
-            return []
-
-        total_pages = int(response.json().get("page_context", {}).get("total_pages", 1))
-        print(f"Total pages to fetch: {total_pages}")
-
-        # Define the maximum number of concurrent threads
-        max_workers = 5
-        failed_pages = []
-
-        def fetch_page(page_number):
-            page_url = WAREHOUSE_URL.format(
-                page=page_number, date1=to_date, org_id=org_id
-            )
-            response = fetch_with_retries(
-                url=page_url,
-                headers=headers,
-                retries=3,
-                timeout=10,
-                page_number=page_number,
-            )
-            if response is not None:
-                try:
-                    page_data = response.json()
-                    warehouse_stock_info = page_data.get("warehouse_stock_info", [])
-                    return warehouse_stock_info
-                except json.JSONDecodeError as e:
-                    print(f"Page {page_number}: JSON decode error: {e}")
-                    return None
-            else:
-                return None
-
-        # Fetch all pages concurrently
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_page = {
-                executor.submit(fetch_page, i): i for i in range(1, total_pages + 1)
-            }
-            for future in as_completed(future_to_page):
-                page = future_to_page[future]
-                try:
-                    data = future.result()
-                    if data is not None:
-                        warehouse_stock.extend(data)
-                    else:
-                        failed_pages.append(page)
-                except Exception as exc:
-                    print(f"Page {page} generated an exception: {exc}")
-                    failed_pages.append(page)
-
-        # Retry failed pages
-        if failed_pages:
-            print(f"Retrying failed pages: {failed_pages}")
-            for page in failed_pages:
-                data = fetch_page(page)
-                if data is not None:
-                    warehouse_stock.extend(data)
-                else:
-                    print(f"Page {page}: Failed to fetch on retry.")
-
-    except Exception as e:
-        print(f"Failed to fetch total pages or initial data: {e}")
-        return []
-
-    print(f"Total warehouse stock items fetched: {len(warehouse_stock)}")
-
-    # Process warehouse stock data - handle both API structures
+    # Use inventorysummary with location_id — returns WH-specific quantity_available_for_sale
+    # (the warehouse report API stopped populating warehouse_name in sub-entries as of 2026-05)
     arr = []
-    for item in warehouse_stock:
-        if not isinstance(item, dict):
-            print(f"Skipping item {item} because it is not a dictionary")
-            continue
-        # Handle new API structure with "warehouse_stock" array
-        if "warehouse_stock" in item:
-            for warehouse_entry in item["warehouse_stock"]:
-                warehouse_name = warehouse_entry.get("warehouse_name", "")
-                if warehouse_name in target_warehouses:
-                    try:
-                        stock_quantity = int(
-                            warehouse_entry.get("quantity_available_for_sale", 0)
-                        )
-                        item_name = warehouse_entry.get("item_name", "").strip().lower()
-                        arr.append(
-                            {
-                                "name": item_name,
-                                "stock": stock_quantity,
-                            }
-                        )
-                        print(f"Added stock for '{item_name}': {stock_quantity}")
-                        # Debug: Log products with brackets
-                        if "(" in item_name or ")" in item_name:
-                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-                        break  # Found the warehouse we want
-                    except ValueError:
-                        print(
-                            f"Invalid stock quantity for item '{warehouse_entry.get('item_name')}': {warehouse_entry.get('quantity_available_for_sale')}"
-                        )
+    page = 1
+    while True:
+        inv_url = (
+            f"https://inventory.zoho.com/api/v1/reports/inventorysummary"
+            f"?page={page}&per_page=200&filter_by=TransactionDate.CustomDate"
+            f"&show_actual_stock=false&to_date={to_date}"
+            f"&organization_id={org_id}&location_id={_PUPSCRIBE_LOCATION_ID}"
+        )
+        try:
+            resp = requests.get(inv_url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"inventorysummary page {page} failed: {e}")
+            break
 
-        # Handle old API structure with direct warehouse info
-        elif "warehouses" in item:
-            item_name = item.get("item_name", "").strip().lower()
-            warehouses = item.get("warehouses", [])
-            for w in warehouses:
-                warehouse_name = w.get("warehouse_name", "")
-                # Check both exact and lowercase versions
-                if (
-                    warehouse_name in target_warehouses
-                    or warehouse_name.strip().lower()
-                    in {name.lower() for name in target_warehouses}
-                ):
-                    try:
-                        stock_quantity = int(w.get("quantity_available_for_sale", 0))
-                        arr.append(
-                            {
-                                "name": item_name,
-                                "stock": stock_quantity,
-                            }
-                        )
-                        print(f"Added stock for '{item_name}': {stock_quantity}")
-                        # Debug: Log products with brackets
-                        if "(" in item_name or ")" in item_name:
-                            print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-                        break  # Found the warehouse we want
-                    except ValueError:
-                        print(
-                            f"Invalid stock quantity for item '{item_name}': {w.get('quantity_available_for_sale')}"
-                        )
+        if not data.get("inventory"):
+            break
 
-        # Handle direct warehouse structure (fallback)
-        elif item.get("warehouse_name") in target_warehouses:
+        for item in data["inventory"][0].get("item_details", []):
+            item_name = (item.get("item_name") or "").strip().lower()
+            if not item_name:
+                continue
             try:
-                stock_quantity = int(item.get("quantity_available_for_sale", 0))
-                item_name = item.get("item_name", "").strip().lower()
-                arr.append(
-                    {
-                        "name": item_name,
-                        "stock": stock_quantity,
-                    }
-                )
-                print(f"Added stock for '{item_name}': {stock_quantity}")
-                # Debug: Log products with brackets
-                if "(" in item_name or ")" in item_name:
-                    print(f"  DEBUG: Product with brackets detected: '{item_name}'")
-            except ValueError:
-                print(
-                    f"Invalid stock quantity for item '{item_name}': {item.get('quantity_available_for_sale')}"
-                )
+                stock_quantity = int(item.get("quantity_available_for_sale") or 0)
+            except (ValueError, TypeError):
+                print(f"Invalid stock quantity for '{item_name}': {item.get('quantity_available_for_sale')}")
+                continue
+            arr.append({"name": item_name, "stock": stock_quantity})
 
-    print(f"Total stock items after filtering: {len(arr)}")
+        print(f"inventorysummary page {page}: {len(arr)} items so far")
+        if not data.get("page_context", {}).get("has_more_page"):
+            break
+        page += 1
+
+    print(f"Total stock items (Pupscribe WH): {len(arr)}")
     return arr
 
 
@@ -780,6 +667,14 @@ def update_stock():
                     to=salesperson["phone"],
                     template_doc=serialize_mongo_document(dict(template_doc)),
                     params=params,
+                )
+                create_notification(
+                    db,
+                    str(salesperson["_id"]),
+                    "product_back_in_stock",
+                    f"{req.get('product_name', 'Product')} is back in stock",
+                    f"{req.get('product_brand', '')} {req.get('product_name', '')} is now available for {req.get('customer_name', '')}.",
+                    f"/orders/past/{str(req.get('order_id', ''))}",
                 )
                 notified_ids.append(req["_id"])
                 print(f"Sent in-stock notification to {salesperson.get('name')} for {req.get('product_name')}")
@@ -1052,10 +947,6 @@ def handle_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_status = estimate.get("status", "")
     if estimate_id != "":
-        exists = serialize_mongo_document(
-            db.estimates.find_one({"estimate_id": estimate_id})
-        )
-
         # Sort all keys alphabetically
         sorted_estimate = sort_dict_keys(estimate)
         current_time = datetime.datetime.now()
@@ -1072,27 +963,26 @@ def handle_estimate(data: dict):
                 if isinstance(parsed_dt, datetime.datetime):
                     sorted_estimate[field] = parsed_dt
 
-        if not exists:
-            # Create new estimate
-            sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
-            sorted_estimate["updated_at"] = current_time
-            db.estimates.insert_one(sorted_estimate)
-        else:
-            # Update existing estimate
-            sorted_estimate["updated_at"] = current_time
-            if "created_at" not in sorted_estimate and "created_at" in exists:
-                sorted_estimate["created_at"] = exists["created_at"]
-            elif "created_at" not in sorted_estimate:
-                sorted_estimate["created_at"] = sorted_estimate.get("created_time", current_time)
+        created_at = sorted_estimate.get("created_time", current_time)
+        sorted_estimate["updated_at"] = current_time
 
-            db.estimates.update_one(
-                {"estimate_id": estimate_id},
-                {"$set": sorted_estimate},
-            )
-            estimate_number = estimate.get(
-                "estimate_number", exists.get("estimate_number")
-            )
-            estimate_url = estimate.get("estimate_url", exists.get("estimate_url"))
+        # Use atomic upsert to avoid duplicate inserts when concurrent webhook
+        # calls arrive for the same estimate_id (Zoho often fires multiple webhooks
+        # for a single event). $setOnInsert only runs when a new doc is created,
+        # so created_at is never overwritten on subsequent updates.
+        result = db.estimates.update_one(
+            {"estimate_id": estimate_id},
+            {
+                "$set": sorted_estimate,
+                "$setOnInsert": {"created_at": created_at},
+            },
+            upsert=True,
+        )
+
+        # If the document already existed, also sync the linked order status
+        if result.matched_count > 0:
+            estimate_number = estimate.get("estimate_number", "")
+            estimate_url = estimate.get("estimate_url", "")
             db.orders.update_one(
                 {"estimate_id": estimate_id},
                 {
@@ -1364,6 +1254,14 @@ def handle_accepted_estimate(data: dict):
             to = serialize_mongo_document(dict(user_doc))
             params = {"name": to.get("first_name"), "estimate_number": estimate_number}
             send_whatsapp(to.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                str(user_doc["_id"]),
+                "estimate_accepted",
+                f"Estimate {estimate_number} accepted",
+                f"Estimate {estimate_number} has been accepted by the customer.",
+                "/admin/orders",
+            )
     else:
         print("Estimate Does Not Exist. Webhook Received")
 
@@ -1386,6 +1284,14 @@ def handle_draft_sales_order(data: dict):
                 "sales_order_number": salesorder_number,
             }
             send_whatsapp(person.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                person["_id"] if isinstance(person.get("_id"), str) else str(person["_id"]),
+                "draft_sales_order",
+                f"Draft sales order {salesorder_number}",
+                f"Sales order {salesorder_number} has been drafted.",
+                "/admin/orders",
+            )
     else:
         print("Sales Order Does Not Exist. Webhook Received")
 
@@ -1412,6 +1318,14 @@ def handle_draft_invoice(data: dict):
         for person in recipients:
             params = {"name": person.get("first_name"), "invoice_number": invoice_number}
             send_whatsapp(person.get("phone"), {**template}, {**params})
+            create_notification(
+                db,
+                str(person["_id"]),
+                "draft_invoice",
+                f"Draft invoice {invoice_number}",
+                f"Invoice {invoice_number} has been drafted.",
+                "/admin/invoices",
+            )
     else:
         print("Invoice Does Not Exist. Webhook Received")
 
@@ -1431,6 +1345,7 @@ def handle_shipment(data: dict):
     )
 
     # Find or create shipment in database
+    shipment_mongo_id = None
     if shipment_id:
         shipment["shipment_id"] = shipment_id
         existing_shipment = db.shipments.find_one({"shipment_id": shipment_id})
@@ -1462,12 +1377,14 @@ def handle_shipment(data: dict):
             db.shipments.update_one(
                 {"shipment_id": shipment_id}, {"$set": sorted_data}
             )
+            shipment_mongo_id = str(existing_shipment["_id"])
             print(f"Updated shipment with shipment_id {shipment_id}")
         else:
             # Create new shipment
             sorted_data["created_at"] = sorted_data.get("created_time", current_time)
             sorted_data["updated_at"] = current_time
-            db.shipments.insert_one(sorted_data)
+            insert_result = db.shipments.insert_one(sorted_data)
+            shipment_mongo_id = str(insert_result.inserted_id)
             print(f"Created new shipment with shipment_id {shipment_id}")
 
     # Continue with existing notification logic
@@ -1483,16 +1400,28 @@ def handle_shipment(data: dict):
 
     invoice = None
     if invoice_number != "":
-        invoice = serialize_mongo_document(
-            dict(db["invoices"].find_one({"invoice_number": invoice_number}))
-        )
-        invoice_sales_person = invoice.get("cf_sales_person", "")
-        salesperson = invoice.get("salesperson_name", "")
-        button_url = f"{invoice.get('_id')}"
+        fetched = db["invoices"].find_one({"invoice_number": invoice_number})
+        if fetched:
+            invoice = serialize_mongo_document(dict(fetched))
+            invoice_sales_person = invoice.get("cf_sales_person", "")
+            salesperson = invoice.get("salesperson_name", "")
+            button_url = f"{invoice.get('_id')}"
+            # If the invoice is voided, fall back to the salesorder lookup below
+            if invoice.get("status") == "void":
+                so_ref = invoice.get("reference_number", "")
+                # Extract the SO number (before any " | " suffix)
+                salesorder_number = so_ref.split("|")[0].strip() if so_ref else ""
+                invoice = None
+                invoice_number = ""
 
     if salesorder_number != "":
-        invoice_query = {"reference_number": {"$regex": salesorder_number}}
+        # Prefer a non-void invoice linked to this sales order
+        invoice_query = {"reference_number": {"$regex": salesorder_number}, "status": {"$ne": "void"}}
         found_invoice = db["invoices"].find_one(invoice_query)
+        if not found_invoice:
+            # Fall back to any invoice if no non-void one exists
+            invoice_query = {"reference_number": {"$regex": salesorder_number}}
+            found_invoice = db["invoices"].find_one(invoice_query)
 
         if found_invoice:
             invoice = serialize_mongo_document(dict(found_invoice))
@@ -1558,7 +1487,7 @@ def handle_shipment(data: dict):
                 ),
                 "carrier_name": tracking_partner,
                 "delivery_date": delivery_date,
-                "awb_no": tracking_url,
+                "awb_no": tracking_number,
                 "customer_name":customer_name,
             }
         else:
@@ -1614,6 +1543,37 @@ def handle_shipment(data: dict):
                     send_whatsapp(phone, {**template}, {**params})
                 except Exception as e:
                     print(f"Failed to send WhatsApp to {name}: {e}")
+
+        # In-app notification for shipment → all valid recipients by user lookup
+        try:
+            is_delivered = shipment.get("status", "") == "delivered"
+            notif_type = "shipment_delivered" if is_delivered else "shipment_dispatched"
+            notif_title = (
+                f"Shipment delivered – {params.get('invoice_number', '')}"
+                if is_delivered
+                else f"Shipment dispatched – {params.get('invoice_number', '')}"
+            )
+            notif_body = (
+                f"{customer_name} order delivered on {params.get('delivery_date', '')}."
+                if is_delivered
+                else f"{customer_name} order dispatched. Tracking: {tracking_number}."
+            )
+            shipment_link = f"/shipments/{shipment_mongo_id}" if shipment_mongo_id else "/shipments"
+
+            notif_recipients = set()
+            for person in [sales_admin_1, sales_admin_2, sales_admin_3, sales_admin_4, company_number]:
+                uid = person.get("_id") or (db.users.find_one({"phone": person.get("phone")}, {"_id": 1}) or {}).get("_id")
+                if uid:
+                    notif_recipients.add(str(uid))
+            for sp in all_salespeople:
+                sp_user = db.users.find_one({"code": sp}, {"_id": 1})
+                if sp_user:
+                    notif_recipients.add(str(sp_user["_id"]))
+
+            for uid in notif_recipients:
+                create_notification(db, uid, notif_type, notif_title, notif_body, shipment_link)
+        except Exception as _e:
+            print(f"[notifications] shipment error: {_e}")
     else:
         print("Invoice Not Found for Given Shipment")
 

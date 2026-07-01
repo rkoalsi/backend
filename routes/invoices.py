@@ -3,7 +3,7 @@ from ..config.root import get_database, serialize_mongo_document
 from typing import Optional, List
 from bson import ObjectId
 import re, uuid, boto3, os, requests, json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 from .helpers import get_access_token
 
@@ -135,40 +135,46 @@ def get_invoices(
         "cf_sales_person": 1,
         "salesperson_name": 1,
         "created_at": 1,
-        "overdue_by_days": {
-            "$dateDiff": {
-                "startDate": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
-                    }
-                },
-                "endDate": "$$NOW",
-                "unit": "day",
-            },
-        },
+        "overdue_by_days": 1,
         "invoice_notes": 1,
+    }
+
+    overdue_days_expr = {
+        "$dateDiff": {
+            "startDate": {
+                "$cond": {
+                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
+                    "then": {"$dateFromString": {"dateString": "$due_date"}},
+                    "else": "$due_date",
+                }
+            },
+            "endDate": "$$NOW",
+            "unit": "day",
+        }
     }
 
     # Construct the aggregation pipeline
     pipeline = [
         {"$match": query},
+        # Compute overdue_by_days first so we can filter and sort reliably
+        {"$addFields": {"overdue_by_days": overdue_days_expr}},
+        # Enforce 365-day cap
+        {"$match": {"overdue_by_days": {"$lte": 365}}},
+        {"$sort": {"overdue_by_days": 1}},
         {
             "$lookup": {
-                "from": "invoice_notes",  # Collection to join
-                "localField": "invoice_number",  # Field from the invoices collection
-                "foreignField": "invoice_number",  # Field from the invoice_notes collection
-                "as": "invoice_notes",  # The result will be an array of matching documents
+                "from": "invoice_notes",
+                "localField": "invoice_number",
+                "foreignField": "invoice_number",
+                "as": "invoice_notes",
             }
         },
         {
             "$unwind": {
-                "path": "$invoice_notes",  # Unwind the array of invoice_notes
-                "preserveNullAndEmptyArrays": True,  # Keep invoices even if no notes exist
+                "path": "$invoice_notes",
+                "preserveNullAndEmptyArrays": True,
             }
         },
-        {"$sort": {"due_date": -1}},  # Latest first
         {"$project": project},
     ]
 
@@ -362,6 +368,36 @@ async def delete_invoice_note_image(
     return {"message": "Image deleted successfully"}
 
 
+@router.get("/download_pdf/zoho/{zoho_invoice_id}")
+async def download_pdf_by_zoho_id(zoho_invoice_id: str):
+    """Download invoice PDF directly from Zoho Books using Zoho's invoice_id."""
+    try:
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        response = requests.get(
+            url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=zoho_invoice_id),
+            headers=headers,
+            allow_redirects=False,
+        )
+        if response.status_code == 200:
+            return Response(
+                content=response.content,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=invoice_{zoho_invoice_id}.pdf"},
+            )
+        # Do NOT propagate Zoho's status code verbatim: a 401/403 from Zoho
+        # (expired OAuth token, wrong org, etc.) would otherwise reach the
+        # browser and the axios interceptor would log the user out. Surface
+        # upstream failures as a gateway error instead.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch PDF from Zoho ({response.status_code}): {response.text}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/download_pdf/{invoice_id}")
 async def download_pdf(invoice_id: str = ""):
     try:
@@ -391,14 +427,18 @@ async def download_pdf(invoice_id: str = ""):
             )
         elif response.status_code == 307:
             raise HTTPException(
-                status_code=307,
+                status_code=502,
                 detail="Redirect encountered. Check Zoho endpoint or token.",
             )
         else:
-            # Raise an exception if Zoho's API returns an error
+            # Do NOT propagate Zoho's status code verbatim. A 401/403 from Zoho
+            # (expired OAuth token, wrong org, etc.) would reach the browser and
+            # the axios interceptor would treat it as the customer's session
+            # expiring and log them out. Surface upstream failures as a gateway
+            # error so the client just sees a failed download.
             raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to fetch PDF: {response.text}",
+                status_code=502,
+                detail=f"Failed to fetch PDF from Zoho ({response.status_code}): {response.text}",
             )
 
     except HTTPException as e:

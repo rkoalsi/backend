@@ -8,10 +8,24 @@ from ..config.root import get_database
 from ..config.auth import JWT_SECRET_KEY
 from pydantic import BaseModel, field_validator
 from bson import ObjectId
+from datetime import datetime
 
 db = get_database()
 permissions_collection = db.get_collection("permissions")
 users_collection = db.get_collection("users")
+roles_collection = db.get_collection("roles")
+
+# Built-in roles that always exist regardless of what is stored in the DB
+DEFAULT_ROLES = [
+    {"value": "admin", "label": "Admin"},
+    {"value": "sales_admin", "label": "Sales Admin"},
+    {"value": "sales_person", "label": "Sales Person"},
+    {"value": "warehouse", "label": "Warehouse"},
+    {"value": "catalogue_manager", "label": "Catalogue Manager"},
+    {"value": "hr", "label": "HR"},
+    {"value": "customer", "label": "Customer"},
+]
+DEFAULT_ROLE_VALUES = {r["value"] for r in DEFAULT_ROLES}
 
 # FastAPI router and security
 router = APIRouter(tags=["permissions"])
@@ -23,16 +37,32 @@ class UserUpdateModel(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
-    phone: Optional[str] = None
+    phone: Optional[int] = None
     role: Optional[str] = None
     status: Optional[str] = None
 
     @field_validator("phone", mode="before")
     @classmethod
-    def coerce_phone_to_str(cls, v):
+    def coerce_phone_to_int(cls, v):
         if v is not None:
-            return str(v)
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                raise ValueError("Phone must be a valid number")
         return v
+
+
+class RoleCreateModel(BaseModel):
+    label: str
+    value: Optional[str] = None
+    permissions: List[str] = []  # permission ids the new role should be granted
+
+    @field_validator("label")
+    @classmethod
+    def label_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Role label is required")
+        return v.strip()
 
 
 class PermissionService:
@@ -41,6 +71,66 @@ class PermissionService:
     def __init__(self):
         self.permissions_collection = permissions_collection
         self.users_collection = users_collection
+        self.roles_collection = roles_collection
+
+    def get_all_roles(self) -> List[dict]:
+        """Return built-in roles merged with custom roles stored in the DB."""
+        try:
+            roles = [dict(r) for r in DEFAULT_ROLES]
+            seen = set(DEFAULT_ROLE_VALUES)
+            for doc in self.roles_collection.find({}).sort("label", 1):
+                value = doc.get("value")
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                roles.append({
+                    "value": value,
+                    "label": doc.get("label", value),
+                    "custom": True,
+                })
+            return roles
+        except Exception as e:
+            print(f"Error fetching roles: {e}")
+            return [dict(r) for r in DEFAULT_ROLES]
+
+    def create_role(self, label: str, value: Optional[str], permission_ids: List[str]) -> dict:
+        """Create a custom role and grant it the selected permissions."""
+        # Normalise the value (slug) from the label when not provided
+        slug = (value or label).strip().lower().replace(" ", "_")
+        slug = "".join(ch for ch in slug if ch.isalnum() or ch == "_")
+        if not slug:
+            raise ValueError("Could not derive a valid role value")
+
+        if slug in DEFAULT_ROLE_VALUES or self.roles_collection.find_one({"value": slug}):
+            raise ValueError("A role with that value already exists")
+
+        self.roles_collection.insert_one({
+            "value": slug,
+            "label": label.strip(),
+            "is_active": True,
+            "created_at": datetime.utcnow(),
+        })
+
+        # Grant the new role access to the selected permissions
+        if permission_ids:
+            self.permissions_collection.update_many(
+                {"id": {"$in": permission_ids}},
+                {"$addToSet": {"allowed_roles": slug}},
+            )
+
+        return {"value": slug, "label": label.strip(), "custom": True}
+
+    def delete_role(self, value: str) -> bool:
+        """Delete a custom role and strip it from all permissions."""
+        if value in DEFAULT_ROLE_VALUES:
+            raise ValueError("Built-in roles cannot be deleted")
+        result = self.roles_collection.delete_one({"value": value})
+        # Remove the role from any permission's allowed_roles
+        self.permissions_collection.update_many(
+            {"allowed_roles": value},
+            {"$pull": {"allowed_roles": value}},
+        )
+        return result.deleted_count > 0
 
     def get_user_menu_items(self, user_roles: List[str]) -> List[dict]:
         """Get menu items that user has access to"""
@@ -435,6 +525,36 @@ def check_user_edit_permissions(
 
     result = permission_service.can_edit_user(user_id, current_user_role, current_user_id)
     return result
+
+
+@router.get("/roles")
+def get_roles(_ = Depends(require_admin_or_sales_admin)):
+    """List all roles (built-in + custom) for dropdowns and the permission matrix."""
+    return {"roles": permission_service.get_all_roles()}
+
+
+@router.post("/admin/roles")
+def create_role(role_data: RoleCreateModel, _ = Depends(require_admin_role)):
+    """Create a new custom role and grant it the selected permissions (admin only)."""
+    try:
+        role = permission_service.create_role(
+            role_data.label, role_data.value, role_data.permissions
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return {"message": "Role created successfully", "role": role}
+
+
+@router.delete("/admin/roles/{value}")
+def delete_role(value: str, _ = Depends(require_admin_role)):
+    """Delete a custom role (admin only)."""
+    try:
+        success = permission_service.delete_role(value)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    if not success:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return {"message": "Role deleted successfully"}
 
 
 @router.get("/admin/all-permissions")

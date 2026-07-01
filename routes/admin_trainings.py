@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from ..config.root import get_database, serialize_mongo_document  
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople
+from .notifications import create_notifications_for_roles
 from dotenv import load_dotenv
 import boto3, os, uuid
 
@@ -100,7 +101,15 @@ def create_training(trainings: dict):
         if result:
             # Fetch and return the updated document.
             template = db.templates.find_one({"name": "training_video_creation"})
-            notify_all_salespeople(db, template, {})
+            # notify_all_salespeople(db, template, {})
+            title = update_data.get("title", "New training video")
+            create_notifications_for_roles(
+                db, ["sales_person", "sales_admin"],
+                "new_training",
+                f"New training: {title}",
+                "A new training video has been posted.",
+                "/training",
+            )
             return "Document Created"
         else:
             # It’s possible that the document was not found or that no changes were made.

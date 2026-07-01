@@ -207,6 +207,7 @@ def get_shipments(
             "customer_name": 1,
             "status": 1,
             "tracking_number": 1,
+            "tracking_link": 1,
             "carrier": 1,
             "date": 1,
             "created_at": 1,

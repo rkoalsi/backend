@@ -8,6 +8,42 @@ import re
 router = APIRouter()
 db = get_database()
 collection = db["customer_address_details"]
+tags_collection = db["address_investment_tags"]
+
+
+def _norm_tag(t: str) -> str:
+    """Normalized key for de-duplicating tags (case/whitespace-insensitive)."""
+    return " ".join((t or "").split()).lower()
+
+
+# Seed the predefined investment tags the first time this module loads.
+DEFAULT_INVESTMENT_TAGS = ["Racks", "Marketing"]
+try:
+    tags_collection.create_index("key", unique=True)
+    for _t in DEFAULT_INVESTMENT_TAGS:
+        tags_collection.update_one(
+            {"key": _norm_tag(_t)},
+            {"$setOnInsert": {"name": _t, "key": _norm_tag(_t), "created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+except Exception:
+    pass
+
+
+def _register_tags(tags: list) -> None:
+    """Add any not-yet-known tags to the global predefined list."""
+    for t in tags or []:
+        name = (t or "").strip()
+        if not name:
+            continue
+        try:
+            tags_collection.update_one(
+                {"key": _norm_tag(name)},
+                {"$setOnInsert": {"name": name, "key": _norm_tag(name), "created_at": datetime.utcnow()}},
+                upsert=True,
+            )
+        except Exception:
+            pass
 
 
 def _norm_city(city: str) -> str:
@@ -141,6 +177,13 @@ except Exception:
 VALID_STATUSES = {"open", "closed", "warehouse"}
 
 
+@router.get("/tags")
+def list_investment_tags():
+    """Return the global list of predefined investment tags (alphabetical)."""
+    docs = list(tags_collection.find({}, {"name": 1, "_id": 0}).sort("name", 1))
+    return {"tags": [d["name"] for d in docs if d.get("name")]}
+
+
 @router.get("/{customer_id}/billed")
 def get_billed_addresses(customer_id: str):
     """
@@ -232,7 +275,20 @@ def upsert_address_detail(customer_id: str, address_id: str, payload: dict):
         update_fields["status"] = status
     if "notes" in payload:
         update_fields["notes"] = payload["notes"]
-    reserved = {"status", "notes", "customer_id", "address_id"}
+    if "tags" in payload:
+        raw_tags = payload["tags"] or []
+        if not isinstance(raw_tags, list):
+            raise HTTPException(status_code=400, detail="'tags' must be a list of strings")
+        # De-duplicate (case-insensitive) while preserving first-seen casing/order
+        seen, tags = set(), []
+        for t in raw_tags:
+            name = str(t).strip()
+            if name and _norm_tag(name) not in seen:
+                seen.add(_norm_tag(name))
+                tags.append(name)
+        update_fields["tags"] = tags
+        _register_tags(tags)
+    reserved = {"status", "notes", "tags", "customer_id", "address_id"}
     for key, value in payload.items():
         if key not in reserved:
             update_fields[key] = value

@@ -37,12 +37,18 @@ async def create_potential_customer(data: dict):
 
 
 @router.get("")
-async def get_all_potential_customers(created_by: str):
+async def get_all_potential_customers(created_by: str = None, search: str = None):
     try:
+        query = {}
+        if created_by:
+            try:
+                query["created_by"] = ObjectId(created_by)
+            except Exception:
+                pass
+        if search:
+            query["name"] = {"$regex": search, "$options": "i"}
         pcs = list(
-            db.potential_customers.find({"created_by": ObjectId(created_by)}).sort(
-                {"created_at": -1}
-            )
+            db.potential_customers.find(query).sort({"created_at": -1}).limit(50)
         )
         for pc in pcs:
             # Convert created_at from UTC to IST if it exists

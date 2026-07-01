@@ -91,6 +91,15 @@ def get_product_counts():
 
         result["New Arrivals"] = {"All Products": new_products_count}
 
+        # Add count for "Pre Orders" — products marked pre_order=true (no stock filter)
+        pre_orders_count = db.products.count_documents(
+            {
+                "pre_order": True,
+                "is_deleted": {"$exists": False},
+            }
+        )
+        result["Pre Orders"] = {"All Products": pre_orders_count}
+
         return result
 
     except Exception as e:
@@ -288,16 +297,24 @@ def get_products(
     new_only: Optional[bool] = Query(
         False, description="Filter to show only new products (created in last 3 months)"
     ),
+    pre_order: Optional[bool] = Query(
+        False, description="Filter to show only pre-order products"
+    ),
 ):
     """
     Retrieves paginated products with optional filters.
     When sort is "catalogue", the `catalogue_page` parameter is used to filter
     products by their catalogue_page field rather than for skipping documents.
     """
-    # Define base query
-    query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}}
+    # Define base query — skip stock filter for pre-orders (they may have zero stock by design)
+    query = {"is_deleted": {"$exists": False}}
+    if not pre_order:
+        query["stock"] = {"$gt": 0}
 
-    if brand:
+    # Don't filter by brand when pre_order or new_only is true
+    if pre_order:
+        query["pre_order"] = True
+    elif not new_only and brand:
         query["brand"] = brand
 
     if category:
@@ -307,7 +324,7 @@ def get_products(
         regex = {"$regex": search, "$options": "i"}
         query["$or"] = [{"name": regex}, {"cf_sku_code": regex}]
 
-    if role == "salesperson":
+    if role == "salesperson" and not pre_order:
         query["status"] = "active"
 
     three_months_ago = datetime.now() - relativedelta(months=3)
@@ -455,6 +472,64 @@ def get_products(
         raise HTTPException(status_code=500, detail="Internal server error")
 
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
+
+    # Enrich pre-order products with upcoming stock from purchase orders
+    pre_order_prods = [p for p in all_products if p.get("pre_order")]
+    if pre_order_prods:
+        brand_names = list({p.get("brand") for p in pre_order_prods if p.get("brand")})
+        item_id_to_vendor = {}
+        if brand_names:
+            brand_to_vendor = {
+                b["name"]: b.get("vendor_id")
+                for b in db.brands.find({"name": {"$in": brand_names}}, {"name": 1, "vendor_id": 1})
+                if b.get("vendor_id")
+            }
+            item_id_to_vendor = {
+                p["item_id"]: brand_to_vendor[p["brand"]]
+                for p in pre_order_prods
+                if p.get("item_id") and p.get("brand") in brand_to_vendor
+            }
+        if item_id_to_vendor:
+            vendor_ids = list(set(item_id_to_vendor.values()))
+            pos = list(db.purchase_orders.find(
+                {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]},
+                 "line_items": {"$elemMatch": {"item_id": {"$in": list(item_id_to_vendor.keys())}}}},
+                {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
+            ).sort("date", -1))
+            upcoming_by_item: dict = {}
+            po_number_by_item: dict = {}
+            seen_iids: set = set()
+            for po in pos:
+                for li in po.get("line_items", []):
+                    iid = li.get("item_id")
+                    if not iid or iid in seen_iids or item_id_to_vendor.get(iid) != po.get("vendor_id"):
+                        continue
+                    qty = float(li.get("quantity") or 0)
+                    qty_received = float(li.get("quantity_received") or 0)
+                    upcoming_by_item[iid] = max(0, int(qty - qty_received))
+                    if po.get("purchaseorder_number"):
+                        po_number_by_item[iid] = po["purchaseorder_number"]
+                    seen_iids.add(iid)
+            # Join to brand_orders (logistics tracking) for inward / ETA-at-port dates
+            dates_by_po: dict = {}
+            po_numbers = list(set(po_number_by_item.values()))
+            if po_numbers:
+                for bo in db.brand_orders.find(
+                    {"purchaseorder_number": {"$in": po_numbers}},
+                    {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
+                ):
+                    dates_by_po[bo["purchaseorder_number"]] = {
+                        "inward_date": bo.get("inward_date"),
+                        "eta_port_date": bo.get("eta_port_date"),
+                    }
+            for p in all_products:
+                iid = p.get("item_id")
+                if p.get("pre_order") and iid in upcoming_by_item:
+                    p["upcoming_stock"] = upcoming_by_item[iid]
+                    dates = dates_by_po.get(po_number_by_item.get(iid))
+                    if dates:
+                        p["inward_date"] = dates.get("inward_date")
+                        p["eta_port_date"] = dates.get("eta_port_date")
 
     try:
         total_products = db.products.count_documents(query)
@@ -630,6 +705,36 @@ def get_all_product_categories():
         raise HTTPException(
             status_code=500, detail="Failed to fetch all product categories."
         )
+
+
+@router.get("/batch")
+def get_products_batch(ids: str = Query(..., description="Comma-separated product IDs")):
+    """
+    Fetch multiple products by their IDs in a single request.
+    Returns a dict keyed by product_id for easy lookup, replacing N individual fetches.
+    """
+    try:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        if not id_list:
+            return {"products": {}}
+
+        object_ids = []
+        for pid in id_list:
+            try:
+                object_ids.append(ObjectId(pid))
+            except Exception:
+                pass
+
+        products = list(products_collection.find({"_id": {"$in": object_ids}}))
+        result = {}
+        for product in products:
+            serialized = serialize_mongo_document(product)
+            result[serialized["_id"]] = serialized
+
+        return {"products": result}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch products batch")
 
 
 @router.get("/catalogue/all_products")
@@ -875,6 +980,124 @@ def get_all_products_catalogue(
         "category": category,
         "search": search,
     }
+
+
+@router.get("/catalogue/init")
+def get_catalogue_init(brand: Optional[str] = Query(None, description="Active brand to preload products for")):
+    """
+    Combined init endpoint: returns brands, product counts, categories for the given brand,
+    and the first page of grouped products — all in one request.
+    Eliminates the brands→categories→products waterfall on initial catalogue load.
+    """
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        active_brand = brand or "New Arrivals"
+
+        def fetch_brands():
+            brand_names = products_collection.distinct(
+                "brand",
+                {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
+            )
+            result = []
+            hidden_brands = {
+                doc["name"]
+                for doc in db.brands.find({"hidden": True}, {"name": 1})
+                if doc.get("name")
+            }
+            for brand_name in brand_names:
+                if not brand_name or brand_name in hidden_brands:
+                    continue
+                brand_doc = db.brands.find_one({"name": {"$regex": brand_name, "$options": "i"}})
+                if brand_doc:
+                    if brand_doc.get("hidden"):
+                        continue
+                    result.append({
+                        "brand": brand_name,
+                        "image": brand_doc.get("image_url"),
+                        "secondary_image_url": brand_doc.get("secondary_image_url"),
+                        "description": brand_doc.get("description"),
+                    })
+                else:
+                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": ""})
+            return result
+
+        def fetch_counts():
+            base_query = {"stock": {"$gt": 0}, "is_deleted": {"$exists": False}, "status": "active"}
+            pipeline = [
+                {"$match": base_query},
+                {"$group": {"_id": {"brand": "$brand", "category": "$category"}, "count": {"$sum": 1}}},
+            ]
+            counts = list(db.products.aggregate(pipeline))
+            hidden_brands = {
+                doc["name"]
+                for doc in db.brands.find({"hidden": True}, {"name": 1})
+                if doc.get("name")
+            }
+            result = {}
+            for item in counts:
+                gid = item["_id"]
+                if not gid.get("brand") or not gid.get("category"):
+                    continue
+                b = gid["brand"]
+                if b in hidden_brands:
+                    continue
+                c = gid["category"]
+                if b not in result:
+                    result[b] = {}
+                result[b][c] = item["count"]
+            three_months_ago = datetime.now() - relativedelta(months=3)
+            new_count = db.products.count_documents({
+                "stock": {"$gt": 0}, "is_deleted": {"$exists": False},
+                "status": "active", "created_at": {"$gte": three_months_ago},
+            })
+            result["New Arrivals"] = {"All Products": new_count}
+            return result
+
+        def fetch_categories():
+            if active_brand == "New Arrivals":
+                return ["All Products"]
+            cats = products_collection.distinct(
+                "category",
+                {"brand": active_brand, "stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
+            )
+            return [c for c in cats if c]
+
+        def fetch_products():
+            return get_all_products_catalogue(
+                page=1,
+                per_page=200,
+                brand=None if active_brand == "New Arrivals" else active_brand,
+                category=None,
+                search=None,
+                group_by_name=True,
+                new_only=True if active_brand == "New Arrivals" else None,
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            brands_future = executor.submit(fetch_brands)
+            counts_future = executor.submit(fetch_counts)
+            categories_future = executor.submit(fetch_categories)
+            products_future = executor.submit(fetch_products)
+
+            brands_list = brands_future.result()
+            counts = counts_future.result()
+            categories = categories_future.result()
+            products_data = products_future.result()
+
+        return {
+            "brands": brands_list,
+            "counts": counts,
+            "categories": categories,
+            "active_brand": active_brand,
+            "items": products_data.get("items", []),
+            "total": products_data.get("total", 0),
+            "total_pages": products_data.get("total_pages", 1),
+        }
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to fetch catalogue init data")
 
 
 @router.get("/out-of-stock")

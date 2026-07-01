@@ -867,6 +867,7 @@ def build_customer_analytics_pipeline(
         "$project": {
             "_id": 0,
             "customerId": 1,
+            "customerMongoId": {"$toString": {"$arrayElemAt": ["$customerDetails._id", 0]}},
             "customerName": 1,
             "companyName": 1,
             "shippingAddress": "$shippingAddressFormatted",
@@ -1155,15 +1156,22 @@ def download_customer_analytics_report(
         mongo_ids = list(zoho_to_mongo_id.values())
         # (mongo_id, address_id) -> status
         addr_detail_lookup: dict = {}
+        # (mongo_id, address_id) -> {"investment": ..., "tags": [...]}
+        addr_invest_lookup: dict = {}
         for doc in db["customer_address_details"].find(
             {"customer_id": {"$in": mongo_ids}},
-            {"customer_id": 1, "address_id": 1, "status": 1, "_id": 0},
+            {"customer_id": 1, "address_id": 1, "status": 1, "investment": 1, "tags": 1, "_id": 0},
         ):
             cid = doc.get("customer_id", "")
             aid = doc.get("address_id", "")
             st = doc.get("status", "")
             if cid and aid and st:
                 addr_detail_lookup[(cid, aid)] = st
+            if cid and aid and (doc.get("investment") is not None or doc.get("tags")):
+                addr_invest_lookup[(cid, aid)] = {
+                    "investment": doc.get("investment"),
+                    "tags": doc.get("tags") or [],
+                }
 
         def _resolve_status(zoho_id, city, state, zip_, street):
             """Look up address status for one analytics row.
@@ -1173,7 +1181,7 @@ def download_customer_analytics_report(
             """
             mongo_id = zoho_to_mongo_id.get(zoho_id, "")
             if not mongo_id:
-                return "-", False
+                return "-", False, ""
             nc = _py_norm_city(city)
             ns = _py_norm_state(state)
             nz = _py_norm_zip(zip_)
@@ -1217,12 +1225,12 @@ def download_customer_analytics_report(
                         aid = best_aid
 
             if not aid:
-                return "closed", addr_exists
-            return addr_detail_lookup.get((mongo_id, aid), "-"), addr_exists
+                return "closed", addr_exists, ""
+            return addr_detail_lookup.get((mongo_id, aid), "-"), addr_exists, aid
 
         # Pre-compute status on each customer row so merged-row building can use it
         for c in customers:
-            status, addr_found = _resolve_status(
+            status, addr_found, resolved_aid = _resolve_status(
                 c.get("customerId", ""),
                 c.get("addressCity", ""),
                 c.get("addressState", ""),
@@ -1231,6 +1239,10 @@ def download_customer_analytics_report(
             )
             c["_addrStatus"] = status
             c["_addrFoundInCustomers"] = addr_found
+            mongo_id = zoho_to_mongo_id.get(c.get("customerId", ""), "")
+            invest = addr_invest_lookup.get((mongo_id, resolved_aid)) if resolved_aid else None
+            c["_addrInvestment"] = invest.get("investment") if invest else None
+            c["_addrTags"] = invest.get("tags", []) if invest else []
 
         # Create Excel file
         workbook = openpyxl.Workbook()
@@ -1251,6 +1263,8 @@ def download_customer_analytics_report(
             "Billing Address",
             "Status",
             "Customer Address Status",
+            "Investment Amount",
+            "Investment Tags",
             "Tier",
             "Sales Person",
             "Total Sales Current Month",
@@ -1282,24 +1296,27 @@ def download_customer_analytics_report(
                 ws.cell(row=row_idx, column=5, value=customer.get("billingAddress", ""))
                 ws.cell(row=row_idx, column=6, value=customer.get("status", ""))
                 ws.cell(row=row_idx, column=7, value=customer.get("_addrStatus", "-"))
-                ws.cell(row=row_idx, column=8, value=customer.get("tier", ""))
+                invest_val = customer.get("_addrInvestment")
+                ws.cell(row=row_idx, column=8, value=invest_val if invest_val is not None else "")
+                ws.cell(row=row_idx, column=9, value=", ".join(customer.get("_addrTags", []) or []))
+                ws.cell(row=row_idx, column=10, value=customer.get("tier", ""))
                 sales_person = customer.get("salesPerson", "")
                 if isinstance(sales_person, list):
                     sales_person = ", ".join(sales_person) if sales_person else ""
-                ws.cell(row=row_idx, column=9, value=sales_person)
-                ws.cell(row=row_idx, column=10, value=customer.get("totalSalesCurrentMonth", 0))
-                ws.cell(row=row_idx, column=11, value=customer.get("lastBillDate", ""))
-                ws.cell(row=row_idx, column=12, value=customer.get("averageOrderFrequencyMonthly", 0))
-                ws.cell(row=row_idx, column=13, value=customer.get("billingTillDateCurrentYear", 0))
-                ws.cell(row=row_idx, column=14, value=customer.get("totalSalesLastFY", 0))
-                ws.cell(row=row_idx, column=15, value=customer.get("totalSalesPreviousFY", 0))
-                ws.cell(row=row_idx, column=16, value="Yes" if customer.get("hasBilledLastMonth", False) else "No")
-                ws.cell(row=row_idx, column=17, value="Yes" if customer.get("hasBilledLast45Days", False) else "No")
-                ws.cell(row=row_idx, column=18, value="Yes" if customer.get("hasBilledLast2Months", False) else "No")
-                ws.cell(row=row_idx, column=19, value="Yes" if customer.get("hasBilledLast3Months", False) else "No")
-                ws.cell(row=row_idx, column=20, value=len(customer.get("duePayments", [])))
-                ws.cell(row=row_idx, column=21, value=len(customer.get("notDuePayments", [])))
-                ws.cell(row=row_idx, column=22, value=customer.get("whatsappGroup", ""))
+                ws.cell(row=row_idx, column=11, value=sales_person)
+                ws.cell(row=row_idx, column=12, value=customer.get("totalSalesCurrentMonth", 0))
+                ws.cell(row=row_idx, column=13, value=customer.get("lastBillDate", ""))
+                ws.cell(row=row_idx, column=14, value=customer.get("averageOrderFrequencyMonthly", 0))
+                ws.cell(row=row_idx, column=15, value=customer.get("billingTillDateCurrentYear", 0))
+                ws.cell(row=row_idx, column=16, value=customer.get("totalSalesLastFY", 0))
+                ws.cell(row=row_idx, column=17, value=customer.get("totalSalesPreviousFY", 0))
+                ws.cell(row=row_idx, column=18, value="Yes" if customer.get("hasBilledLastMonth", False) else "No")
+                ws.cell(row=row_idx, column=19, value="Yes" if customer.get("hasBilledLast45Days", False) else "No")
+                ws.cell(row=row_idx, column=20, value="Yes" if customer.get("hasBilledLast2Months", False) else "No")
+                ws.cell(row=row_idx, column=21, value="Yes" if customer.get("hasBilledLast3Months", False) else "No")
+                ws.cell(row=row_idx, column=22, value=len(customer.get("duePayments", [])))
+                ws.cell(row=row_idx, column=23, value=len(customer.get("notDuePayments", [])))
+                ws.cell(row=row_idx, column=24, value=customer.get("whatsappGroup", ""))
             for column in ws.columns:
                 max_length = 0
                 column_letter = get_column_letter(column[0].column)
@@ -1386,6 +1403,8 @@ def download_customer_analytics_report(
                         "customerAddressKeys": [(c.get("customerId", ""), _addr_key(c))] if c.get("customerId", "") else [],
                         "allShippingAddresses": [c.get("shippingAddress", "")],
                         "addrStatuses": [c.get("_addrStatus", "-")],
+                        "addrInvestments": [c.get("_addrInvestment")],
+                        "addrTags": list(c.get("_addrTags") or []),
                         "billingAddress": c.get("billingAddress", ""),
                         "status": c.get("status", ""),
                         "tier": c.get("tier", ""),
@@ -1415,6 +1434,8 @@ def download_customer_analytics_report(
                         ],
                         "allShippingAddresses": [c.get("shippingAddress", "") for c in cluster if c.get("shippingAddress", "")],
                         "addrStatuses": [c.get("_addrStatus", "-") for c in cluster],
+                        "addrInvestments": [c.get("_addrInvestment") for c in cluster],
+                        "addrTags": [t for c in cluster for t in (c.get("_addrTags") or [])],
                         "billingAddress": cluster[0].get("billingAddress", ""),
                         "status": cluster[0].get("status", ""),
                         "tier": cluster[0].get("tier", ""),
@@ -1679,6 +1700,8 @@ def download_customer_analytics_report(
             "Address Variants Merged",
             "Status",
             "Customer Address Status",
+            "Investment Amount",
+            "Investment Tags",
             "Tier",
             "Sales Person",
             "Total Sales Current Month",
@@ -1744,16 +1767,20 @@ def download_customer_analytics_report(
             statuses_for_row = merged.get("addrStatuses", [])
             unique_statuses = list(dict.fromkeys(s for s in statuses_for_row if s and s != "-"))
             addr_ws.cell(row=row_idx, column=9, value=" / ".join(unique_statuses) if unique_statuses else "-")
-            addr_ws.cell(row=row_idx, column=10, value=merged.get("tier", ""))
-            addr_ws.cell(row=row_idx, column=11, value=merged.get("salesPerson", ""))
-            addr_ws.cell(row=row_idx, column=12, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
-            addr_ws.cell(row=row_idx, column=13, value=merged.get("lastBillDate", ""))
-            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
-            addr_ws.cell(row=row_idx, column=15, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
-            addr_ws.cell(row=row_idx, column=16, value=round(merged.get("totalSalesLastFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=17, value=round(merged.get("totalSalesPreviousFY", 0), 2))
-            addr_ws.cell(row=row_idx, column=18, value=merged.get("totalInvoiceCount", 0))
-            addr_ws.cell(row=row_idx, column=19, value=merged.get("whatsappGroup", ""))
+            invest_vals = [v for v in merged.get("addrInvestments", []) if v is not None]
+            addr_ws.cell(row=row_idx, column=10, value=sum(invest_vals) if invest_vals else "")
+            unique_tags = list(dict.fromkeys(t for t in merged.get("addrTags", []) if t))
+            addr_ws.cell(row=row_idx, column=11, value=", ".join(unique_tags))
+            addr_ws.cell(row=row_idx, column=12, value=merged.get("tier", ""))
+            addr_ws.cell(row=row_idx, column=13, value=merged.get("salesPerson", ""))
+            addr_ws.cell(row=row_idx, column=14, value=round(merged.get("totalSalesCurrentMonth", 0), 2))
+            addr_ws.cell(row=row_idx, column=15, value=merged.get("lastBillDate", ""))
+            addr_ws.cell(row=row_idx, column=16, value=round(merged.get("averageOrderFrequencyMonthly", 0), 2))
+            addr_ws.cell(row=row_idx, column=17, value=round(merged.get("billingTillDateCurrentYear", 0), 2))
+            addr_ws.cell(row=row_idx, column=18, value=round(merged.get("totalSalesLastFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=19, value=round(merged.get("totalSalesPreviousFY", 0), 2))
+            addr_ws.cell(row=row_idx, column=20, value=merged.get("totalInvoiceCount", 0))
+            addr_ws.cell(row=row_idx, column=21, value=merged.get("whatsappGroup", ""))
             # Highlight rows where multiple address variants were merged
             if merged.get("addressCount", 1) > 1:
                 for col in range(1, len(addr_base_headers) + 1):

@@ -8,6 +8,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 from ..config.whatsapp import send_whatsapp
 from .helpers import get_access_token
+from .notifications import create_notification
 import os
 import boto3
 import io
@@ -163,7 +164,7 @@ def return_order_notification(params, created_by):
             template_doc = {**template}
             parameters = {**params}
             if phone and phone != "":
-                x = send_whatsapp(phone, template_doc, parameters)
+                # x = send_whatsapp(phone, template_doc, parameters)
                 # Mark this user as notified
                 notified_users.add(user_id)
     except Exception as e:
@@ -239,6 +240,29 @@ async def create_return_order(return_order: ReturnOrderCreate):
             params,
             created_by=ObjectId(order_dict["created_by"]),
         )
+
+        # In-app notification for return order → same recipients as WhatsApp
+        try:
+            ro_id = str(result.inserted_id)
+            ro_title = f"Return order created – {order_dict.get('customer_name', '')}"
+            ro_body = f"Reason: {order_dict.get('return_reason', '')}. Items: {total_quantity}."
+            ro_link = f"/admin/return_orders"
+            _notify_ids = set()
+            for query in [
+                {"_id": ObjectId(order_dict["created_by"])},
+                {"email": "pupscribeinvoicee@gmail.com"},
+                {"email": "barkbutleracc@gmail.com"},
+                {"designation": "Customer Care"},
+                {"email": "pupscribeoffcoordinator@gmail.com"},
+            ]:
+                u = db.users.find_one(query, {"_id": 1})
+                if u:
+                    _notify_ids.add(str(u["_id"]))
+            for uid in _notify_ids:
+                create_notification(db, uid, "return_order_created", ro_title, ro_body, ro_link)
+        except Exception as _e:
+            print(f"[notifications] return_order error: {_e}")
+
         if result.inserted_id:
             # Fetch and return the created document
             created_order = return_orders_collection.find_one(
