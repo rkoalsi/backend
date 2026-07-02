@@ -711,14 +711,28 @@ def order_payment_status(order_id: str):
         if est:
             estimate_status = est.get("status", "")
 
-    # Resolved once payment is settled AND (for paid orders) the estimate exists.
-    done = (payment_status == "paid" and estimate_created) or payment_status == "failed"
+    flow = order.get("zoho_flow") or {}
+
+    if payment_status == "paid" and _is_self_registered_order(order):
+        # Self-registered paid orders run the full Zoho chain (accepted estimate
+        # -> sales order -> invoice -> customer payment). Only report done once
+        # the chain finished (or definitively failed) so the confirmation popup
+        # shows the final state — not the transient draft estimate.
+        done = bool(flow.get("chain_completed_at")) or bool(flow.get("last_error"))
+    else:
+        # Resolved once payment is settled AND (for paid orders) the estimate exists.
+        done = (payment_status == "paid" and estimate_created) or payment_status == "failed"
+
     return {
         "order_id": str(order_id),
         "payment_status": payment_status,
         "estimate_created": estimate_created,
         "estimate_number": est_number,
         "estimate_status": estimate_status,
+        "salesorder_number": flow.get("salesorder_number", ""),
+        "invoice_number": flow.get("invoice_number", ""),
+        "customerpayment_number": flow.get("customerpayment_number", ""),
+        "chain_completed": bool(flow.get("chain_completed_at")),
         "done": done,
     }
 
