@@ -1289,6 +1289,20 @@ def handle_accepted_estimate(data: dict):
     estimate_id = estimate.get("estimate_id", "")
     estimate_number = estimate.get("estimate_number", "")
     if estimate_id != "":
+        # Zoho fires this webhook on every edit of an accepted estimate — claim
+        # the acceptance once so nobody gets the same message multiple times.
+        already_claimed = (
+            db.estimates.find_one_and_update(
+                {"estimate_id": estimate_id, "accepted_notified": {"$ne": True}},
+                {"$set": {"accepted_notified": True}},
+            )
+            is None
+            and db.estimates.find_one({"estimate_id": estimate_id}) is not None
+        )
+        if already_claimed:
+            print(f"Estimate {estimate_number} acceptance already notified, skipping")
+            return
+
         template_doc = db.templates.find_one({"name": "accepted_estimate"})
         if not template_doc:
             print("Template 'accepted_estimate' not found, skipping notification")
@@ -1314,19 +1328,44 @@ def handle_accepted_estimate(data: dict):
             )
 
         # Notify the customer that their order has been accepted.
-        customer_contact_id = estimate.get("customer_id", "")
-        customer_name = estimate.get("customer_name", "Customer")
-        notify_customer_whatsapp(
-            customer_contact_id,
-            "order_accepted",
-            {"customer_name": customer_name, "estimate_number": estimate_number},
-            notif={
-                "type": "order_accepted",
-                "title": f"Order accepted — {estimate_number}",
-                "body": f"Your order {estimate_number} has been accepted and is being processed.",
-                "link": "/customer/orders",
-            },
+        order = db.orders.find_one(
+            {"$or": [{"estimate_id": estimate_id}, {"pre_order_estimate_id": estimate_id}]}
         )
+        if order:
+            from .payments import (  # lazy import, avoids cycle
+                _is_self_registered_order,
+                _notify_customer_order_accepted,
+            )
+
+            payment = order.get("payment") or {}
+            if (
+                _is_self_registered_order(order)
+                and payment.get("status") == "paid"
+                and not payment.get("customer_notified")
+            ):
+                # Paid self-registered order whose payment confirmation hasn't
+                # gone out yet: the payment chain sends both messages in the
+                # right order (payment received FIRST, then accepted) — don't
+                # jump the queue here.
+                print(f"Deferring accepted message for {estimate_number} to the payment chain")
+                return
+            _notify_customer_order_accepted(order)
+        else:
+            # Estimate not tied to a platform order — legacy direct send.
+            notify_customer_whatsapp(
+                estimate.get("customer_id", ""),
+                "order_accepted",
+                {
+                    "customer_name": estimate.get("customer_name", "Customer"),
+                    "estimate_number": estimate_number,
+                },
+                notif={
+                    "type": "order_accepted",
+                    "title": f"Order accepted — {estimate_number}",
+                    "body": f"Your order {estimate_number} has been accepted and is being processed.",
+                    "link": "/customer/orders",
+                },
+            )
     else:
         print("Estimate Does Not Exist. Webhook Received")
 

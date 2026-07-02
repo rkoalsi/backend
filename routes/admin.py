@@ -7,6 +7,7 @@ from fastapi import (
     UploadFile,
     Form,
     Depends,
+    Request,
 )
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from ..config.root import get_client, get_database, serialize_mongo_document
@@ -1692,6 +1693,18 @@ def read_all_orders(
         },
         # 3. Unwind the created_by_info array so it's a single object
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
+        # 3b. Live estimate status from the estimates collection (point of truth,
+        # kept current by the Zoho webhook) — the order's own `status` can lag
+        # (e.g. a webhook writing "sent" after the chain accepted the estimate).
+        {
+            "$lookup": {
+                "from": "estimates",
+                "localField": "estimate_id",
+                "foreignField": "estimate_id",
+                "as": "estimate_info",
+            }
+        },
+        {"$addFields": {"estimate_status": {"$first": "$estimate_info.status"}}},
         # 4. Match by sales_person code after the lookup and unwind
         # This allows filtering on the 'created_by_info.code' field.
         # Only add this stage if sales_person is provided.
@@ -1741,6 +1754,7 @@ def read_all_orders(
                 "spreadsheet_created": 1,
                 "payment": 1,
                 "zoho_flow": 1,
+                "estimate_status": 1,
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
@@ -1771,6 +1785,30 @@ def read_all_orders(
     orders_cursor = orders_collection.aggregate(pipeline)
     orders_with_user_info = [serialize_mongo_document(doc) for doc in orders_cursor]
 
+    # Server stores datetimes in UTC — render payment/zoho_flow timestamps as
+    # IST strings so the admin UI can display them directly.
+    _ist = pytz.timezone("Asia/Kolkata")
+
+    def _to_ist_str(value):
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return value
+        if not isinstance(value, datetime):
+            return value
+        if value.tzinfo is None:
+            value = pytz.utc.localize(value)
+        return value.astimezone(_ist).strftime("%Y-%m-%d %H:%M:%S")
+
+    for _o in orders_with_user_info:
+        for _sub in ("payment", "zoho_flow"):
+            _obj = _o.get(_sub)
+            if isinstance(_obj, dict):
+                for _k, _v in list(_obj.items()):
+                    if _k.endswith("_at") or _k in ("paid_at",):
+                        _obj[_k] = _to_ist_str(_v)
+
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
     # Validate page number - this check should use the *actual* total pages
@@ -1784,6 +1822,27 @@ def read_all_orders(
         "per_page": limit,
         "total_pages": total_pages,
     }
+
+
+@router.post("/orders/{order_id}/retry_payment_chain")
+async def retry_payment_chain(order_id: str, request: Request, background_tasks: BackgroundTasks):
+    """
+    Re-run the post-payment Zoho chain (accepted estimate -> draft sales order
+    -> sent invoice -> customer payment) for a PAID order. Idempotent: steps
+    already completed are skipped, so this finishes whatever failed partway
+    (e.g. a customer-payment number conflict).
+    """
+    from .payments import _get_order_or_404, _run_post_payment_zoho_chain
+
+    order = _get_order_or_404(order_id)
+    if (order.get("payment") or {}).get("status") != "paid":
+        raise HTTPException(status_code=400, detail="Order has no successful online payment")
+
+    try:
+        result = await _run_post_payment_zoho_chain(order_id, request, background_tasks)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result
 
 
 @router.get("/pg_payments")
