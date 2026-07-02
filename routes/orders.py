@@ -1673,6 +1673,99 @@ def get_order_invoices(order_id: str):
     return result
 
 
+@router.get("/{order_id}/return_eligibility")
+def get_return_eligibility(order_id: str):
+    """
+    Check whether a return order can be raised against this order:
+      • the order must be invoiced (live estimate status, falling back to order status)
+      • a sales order must exist for the estimate (sales_orders.estimate_id) and
+        its shipment must have been created (shipped_status past 'pending').
+    """
+    order = get_order(order_id, orders_collection)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    status = str(order.get("status", "")).lower()
+    estimate_status = ""
+    est_num = order.get("estimate_number")
+    if est_num:
+        est_doc = db.estimates.find_one(
+            {"estimate_number": est_num}, {"status": 1}
+        )
+        estimate_status = str((est_doc or {}).get("status", "")).lower()
+    invoiced = estimate_status == "invoiced" or status == "invoiced"
+
+    # Locate the sales order created from this order's estimate(s).
+    estimate_ids = [
+        str(eid)
+        for eid in [order.get("estimate_id"), order.get("pre_order_estimate_id")]
+        if eid
+    ]
+    sales_order = None
+    if estimate_ids:
+        sales_order = db.sales_orders.find_one(
+            {"estimate_id": {"$in": estimate_ids}},
+            {
+                "salesorder_id": 1,
+                "salesorder_number": 1,
+                "status": 1,
+                "shipped_status": 1,
+                "invoiced_status": 1,
+                "packages": 1,
+            },
+            sort=[("created_at", -1)],
+        )
+    # Older sales orders don't carry estimate_id — fall back to the reference
+    # number, which Zoho fills with the estimate number ("EST/xx | name").
+    if not sales_order and est_num:
+        sales_order = db.sales_orders.find_one(
+            {"reference_number": {"$regex": f"^{re.escape(est_num)}"}},
+            {
+                "salesorder_id": 1,
+                "salesorder_number": 1,
+                "status": 1,
+                "shipped_status": 1,
+                "invoiced_status": 1,
+                "packages": 1,
+            },
+            sort=[("created_at", -1)],
+        )
+
+    shipped_status = str((sales_order or {}).get("shipped_status", "")).lower()
+    shipped = shipped_status in ("partially_shipped", "shipped", "fulfilled")
+
+    # Only one return order (and hence one credit note) may be raised per order.
+    existing_return = db.return_orders.find_one(
+        {"order_id": ObjectId(order_id)},
+        {"status": 1, "zoho_creditnote_number": 1, "created_at": 1},
+    )
+
+    packages = [
+        {
+            "package_number": p.get("package_number", ""),
+            "shipment_number": p.get("shipment_number", ""),
+            "shipment_status": p.get("shipment_status", ""),
+            "tracking_number": p.get("tracking_number", ""),
+            "carrier": p.get("carrier", ""),
+        }
+        for p in (sales_order or {}).get("packages", [])
+    ]
+
+    return {
+        "eligible": bool(invoiced and shipped and not existing_return),
+        "invoiced": invoiced,
+        "shipped": shipped,
+        "shipped_status": shipped_status,
+        "estimate_status": estimate_status or status,
+        "salesorder_id": (sales_order or {}).get("salesorder_id", ""),
+        "salesorder_number": (sales_order or {}).get("salesorder_number", ""),
+        "packages": packages,
+        "existing_return_order": serialize_mongo_document(existing_return)
+        if existing_return
+        else None,
+    }
+
+
 # Get an order by ID
 @router.get("/my-performance")
 def get_my_performance(user_id: str):
@@ -1969,6 +2062,14 @@ def update_existing_order(order_id: str, order_update: dict):
     """
     Update an existing order with raw dictionary data.
     """
+    # Paid and COD orders are locked — the customer has committed to the order
+    # (instant gratification: what they confirmed is what gets fulfilled).
+    existing = orders_collection.find_one({"_id": ObjectId(order_id)}, {"payment.status": 1})
+    if existing and (existing.get("payment") or {}).get("status") in ("paid", "cod"):
+        raise HTTPException(
+            status_code=400,
+            detail="This order has been confirmed and can no longer be edited",
+        )
     update_order(order_id, order_update, orders_collection, customers_collection)
     updated_order = get_order(order_id, orders_collection)
     if not updated_order:
@@ -2018,6 +2119,8 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
     status = str(order_dict.get("status")).lower()
     create_stock = order_dict.get("create_stock", True)
     create_pre_order = order_dict.get("create_pre_order", True)
+    # Optional extra line appended to the estimate notes (e.g. COD payment terms).
+    extra_notes = str(order_dict.get("extra_notes") or "").strip()
     try:
         # Perform order validation
         validate_order(order_id)
@@ -2200,6 +2303,8 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             db.counters.update_one({"_id": counter_id}, {"$max": {"seq": last_num}}, upsert=True)
 
         def _base_payload(line_items_list: list, notes_text: str) -> dict:
+            if extra_notes:
+                notes_text = f"{notes_text}\n{extra_notes}"
             return {
                 "location_id": "3220178000143298047",
                 "contact_persons": [],
