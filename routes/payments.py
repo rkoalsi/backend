@@ -524,6 +524,9 @@ def create_checkout_order(order_id: str):
         "currency": "INR",
         "receipt": str(order_id),
         "notes": {"order_id": str(order_id)},
+        # Capture automatically on authorization — otherwise the money sits in
+        # "authorized" until someone captures it manually in the dashboard.
+        "payment_capture": 1,
     }
 
     _log_transaction("create_order_request", order_id, request=payload)
@@ -796,6 +799,75 @@ _CHAIN_LINE_ITEM_KEYS = (
 )
 
 
+def _notify_customer_order_accepted(order: dict):
+    """Customer-facing 'order accepted' WhatsApp + in-app notification, sent at
+    most ONCE per order (atomic claim on lifecycle_notified.accepted). The paid
+    chain calls this AFTER the payment confirmation so the messages arrive in
+    the right order; the Zoho estimate webhook shares the same claim, so
+    repeated webhook fires can never re-send it. Never raises."""
+    try:
+        claimed = orders_collection.find_one_and_update(
+            {"_id": order["_id"], "lifecycle_notified.accepted": {"$ne": True}},
+            {"$set": {"lifecycle_notified.accepted": True}},
+        )
+        if claimed is None:
+            return
+        customer = (
+            customers_collection.find_one({"_id": ObjectId(order.get("customer_id"))})
+            if order.get("customer_id")
+            else None
+        )
+        contact_id = str(customer.get("contact_id", "")) if customer else ""
+        est_number = order.get("estimate_number") or order.get("pre_order_estimate_number", "")
+        from .webhooks import notify_customer_whatsapp  # lazy import, avoids cycle
+
+        notify_customer_whatsapp(
+            contact_id,
+            "order_accepted",
+            {
+                "customer_name": order.get("customer_name", "Customer"),
+                "estimate_number": est_number,
+            },
+            notif={
+                "type": "order_accepted",
+                "title": f"Order accepted — {est_number}",
+                "body": f"Your order {est_number} has been accepted and is being processed.",
+                "link": "/customer/orders",
+            },
+        )
+    except Exception as e:
+        print(f"[payments] failed to send order-accepted notification: {e}")
+
+
+def _notify_admins_chain_completed(order: dict, flow: dict):
+    """In-app notification to admins when the full post-payment Zoho chain has
+    completed, carrying the created document identifiers. Never raises."""
+    # Single recipient for now — will widen to all admins later.
+    admin_emails = ["rkoalsi2000@gmail.com"]
+    try:
+        est_number = order.get("estimate_number") or order.get("pre_order_estimate_number", "")
+        body = (
+            f"Estimate {est_number} · Sales Order {flow.get('salesorder_number', '')} · "
+            f"Invoice {flow.get('invoice_number', '')} · "
+            f"Customer Payment {flow.get('customerpayment_number', '')} "
+            f"(payment_id {flow.get('customerpayment_id', '')}) — "
+            f"{order.get('customer_name', '')}, ₹{order.get('total_amount', '')}."
+        )
+        for email in admin_emails:
+            admin = db.users.find_one({"email": email}, {"_id": 1})
+            if admin:
+                create_notification(
+                    db,
+                    str(admin["_id"]),
+                    "payment_chain_completed",
+                    f"Online payment processed — {est_number}",
+                    body,
+                    "/admin/orders",
+                )
+    except Exception as e:
+        print(f"[payments] failed to notify admins of chain completion: {e}")
+
+
 def _set_zoho_flow(order_oid, fields: dict):
     """Persist chain progress under order.zoho_flow.*"""
     orders_collection.update_one(
@@ -925,6 +997,42 @@ async def _fetch_and_store_razorpay_payment(
     return p
 
 
+async def _ensure_razorpay_captured(client: httpx.AsyncClient, order_id, rzp_payment: dict):
+    """If the Razorpay payment is still only authorized, capture it now so the
+    money actually settles (backstop for payments created before auto-capture
+    was enabled). Best-effort — never raises."""
+    try:
+        if not rzp_payment or rzp_payment.get("status") != "authorized":
+            return rzp_payment
+        pid = rzp_payment.get("id")
+        r = await client.post(
+            f"{RAZORPAY_BASE_URL}/payments/{pid}/capture",
+            json={
+                "amount": rzp_payment.get("amount"),
+                "currency": rzp_payment.get("currency", "INR"),
+            },
+            auth=(RAZORPAY_KEY or "", RAZORPAY_SECRET or ""),
+        )
+        data = r.json() if r.content else {}
+        _log_transaction(
+            "razorpay_capture",
+            order_id,
+            razorpay_payment_id=pid,
+            status_code=r.status_code,
+            result_status=data.get("status", ""),
+            error=data.get("error", {}).get("description", "") if r.status_code >= 400 else "",
+        )
+        if r.status_code == 200:
+            return data
+    except Exception as e:
+        _log_transaction("razorpay_capture_error", order_id, error=str(e))
+    return rzp_payment
+
+
+def _is_duplicate_number_error(message: str) -> bool:
+    return "already exists" in str(message or "").lower()
+
+
 async def _run_post_payment_zoho_chain(order_id: str, request: Request, background_tasks: BackgroundTasks):
     """Run the accepted-estimate -> sales order -> invoice -> payment chain.
     Raises on the first failing step (callers log it); already-completed steps
@@ -1033,29 +1141,53 @@ async def _run_post_payment_zoho_chain(order_id: str, request: Request, backgrou
                 "location_id": "3220178000143298047",
             }
 
+            async def _zoho_create(label, module, list_key, number_field, prefix, number_key, payload):
+                """POST a Zoho document with a reserved sequence number, retrying
+                with the next number if Zoho reports it already exists (the local
+                counter can trail reality — e.g. documents created outside this
+                flow). Falls back to Zoho auto-numbering when no number can be
+                reserved."""
+                last_message = ""
+                for _ in range(4):
+                    number = await _next_zoho_number(
+                        client, headers, module, list_key, number_field, prefix
+                    )
+                    url = f"{ZOHO_BOOKS_BASE}/{module}?organization_id={ZOHO_ORG_ID}"
+                    body = dict(payload)
+                    if number:
+                        body[number_key] = number
+                        url += "&ignore_auto_number_generation=true"
+                    r = await client.post(url, headers=headers, json=body)
+                    rj = r.json() if r.content else {}
+                    if r.status_code == 201 and rj.get("code", 0) == 0:
+                        return rj
+                    last_message = rj.get("message", r.text)
+                    if not (number and _is_duplicate_number_error(last_message)):
+                        raise RuntimeError(f"{label} creation failed: {last_message}")
+                    _log_transaction(
+                        f"zoho_chain_{module}_number_conflict",
+                        order_id,
+                        conflicting_number=number,
+                    )
+                    # Loop reserves the next number and retries.
+                raise RuntimeError(f"{label} creation failed: {last_message}")
+
             # ── Step 2: DRAFT sales order from the estimate ──
             if not flow.get("salesorder_id"):
-                payload = {
-                    **base_doc,
-                    # Reference the estimate(s) this sales order was created from.
-                    "reference_number": " / ".join(est_numbers),
-                    "notes": f"Paid online via Razorpay ({rzp_payment_id}).",
-                }
-                so_url = f"{ZOHO_BOOKS_BASE}/salesorders?organization_id={ZOHO_ORG_ID}"
-                so_number = await _next_zoho_number(
-                    client, headers, "salesorders", "salesorders", "salesorder_number", "SO"
+                rj = await _zoho_create(
+                    "Sales order",
+                    "salesorders",
+                    "salesorders",
+                    "salesorder_number",
+                    "SO",
+                    "salesorder_number",
+                    {
+                        **base_doc,
+                        # Reference the estimate(s) this sales order was created from.
+                        "reference_number": " / ".join(est_numbers),
+                        "notes": f"Paid online via Razorpay ({rzp_payment_id}).",
+                    },
                 )
-                if so_number:
-                    payload["salesorder_number"] = so_number
-                    so_url += "&ignore_auto_number_generation=true"
-                r = await client.post(
-                    so_url,
-                    headers=headers,
-                    json=payload,
-                )
-                rj = r.json() if r.content else {}
-                if r.status_code != 201 or rj.get("code", 0) != 0:
-                    raise RuntimeError(f"Sales order creation failed: {rj.get('message', r.text)}")
                 so = rj["salesorder"]
                 flow["salesorder_id"] = so["salesorder_id"]
                 flow["salesorder_number"] = so.get("salesorder_number", "")
@@ -1076,29 +1208,22 @@ async def _run_post_payment_zoho_chain(order_id: str, request: Request, backgrou
 
             # ── Step 3: invoice, marked SENT (required before applying payment) ──
             if not flow.get("invoice_id"):
-                payload = {
-                    **base_doc,
-                    # The invoice's order number = the sales order it fulfils.
-                    "reference_number": flow.get("salesorder_number", ""),
-                    "payment_terms": 0,
-                    "payment_terms_label": "Due on Receipt",
-                    "due_date": today,
-                }
-                inv_url = f"{ZOHO_BOOKS_BASE}/invoices?organization_id={ZOHO_ORG_ID}"
-                inv_number = await _next_zoho_number(
-                    client, headers, "invoices", "invoices", "invoice_number", "INV"
+                rj = await _zoho_create(
+                    "Invoice",
+                    "invoices",
+                    "invoices",
+                    "invoice_number",
+                    "INV",
+                    "invoice_number",
+                    {
+                        **base_doc,
+                        # The invoice's order number = the sales order it fulfils.
+                        "reference_number": flow.get("salesorder_number", ""),
+                        "payment_terms": 0,
+                        "payment_terms_label": "Due on Receipt",
+                        "due_date": today,
+                    },
                 )
-                if inv_number:
-                    payload["invoice_number"] = inv_number
-                    inv_url += "&ignore_auto_number_generation=true"
-                r = await client.post(
-                    inv_url,
-                    headers=headers,
-                    json=payload,
-                )
-                rj = r.json() if r.content else {}
-                if r.status_code != 201 or rj.get("code", 0) != 0:
-                    raise RuntimeError(f"Invoice creation failed: {rj.get('message', r.text)}")
                 inv = rj["invoice"]
                 flow["invoice_id"] = inv["invoice_id"]
                 flow["invoice_number"] = inv.get("invoice_number", "")
@@ -1138,38 +1263,33 @@ async def _run_post_payment_zoho_chain(order_id: str, request: Request, backgrou
                 rzp_payment = await _fetch_and_store_razorpay_payment(
                     client, order["_id"], rzp_payment_id
                 )
+                # Backstop: capture the payment if it's still only authorized
+                # (payments created before auto-capture was enabled).
+                rzp_payment = await _ensure_razorpay_captured(client, order_id, rzp_payment)
                 rzp_method = rzp_payment.get("method", "")
                 mode = RAZORPAY_METHOD_TO_ZOHO_MODE.get(rzp_method, "others")
-                payload = {
-                    "customer_id": contact_id,
-                    "payment_mode": mode,
-                    "amount": amount,
-                    "date": today,
-                    "reference_number": rzp_payment_id,
-                    "invoices": [
-                        {"invoice_id": flow["invoice_id"], "amount_applied": amount}
-                    ],
-                    "notes": f"Online payment via Razorpay ({rzp_method or 'unknown method'}).",
-                }
-                pay_url = f"{ZOHO_BOOKS_BASE}/customerpayments?organization_id={ZOHO_ORG_ID}"
-                pay_number = await _next_zoho_number(
-                    client, headers, "customerpayments", "customerpayments", "payment_number", "CP"
+                rj = await _zoho_create(
+                    "Customer payment",
+                    "customerpayments",
+                    "customerpayments",
+                    "payment_number",
+                    "CP",
+                    "payment_number",
+                    {
+                        "customer_id": contact_id,
+                        "payment_mode": mode,
+                        "amount": amount,
+                        "date": today,
+                        "reference_number": rzp_payment_id,
+                        "invoices": [
+                            {"invoice_id": flow["invoice_id"], "amount_applied": amount}
+                        ],
+                        "notes": f"Online payment via Razorpay ({rzp_method or 'unknown method'}).",
+                    },
                 )
-                if pay_number:
-                    payload["payment_number"] = pay_number
-                    pay_url += "&ignore_auto_number_generation=true"
-                r = await client.post(
-                    pay_url,
-                    headers=headers,
-                    json=payload,
-                )
-                rj = r.json() if r.content else {}
-                if r.status_code != 201 or rj.get("code", 0) != 0:
-                    raise RuntimeError(
-                        f"Customer payment creation failed: {rj.get('message', r.text)}"
-                    )
                 pay = rj["payment"]
                 flow["customerpayment_id"] = pay["payment_id"]
+                flow["customerpayment_number"] = pay.get("payment_number", "")
                 _set_zoho_flow(
                     order["_id"],
                     {
@@ -1179,6 +1299,7 @@ async def _run_post_payment_zoho_chain(order_id: str, request: Request, backgrou
                         "razorpay_method": rzp_method,
                         "customerpayment_created_at": datetime.now(),
                         "chain_completed_at": datetime.now(),
+                        "last_error": None,
                     },
                 )
                 _log_transaction(
@@ -1188,6 +1309,14 @@ async def _run_post_payment_zoho_chain(order_id: str, request: Request, backgrou
                     payment_mode=mode,
                 )
                 message_parts.append("Customer payment recorded — invoice marked paid")
+                _notify_admins_chain_completed(order, flow)
+
+        # Customer messaging in the correct order: payment confirmation FIRST,
+        # then the order-accepted update. Both are claim-deduped, so the Zoho
+        # webhook and the verify/webhook wrappers can never double-send.
+        fresh = orders_collection.find_one({"_id": order["_id"]}) or order
+        _notify_customer_payment_success(fresh)
+        _notify_customer_order_accepted(fresh)
 
         return {"status": "success", "message": "\n".join(message_parts) or "Zoho chain already complete"}
     except Exception as e:
