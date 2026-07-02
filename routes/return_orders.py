@@ -97,6 +97,13 @@ class ReturnOrderCreate(BaseModel):
     pickup_address: PickupAddress
     items: List[ReturnItem] = []
     created_by: str
+    # Source order for order-based returns (customer / salesperson flow).
+    # Only one return order may exist per order.
+    order_id: Optional[str] = None
+    # When true (customer/salesperson order-based return flow), a Zoho Books
+    # credit note is created immediately on submit while the return order
+    # stays in draft status; admin approval only moves the status forward.
+    create_credit_note: bool = False
 
 
 class ReturnOrderUpdate(BaseModel):
@@ -181,6 +188,27 @@ async def create_return_order(return_order: ReturnOrderCreate):
     try:
         # Prepare the document
         order_dict = return_order.dict()
+        create_credit_note = order_dict.pop("create_credit_note", False)
+
+        # Order-based returns: only one return order (one credit note) per order.
+        if order_dict.get("order_id"):
+            try:
+                order_dict["order_id"] = ObjectId(order_dict["order_id"])
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid order_id: {order_dict.get('order_id')}",
+                )
+            existing = return_orders_collection.find_one(
+                {"order_id": order_dict["order_id"]}, {"_id": 1}
+            )
+            if existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A return order has already been created for this order",
+                )
+        else:
+            order_dict.pop("order_id", None)
 
         # Convert created_by to ObjectId
         try:
@@ -224,6 +252,42 @@ async def create_return_order(return_order: ReturnOrderCreate):
 
         # Insert the document
         result = return_orders_collection.insert_one(order_dict)
+
+        # Create the Zoho Books credit note right away (return order stays in
+        # draft; admin approval later only changes the status).
+        credit_note_warning = None
+        if create_credit_note:
+            try:
+                from .admin_return_orders import create_zoho_credit_note
+
+                inserted_doc = return_orders_collection.find_one(
+                    {"_id": result.inserted_id}
+                )
+                zoho_result = create_zoho_credit_note(inserted_doc)
+                if zoho_result.get("success"):
+                    return_orders_collection.update_one(
+                        {"_id": result.inserted_id},
+                        {
+                            "$set": {
+                                "zoho_creditnote_id": zoho_result.get("creditnote_id"),
+                                "zoho_creditnote_number": zoho_result.get(
+                                    "creditnote_number"
+                                ),
+                                "zoho_creditnote_status": zoho_result.get("status"),
+                                "zoho_creditnote_created_at": datetime.now(),
+                            }
+                        },
+                    )
+                else:
+                    credit_note_warning = zoho_result.get(
+                        "error", "Failed to create credit note"
+                    )
+                    print(
+                        f"Credit note creation failed for return order {result.inserted_id}: {credit_note_warning}"
+                    )
+            except Exception as cn_err:
+                credit_note_warning = str(cn_err)
+                print(f"Credit note creation error: {cn_err}")
 
         # Calculate total quantity of items
         total_quantity = sum(item.get("quantity", 0) for item in order_dict.get("items", []))
@@ -271,10 +335,13 @@ async def create_return_order(return_order: ReturnOrderCreate):
             serialized_order = serialize_mongo_document(created_order)
             serialized_order["items_count"] = len(serialized_order.get("items", []))
 
-            return {
+            response = {
                 "message": "Return order created successfully",
                 "return_order": serialized_order,
             }
+            if credit_note_warning:
+                response["credit_note_warning"] = credit_note_warning
+            return response
         else:
             raise HTTPException(status_code=500, detail="Failed to create return order")
 

@@ -21,9 +21,11 @@ payload) is persisted to the `razorpay_transactions` collection for auditing.
 """
 
 import os
+import re
 import hmac
 import hashlib
 import requests
+import httpx
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
@@ -42,6 +44,19 @@ RAZORPAY_SECRET = os.getenv("RAZORPAY_API_TEST_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_TEST_SECRET")
 
 RAZORPAY_BASE_URL = "https://api.razorpay.com/v1"
+
+ZOHO_BOOKS_BASE = "https://books.zoho.com/api/v3"
+ZOHO_ORG_ID = os.getenv("ORG_ID")
+
+# Razorpay payment `method` -> Zoho Books customer-payment `payment_mode`.
+RAZORPAY_METHOD_TO_ZOHO_MODE = {
+    "card": "creditcard",
+    "emi": "creditcard",
+    "netbanking": "banktransfer",
+    "upi": "upi",
+    "wallet": "others",
+    "bank_transfer": "banktransfer",
+}
 
 # Razorpay payment-link statuses that mean money was (fully) collected.
 PAID_STATUSES = {"paid"}
@@ -402,6 +417,77 @@ def order_payment_config(order_id: str):
     }
 
 
+@router.post("/order/{order_id}/cod")
+async def cod_order(order_id: str, request: Request, background_tasks: BackgroundTasks):
+    """
+    Cash / Cheque on delivery: instead of paying online, the (self-registered)
+    customer places the order and pays on delivery. Creates the Zoho estimate
+    in DRAFT status (same as a salesperson submit) and tags the order's payment
+    as COD. No sales order / invoice / customer payment is created — that
+    happens through the normal back-office flow once the money is collected.
+    """
+    from .orders import finalise  # lazy import to avoid circular import
+    from .app_settings import get_min_order_value_self_registered
+
+    order = _get_order_or_404(order_id)
+
+    # COD (like Pay Now) is exclusively for self-registered customers — everyone
+    # else goes through the normal salesperson submit flow.
+    if not _is_self_registered_order(order):
+        raise HTTPException(
+            status_code=403,
+            detail="Cash/Cheque on delivery is only available for self-registered customers",
+        )
+
+    if (order.get("payment") or {}).get("status") == "paid":
+        raise HTTPException(status_code=400, detail="This order has already been paid")
+
+    total_amount = order.get("total_amount")
+    try:
+        total_amount = float(total_amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Order total amount is missing or invalid")
+    if total_amount <= 0:
+        raise HTTPException(status_code=400, detail="Order total amount must be greater than zero")
+
+    # Same minimum-order rule as online payment (anti-bypass).
+    min_value = get_min_order_value_self_registered()
+    if min_value and total_amount < min_value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A minimum order of ₹{int(min_value):,} is required to place an order.",
+        )
+
+    result = await finalise(
+        {
+            "order_id": str(order_id),
+            "status": "draft",
+            "create_stock": True,
+            "create_pre_order": True,
+            "extra_notes": "Cash/Cheque on Delivery — Payment Terms: Due on Receipt.",
+        },
+        request,
+        background_tasks,
+    )
+    if result.get("status") != "success":
+        raise HTTPException(status_code=502, detail=result.get("message", "Failed to place the order"))
+
+    orders_collection.update_one(
+        {"_id": order["_id"]},
+        {
+            "$set": {
+                "payment.method": "cash_on_delivery",
+                "payment.status": "cod",
+                "payment.terms": "Due on Receipt",
+                "payment.updated_at": datetime.now(),
+            }
+        },
+    )
+    _log_transaction("cod_order_placed", order_id)
+
+    return {"success": True, "message": result.get("message", ""), "payment_status": "cod"}
+
+
 @router.post("/order/{order_id}/checkout")
 def create_checkout_order(order_id: str):
     """
@@ -563,7 +649,10 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
         order.get("estimate_created")
         or str(order.get("status", "")).lower() == "accepted"
     )
-    if not already_created:
+    # Self-registered orders always run the (idempotent) post-payment chain —
+    # even when the estimate already exists it must be accepted and the sales
+    # order / invoice / customer payment created if any step is still missing.
+    if not already_created or _is_self_registered_order(order):
         # The customer confirmation is sent from the background task once the
         # estimate exists, so the message carries the estimate number.
         background_tasks.add_task(
@@ -636,13 +725,21 @@ def order_payment_status(order_id: str):
 
 async def _create_draft_estimate_on_payment(order_id: str, request: Request, background_tasks: BackgroundTasks):
     """
-    Payment succeeded -> create the order's Zoho estimate in DRAFT status.
+    Payment succeeded -> finalise the order's Zoho estimate.
 
-    Calling orders.finalise with status='draft' creates the estimate(s) in Zoho
-    but leaves them as drafts (the accept/decline status push only runs for
-    'accepted'/'declined'). Imported lazily to avoid an import cycle.
+    Self-registered customers: the estimate is ACCEPTED and the full post-payment
+    Zoho chain runs (draft sales order -> invoice marked sent -> customer payment
+    applied, which marks the invoice paid).
+
+    Everyone else: the estimate is created in DRAFT status as before (the
+    accept/decline status push only runs for 'accepted'/'declined').
+    Imported lazily to avoid an import cycle.
     """
     from .orders import finalise  # lazy import to avoid circular import
+
+    order = orders_collection.find_one({"_id": ObjectId(order_id)})
+    if order is not None and _is_self_registered_order(order):
+        return await _run_post_payment_zoho_chain(order_id, request, background_tasks)
 
     return await finalise(
         {
@@ -654,6 +751,438 @@ async def _create_draft_estimate_on_payment(order_id: str, request: Request, bac
         request,
         background_tasks,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-payment Zoho chain (self-registered customers only)
+#
+# After a successful online payment:
+#   1. Estimate  -> accepted (created first if it doesn't exist yet)
+#   2. Sales order -> created as DRAFT from the estimate's line items
+#   3. Invoice   -> created from the same line items, then marked SENT
+#   4. Customer payment -> recorded with the Razorpay payment mode and applied
+#      to the invoice, which flips the invoice to PAID in Zoho
+#
+# Every step is idempotent (guarded by ids persisted under order.zoho_flow) so
+# the verify endpoint and the webhook can both trigger it safely; a coarse
+# `chain_running` claim prevents the two from racing each other.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Line-item fields carried from the estimate onto the sales order / invoice.
+_CHAIN_LINE_ITEM_KEYS = (
+    "item_id",
+    "name",
+    "description",
+    "rate",
+    "quantity",
+    "discount",
+    "tax_id",
+    "hsn_or_sac",
+    "unit",
+)
+
+
+def _set_zoho_flow(order_oid, fields: dict):
+    """Persist chain progress under order.zoho_flow.*"""
+    orders_collection.update_one(
+        {"_id": order_oid},
+        {"$set": {f"zoho_flow.{k}": v for k, v in fields.items()}},
+    )
+
+
+async def _next_zoho_number(
+    client: httpx.AsyncClient,
+    headers: dict,
+    module: str,
+    list_key: str,
+    number_field: str,
+    prefix: str,
+):
+    """
+    Reserve the next {prefix}/FY/NNNN document number for the current financial
+    year, mirroring the estimate-numbering pattern in orders.finalise: fetch the
+    latest numbers from Zoho, seed a Mongo counter with the highest FY sequence
+    ($max), then atomically $inc it.
+
+    Only numbers in the given prefix's series are considered — the books contain
+    other series and stray manually-numbered documents (e.g. "TN-CP/26-27/0037",
+    "WB-Oct-2023-24I", "Whoof-Whoof Dummy 02") that must never seed the sequence.
+
+    Returns None when the sequence can't be derived — the caller then falls back
+    to Zoho's auto-generated numbering.
+    """
+    try:
+        now = datetime.now()
+        fy_start = now.year if now.month >= 4 else now.year - 1
+        fy_str = f"{str(fy_start)[-2:]}-{str(fy_start + 1)[-2:]}"
+        # Narrow to this prefix+FY series server-side where Zoho supports the
+        # *_startswith filter; harmless (ignored) where it doesn't. Without it
+        # the plain "CP/" series can be buried past page 1 behind "WB-CP/…" /
+        # "TN-CP/…" in the lexical sort.
+        r = await client.get(
+            f"{ZOHO_BOOKS_BASE}/{module}?organization_id={ZOHO_ORG_ID}"
+            f"&per_page=200&sort_column={number_field}&sort_order=D"
+            f"&{number_field}_startswith={prefix}/",
+            headers=headers,
+        )
+        if r.status_code != 200:
+            return None
+        docs = (r.json() or {}).get(list_key, [])
+        number_re = re.compile(rf"^{re.escape(prefix)}/(\d{{2}}-\d{{2}})/(\d+)$")
+        matches = [
+            m
+            for d in docs
+            if (m := number_re.match(str(d.get(number_field, ""))))
+        ]
+        fy_matches = [m for m in matches if m.group(1) == fy_str]
+        if fy_matches:
+            # Highest sequence this FY (don't trust the lexical sort order).
+            ref = max(fy_matches, key=lambda m: int(m.group(2)))
+            num_width, last_num = len(ref.group(2)), int(ref.group(2))
+        elif matches:
+            # New financial year: keep the series, restart the sequence.
+            num_width, last_num = len(matches[0].group(2)), 0
+        else:
+            # Series not present in the latest 200 — start it fresh.
+            num_width, last_num = 4, 0
+        counter_id = f"{module}_counter_{fy_str}"
+        db.counters.update_one({"_id": counter_id}, {"$max": {"seq": last_num}}, upsert=True)
+        counter = db.counters.find_one_and_update(
+            {"_id": counter_id}, {"$inc": {"seq": 1}}, return_document=True
+        )
+        number = f"{prefix}/{fy_str}/{str(counter['seq']).zfill(num_width)}"
+        # Zoho caps document numbers at 16 chars — fall back to auto-numbering
+        # rather than fail the create call.
+        return number if len(number) <= 16 else None
+    except Exception:
+        return None
+
+
+async def _fetch_and_store_razorpay_payment(
+    client: httpx.AsyncClient, order_oid, rzp_payment_id: str
+) -> dict:
+    """Fetch the full Razorpay payment and persist the useful details onto
+    order.payment.* (method, amounts, fee, payer contact, instrument info) so
+    the admin can see exactly how the customer paid. Best-effort — a lookup
+    failure never blocks recording the payment in Zoho."""
+    if not rzp_payment_id:
+        return {}
+    try:
+        r = await client.get(
+            f"{RAZORPAY_BASE_URL}/payments/{rzp_payment_id}",
+            auth=(RAZORPAY_KEY or "", RAZORPAY_SECRET or ""),
+        )
+        p = r.json() if r.status_code == 200 else {}
+    except Exception:
+        p = {}
+    if not p or not p.get("id"):
+        return {}
+
+    def _rupees(paise):
+        try:
+            return round(int(paise) / 100, 2)
+        except (TypeError, ValueError):
+            return None
+
+    details = {
+        "payment.method": p.get("method", ""),
+        "payment.amount_paid": _rupees(p.get("amount")),
+        "payment.currency": p.get("currency", ""),
+        "payment.fee": _rupees(p.get("fee")),
+        "payment.fee_tax": _rupees(p.get("tax")),
+        "payment.email": p.get("email", ""),
+        "payment.contact": p.get("contact", ""),
+        "payment.bank": p.get("bank") or "",
+        "payment.wallet": p.get("wallet") or "",
+        "payment.vpa": p.get("vpa") or "",
+        "payment.acquirer_data": p.get("acquirer_data") or {},
+    }
+    card = p.get("card") or {}
+    if card:
+        details["payment.card_network"] = card.get("network", "")
+        details["payment.card_last4"] = card.get("last4", "")
+        details["payment.card_type"] = card.get("type", "")
+    if p.get("created_at"):
+        try:
+            details["payment.paid_at"] = datetime.fromtimestamp(int(p["created_at"]))
+        except (TypeError, ValueError, OSError):
+            pass
+    orders_collection.update_one({"_id": order_oid}, {"$set": details})
+    return p
+
+
+async def _run_post_payment_zoho_chain(order_id: str, request: Request, background_tasks: BackgroundTasks):
+    """Run the accepted-estimate -> sales order -> invoice -> payment chain.
+    Raises on the first failing step (callers log it); already-completed steps
+    are skipped, so re-running after a partial failure finishes the rest."""
+    from .orders import finalise  # lazy import to avoid circular import
+    from .helpers import get_access_token
+
+    order = orders_collection.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise RuntimeError(f"Order {order_id} not found")
+    if (order.get("payment") or {}).get("status") != "paid":
+        raise RuntimeError(f"Order {order_id} is not paid — chain aborted")
+
+    # Coarse claim so verify + webhook can't run the chain concurrently.
+    claimed = orders_collection.find_one_and_update(
+        {"_id": order["_id"], "zoho_flow.chain_running": {"$ne": True}},
+        {
+            "$set": {
+                "zoho_flow.chain_running": True,
+                "zoho_flow.chain_started_at": datetime.now(),
+            }
+        },
+    )
+    if claimed is None:
+        _log_transaction("zoho_chain_skipped", order_id, reason="already_running")
+        return {"status": "success", "message": "Zoho chain already running"}
+
+    message_parts = []
+    try:
+        # ── Step 1: estimate accepted (finalise creates it first if needed) ──
+        needs_accept = (
+            str(order.get("status", "")).lower() != "accepted"
+            or not (order.get("estimate_created") or order.get("pre_order_estimate_created"))
+        )
+        if needs_accept:
+            result = await finalise(
+                {
+                    "order_id": str(order_id),
+                    "status": "accepted",
+                    "create_stock": True,
+                    "create_pre_order": True,
+                },
+                request,
+                background_tasks,
+            )
+            _log_transaction("zoho_chain_estimate_accepted", order_id, result=result)
+            if result.get("status") != "success":
+                raise RuntimeError(f"Estimate accept failed: {result.get('message')}")
+            message_parts.append(result.get("message", "Estimate accepted"))
+            order = orders_collection.find_one({"_id": ObjectId(order_id)})
+
+        flow = order.get("zoho_flow") or {}
+        payment_info = order.get("payment") or {}
+        rzp_payment_id = (
+            payment_info.get("razorpay_payment_id") or payment_info.get("payment_id") or ""
+        )
+
+        customer = db.customers.find_one({"_id": ObjectId(order.get("customer_id"))})
+        if not customer or not customer.get("contact_id"):
+            raise RuntimeError("Order's customer has no Zoho contact_id")
+        contact_id = customer["contact_id"]
+
+        est_ids = [i for i in (order.get("estimate_id"), order.get("pre_order_estimate_id")) if i]
+        est_numbers = [
+            n
+            for n in (order.get("estimate_number"), order.get("pre_order_estimate_number"))
+            if n
+        ]
+        if not est_ids:
+            raise RuntimeError("No estimate ids on the order — cannot build sales order")
+
+        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+            # Pull line items + tax context from the created estimate(s) so the
+            # sales order and invoice mirror exactly what was quoted and paid.
+            line_items = []
+            is_inclusive_tax = False
+            place_of_supply = ""
+            salesperson_id = ""
+            for eid in est_ids:
+                r = await client.get(
+                    f"{ZOHO_BOOKS_BASE}/estimates/{eid}?organization_id={ZOHO_ORG_ID}",
+                    headers=headers,
+                )
+                est = (r.json() or {}).get("estimate") if r.status_code == 200 else None
+                if not est:
+                    raise RuntimeError(f"Could not fetch estimate {eid} from Zoho")
+                for li in est.get("line_items", []):
+                    line_items.append({k: li.get(k) for k in _CHAIN_LINE_ITEM_KEYS})
+                is_inclusive_tax = est.get("is_inclusive_tax", False)
+                place_of_supply = est.get("place_of_supply", "") or place_of_supply
+                salesperson_id = est.get("salesperson_id", "") or salesperson_id
+            if not line_items:
+                raise RuntimeError("Estimates have no line items")
+
+            base_doc = {
+                "customer_id": contact_id,
+                "date": today,
+                "line_items": line_items,
+                "is_inclusive_tax": is_inclusive_tax,
+                "place_of_supply": place_of_supply,
+                "salesperson_id": salesperson_id,
+                # Same location the estimates are created under (see orders.finalise).
+                "location_id": "3220178000143298047",
+            }
+
+            # ── Step 2: DRAFT sales order from the estimate ──
+            if not flow.get("salesorder_id"):
+                payload = {
+                    **base_doc,
+                    # Reference the estimate(s) this sales order was created from.
+                    "reference_number": " / ".join(est_numbers),
+                    "notes": f"Paid online via Razorpay ({rzp_payment_id}).",
+                }
+                so_url = f"{ZOHO_BOOKS_BASE}/salesorders?organization_id={ZOHO_ORG_ID}"
+                so_number = await _next_zoho_number(
+                    client, headers, "salesorders", "salesorders", "salesorder_number", "SO"
+                )
+                if so_number:
+                    payload["salesorder_number"] = so_number
+                    so_url += "&ignore_auto_number_generation=true"
+                r = await client.post(
+                    so_url,
+                    headers=headers,
+                    json=payload,
+                )
+                rj = r.json() if r.content else {}
+                if r.status_code != 201 or rj.get("code", 0) != 0:
+                    raise RuntimeError(f"Sales order creation failed: {rj.get('message', r.text)}")
+                so = rj["salesorder"]
+                flow["salesorder_id"] = so["salesorder_id"]
+                flow["salesorder_number"] = so.get("salesorder_number", "")
+                _set_zoho_flow(
+                    order["_id"],
+                    {
+                        "salesorder_id": flow["salesorder_id"],
+                        "salesorder_number": flow["salesorder_number"],
+                        "salesorder_created_at": datetime.now(),
+                    },
+                )
+                _log_transaction(
+                    "zoho_chain_salesorder_created",
+                    order_id,
+                    salesorder_number=flow["salesorder_number"],
+                )
+                message_parts.append(f"Sales order created: {flow['salesorder_number']}")
+
+            # ── Step 3: invoice, marked SENT (required before applying payment) ──
+            if not flow.get("invoice_id"):
+                payload = {
+                    **base_doc,
+                    # The invoice's order number = the sales order it fulfils.
+                    "reference_number": flow.get("salesorder_number", ""),
+                    "payment_terms": 0,
+                    "payment_terms_label": "Due on Receipt",
+                    "due_date": today,
+                }
+                inv_url = f"{ZOHO_BOOKS_BASE}/invoices?organization_id={ZOHO_ORG_ID}"
+                inv_number = await _next_zoho_number(
+                    client, headers, "invoices", "invoices", "invoice_number", "INV"
+                )
+                if inv_number:
+                    payload["invoice_number"] = inv_number
+                    inv_url += "&ignore_auto_number_generation=true"
+                r = await client.post(
+                    inv_url,
+                    headers=headers,
+                    json=payload,
+                )
+                rj = r.json() if r.content else {}
+                if r.status_code != 201 or rj.get("code", 0) != 0:
+                    raise RuntimeError(f"Invoice creation failed: {rj.get('message', r.text)}")
+                inv = rj["invoice"]
+                flow["invoice_id"] = inv["invoice_id"]
+                flow["invoice_number"] = inv.get("invoice_number", "")
+                flow["invoice_total"] = inv.get("total")
+                _set_zoho_flow(
+                    order["_id"],
+                    {
+                        "invoice_id": flow["invoice_id"],
+                        "invoice_number": flow["invoice_number"],
+                        "invoice_total": flow["invoice_total"],
+                        "invoice_created_at": datetime.now(),
+                    },
+                )
+                _log_transaction(
+                    "zoho_chain_invoice_created",
+                    order_id,
+                    invoice_number=flow["invoice_number"],
+                )
+                message_parts.append(f"Invoice created: {flow['invoice_number']}")
+
+            if not flow.get("invoice_sent"):
+                r = await client.post(
+                    f"{ZOHO_BOOKS_BASE}/invoices/{flow['invoice_id']}/status/sent?organization_id={ZOHO_ORG_ID}",
+                    headers=headers,
+                )
+                rj = r.json() if r.content else {}
+                # code 0 = marked sent; an already-sent invoice errors, which is fine.
+                if r.status_code == 200 and rj.get("code", 0) == 0:
+                    flow["invoice_sent"] = True
+                    _set_zoho_flow(order["_id"], {"invoice_sent": True})
+
+            # ── Step 4: customer payment applied to the invoice -> invoice PAID ──
+            if not flow.get("customerpayment_id"):
+                amount = flow.get("invoice_total")
+                if amount is None:
+                    amount = order.get("total_amount")
+                rzp_payment = await _fetch_and_store_razorpay_payment(
+                    client, order["_id"], rzp_payment_id
+                )
+                rzp_method = rzp_payment.get("method", "")
+                mode = RAZORPAY_METHOD_TO_ZOHO_MODE.get(rzp_method, "others")
+                payload = {
+                    "customer_id": contact_id,
+                    "payment_mode": mode,
+                    "amount": amount,
+                    "date": today,
+                    "reference_number": rzp_payment_id,
+                    "invoices": [
+                        {"invoice_id": flow["invoice_id"], "amount_applied": amount}
+                    ],
+                    "notes": f"Online payment via Razorpay ({rzp_method or 'unknown method'}).",
+                }
+                pay_url = f"{ZOHO_BOOKS_BASE}/customerpayments?organization_id={ZOHO_ORG_ID}"
+                pay_number = await _next_zoho_number(
+                    client, headers, "customerpayments", "customerpayments", "payment_number", "CP"
+                )
+                if pay_number:
+                    payload["payment_number"] = pay_number
+                    pay_url += "&ignore_auto_number_generation=true"
+                r = await client.post(
+                    pay_url,
+                    headers=headers,
+                    json=payload,
+                )
+                rj = r.json() if r.content else {}
+                if r.status_code != 201 or rj.get("code", 0) != 0:
+                    raise RuntimeError(
+                        f"Customer payment creation failed: {rj.get('message', r.text)}"
+                    )
+                pay = rj["payment"]
+                flow["customerpayment_id"] = pay["payment_id"]
+                _set_zoho_flow(
+                    order["_id"],
+                    {
+                        "customerpayment_id": pay["payment_id"],
+                        "customerpayment_number": pay.get("payment_number", ""),
+                        "customerpayment_mode": mode,
+                        "razorpay_method": rzp_method,
+                        "customerpayment_created_at": datetime.now(),
+                        "chain_completed_at": datetime.now(),
+                    },
+                )
+                _log_transaction(
+                    "zoho_chain_payment_recorded",
+                    order_id,
+                    zoho_payment_id=pay["payment_id"],
+                    payment_mode=mode,
+                )
+                message_parts.append("Customer payment recorded — invoice marked paid")
+
+        return {"status": "success", "message": "\n".join(message_parts) or "Zoho chain already complete"}
+    except Exception as e:
+        _set_zoho_flow(order["_id"], {"last_error": str(e), "last_error_at": datetime.now()})
+        raise
+    finally:
+        orders_collection.update_one(
+            {"_id": order["_id"]}, {"$set": {"zoho_flow.chain_running": False}}
+        )
 
 
 @router.post("/webhook")
@@ -753,7 +1282,9 @@ async def razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
             order.get("estimate_created")
             or str(order.get("status", "")).lower() == "accepted"
         )
-        if already_accepted:
+        # Self-registered orders always run the (idempotent) post-payment chain
+        # so a partially-completed sales order / invoice / payment gets finished.
+        if already_accepted and not _is_self_registered_order(order):
             _log_transaction("webhook_estimate_skipped", order_id, reason="already_created")
             # Estimate already exists -> confirm now (order already has its number).
             _notify_customer_payment_success(order)
