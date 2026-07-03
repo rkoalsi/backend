@@ -733,6 +733,9 @@ def get_daily_visits_report(request: Request):
         f"Last Year Sale ({previous_fy_label})",
         "Outstanding Balance",
         "Final Remarks (For office Team)",
+        "Has Update",
+        "Update Text",
+        "Update Date & Time",
     ]
 
     wb = openpyxl.Workbook()
@@ -748,11 +751,10 @@ def get_daily_visits_report(request: Request):
 
         # Build a map: customer_id/potential_customer_id → first update with images
         update_photo_map = {}
+        # Build a map: customer_id/potential_customer_id → list of (text, time) for all updates
+        update_text_map = {}
         for upd in dv.get("updates", []):
             images = upd.get("images") or []
-            if not images:
-                continue
-            first_image = images[0].get("url", "") if images else ""
             # updates.created_at is stored as a UTC string; convert to IST
             raw_upd_time = upd.get("created_at") or ""
             if raw_upd_time:
@@ -770,8 +772,17 @@ def get_daily_visits_report(request: Request):
             cid = upd.get("customer_id")
             pcid = upd.get("potential_customer_id")
             key = cid or pcid
-            if key and key not in update_photo_map:
-                update_photo_map[key] = (first_image, upd_time)
+            if not key:
+                continue
+
+            if images:
+                first_image = images[0].get("url", "")
+                if key not in update_photo_map:
+                    update_photo_map[key] = (first_image, upd_time)
+
+            upd_text = upd.get("text", "")
+            if upd_text:
+                update_text_map.setdefault(key, []).append((upd_text, upd_time))
 
         # Admin comments as final remarks (all comments on this visit)
         admin_comments = dv.get("admin_comments") or []
@@ -792,6 +803,11 @@ def get_daily_visits_report(request: Request):
 
             photo_url, photo_time = update_photo_map.get(customer_key, ("", ""))
             has_photo = bool(photo_url)
+
+            customer_updates = update_text_map.get(customer_key, [])
+            has_update = bool(customer_updates)
+            update_text = "; ".join(text for text, _ in customer_updates)
+            update_time = customer_updates[-1][1] if customer_updates else ""
 
             if is_potential:
                 fin = {}
@@ -815,11 +831,14 @@ def get_daily_visits_report(request: Request):
                 fin.get("previous_fy_sale", ""),
                 fin.get("outstanding_balance", ""),
                 final_remarks,
+                has_update,
+                update_text,
+                update_time,
             ]
             ws.append(row)
 
     # Style boolean columns
-    bool_cols = [5, 8]  # Selfie, Shop Photo (1-indexed)
+    bool_cols = [5, 8, 17]  # Selfie, Shop Photo, Has Update (1-indexed)
     for row in ws.iter_rows(min_row=2):
         for col_idx in bool_cols:
             cell = row[col_idx - 1]
