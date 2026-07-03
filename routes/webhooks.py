@@ -1926,6 +1926,55 @@ def handle_delete_transfer_order(data: dict):
         print("No transfer_order_id found in delete webhook")
 
 
+def handle_inventory_adjustment(data: dict):
+    adjustment = data.get("inventory_adjustment") or {}
+    adjustment_id = str(adjustment.get("inventory_adjustment_id", ""))
+    if not adjustment_id:
+        print("No inventory_adjustment_id found in webhook")
+        return
+
+    exists = serialize_mongo_document(
+        db.inventory_adjustments.find_one({"inventory_adjustment_id": adjustment_id})
+    )
+
+    sorted_adjustment = sort_dict_keys(adjustment)
+    current_time = datetime.datetime.now()
+
+    datetime_fields = ["created_time", "date", "last_modified_time"]
+    for field in datetime_fields:
+        if field in sorted_adjustment and sorted_adjustment[field]:
+            parsed_dt = parse_datetime(sorted_adjustment[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_adjustment[field] = parsed_dt
+
+    if not exists:
+        sorted_adjustment["created_at"] = sorted_adjustment.get("created_time", current_time)
+        sorted_adjustment["updated_at"] = current_time
+        db.inventory_adjustments.insert_one(sorted_adjustment)
+        print(f"Created new inventory adjustment {adjustment_id}")
+    else:
+        sorted_adjustment["updated_at"] = current_time
+        if "created_at" not in sorted_adjustment and "created_at" in exists:
+            sorted_adjustment["created_at"] = exists["created_at"]
+        elif "created_at" not in sorted_adjustment:
+            sorted_adjustment["created_at"] = sorted_adjustment.get("created_time", current_time)
+        db.inventory_adjustments.update_one(
+            {"inventory_adjustment_id": adjustment_id},
+            {"$set": sorted_adjustment},
+        )
+        print(f"Updated inventory adjustment {adjustment_id}")
+
+
+def handle_delete_inventory_adjustment(data: dict):
+    adjustment = data.get("inventory_adjustment") or {}
+    adjustment_id = str(adjustment.get("inventory_adjustment_id", ""))
+    if adjustment_id:
+        result = db.inventory_adjustments.delete_one({"inventory_adjustment_id": adjustment_id})
+        print(f"Deleted inventory adjustment {adjustment_id}: {result.deleted_count} document(s) removed")
+    else:
+        print("No inventory_adjustment_id found in delete webhook")
+
+
 def handle_delete_invoice(data: dict):
     invoice = data.get("invoice") or {}
     invoice_id = invoice.get("invoice_id", "")
@@ -2450,6 +2499,18 @@ def transfer_order(data: dict):
 def delete_transfer_order(data: dict):
     handle_delete_transfer_order(data)
     return "Delete Transfer Order Webhook Received Successfully"
+
+
+@router.post("/inventory_adjustment")
+def inventory_adjustment(data: dict):
+    handle_inventory_adjustment(data)
+    return "Inventory Adjustment Webhook Received Successfully"
+
+
+@router.post("/delete_inventory_adjustment")
+def delete_inventory_adjustment(data: dict):
+    handle_delete_inventory_adjustment(data)
+    return "Delete Inventory Adjustment Webhook Received Successfully"
 
 
 @router.post("/delete_vendor")

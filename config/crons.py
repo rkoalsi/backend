@@ -439,6 +439,40 @@ def process_transfer_order_data(transfer_order_data):
     return sort_dict_recursively(transfer_order_data)
 
 
+def process_inventory_adjustment_data(adjustment_data):
+    """Process inventory adjustment data to ensure proper formatting and datetime conversion."""
+    adjustment_data["inventory_adjustment_id"] = str(
+        adjustment_data.get("inventory_adjustment_id", "")
+    )
+
+    datetime_fields = [
+        "created_time", "date", "last_modified_time",
+        "created_time_formatted", "last_modified_time_formatted",
+    ]
+
+    for field in datetime_fields:
+        if field in adjustment_data and adjustment_data[field]:
+            datetime_value = parse_datetime_field(adjustment_data[field])
+            if isinstance(datetime_value, datetime):
+                adjustment_data[field] = datetime_value
+
+    if "created_time" in adjustment_data:
+        adjustment_data["created_at"] = adjustment_data.get("created_time")
+    elif "date" in adjustment_data:
+        date_val = parse_datetime_field(adjustment_data["date"])
+        if isinstance(date_val, datetime):
+            adjustment_data["created_at"] = date_val
+        else:
+            adjustment_data["created_at"] = adjustment_data["date"]
+
+    if "created_at" not in adjustment_data:
+        logger.warning(
+            f"No created_at field for inventory adjustment {adjustment_data.get('inventory_adjustment_id')}"
+        )
+
+    return sort_dict_recursively(adjustment_data)
+
+
 def process_estimate_data(estimate_data):
     """Process estimate data to ensure proper formatting and datetime conversion."""
     estimate_data["estimate_id"] = str(estimate_data["estimate_id"])
@@ -1872,6 +1906,158 @@ async def transfer_orders_cron():
         )
 
 
+async def inventory_adjustments_cron():
+    """Cron job for syncing recent inventory adjustments from the last 3 pages of Zoho Inventory."""
+    logger.info("Starting inventory adjustments sync (last 3 pages)...")
+    start_time = time.time()
+    all_new_adjustments = []
+    new_adjustment_ids = []
+    total_checked = 0
+
+    try:
+        db = get_database()
+        collection = db["inventory_adjustments"]
+
+        async with ZohoAPIClient("inventory") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            # Get total pages first
+            first_page_url = (
+                f"https://www.zohoapis.com/inventory/v1/inventoryadjustments?"
+                f"page=1&per_page=200&"
+                f"organization_id={org_id}"
+            )
+            first_data = await api_client.make_request(first_page_url)
+            if not first_data:
+                logger.error("Failed to get response from inventory adjustments API")
+                return
+
+            page_context = first_data.get("page_context", {})
+            total_pages = page_context.get("total_pages", 1)
+            logger.info(f"Total inventory adjustment pages: {total_pages}")
+
+            # Fetch the last 3 pages (most recent data)
+            pages_to_fetch = list(range(max(1, total_pages - 2), total_pages + 1))
+            logger.info(f"Fetching pages: {pages_to_fetch}")
+
+            for page in pages_to_fetch:
+                logger.info(f"Fetching inventory adjustments page {page}/{total_pages}...")
+
+                if page == 1 and first_data:
+                    page_data = first_data
+                else:
+                    page_url = (
+                        f"https://www.zohoapis.com/inventory/v1/inventoryadjustments?"
+                        f"page={page}&per_page=200&"
+                        f"organization_id={org_id}"
+                    )
+                    page_data = await api_client.make_request(page_url)
+
+                if not page_data:
+                    logger.warning(f"No data returned for page {page}")
+                    continue
+
+                page_adjustments = (
+                    page_data.get("inventory_adjustments")
+                    or page_data.get("inventoryadjustments")
+                    or []
+                )
+
+                if not page_adjustments:
+                    logger.info(f"No inventory adjustments found on page {page}")
+                    continue
+
+                logger.info(f"Found {len(page_adjustments)} inventory adjustments on page {page}")
+
+                page_ids = [
+                    str(adj["inventory_adjustment_id"])
+                    for adj in page_adjustments
+                    if adj.get("inventory_adjustment_id")
+                ]
+                total_checked += len(page_ids)
+
+                existing_ids = set()
+                existing_docs = collection.find(
+                    {"inventory_adjustment_id": {"$in": page_ids}},
+                    {"inventory_adjustment_id": 1},
+                )
+                for doc in existing_docs:
+                    existing_ids.add(doc["inventory_adjustment_id"])
+
+                for adj_id in page_ids:
+                    if adj_id not in existing_ids:
+                        new_adjustment_ids.append(adj_id)
+
+                logger.info(
+                    f"Page {page}: {len(page_ids) - len([i for i in page_ids if i in existing_ids])} new inventory adjustments found"
+                )
+
+            if not new_adjustment_ids:
+                logger.info("No new inventory adjustments found in last 3 pages")
+            else:
+                logger.info(f"Fetching details for {len(new_adjustment_ids)} new inventory adjustments...")
+
+                detail_tasks = []
+                for adj_id in new_adjustment_ids:
+                    detail_url = (
+                        f"https://www.zohoapis.com/inventory/v1/inventoryadjustments/{adj_id}?"
+                        f"organization_id={org_id}"
+                    )
+                    detail_tasks.append(api_client.make_request(detail_url))
+
+                semaphore = asyncio.Semaphore(3)
+
+                async def fetch_detail_with_semaphore(task):
+                    async with semaphore:
+                        return await task
+
+                detail_results = await asyncio.gather(
+                    *[fetch_detail_with_semaphore(task) for task in detail_tasks],
+                    return_exceptions=True,
+                )
+
+                for i, result in enumerate(detail_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(f"Error fetching inventory adjustment {new_adjustment_ids[i]}: {result}")
+                            continue
+
+                        if not result:
+                            continue
+
+                        adj_data = result.get("inventory_adjustment")
+
+                        if adj_data:
+                            processed = process_inventory_adjustment_data(adj_data)
+                            all_new_adjustments.append(processed)
+                    except Exception as e:
+                        logger.error(f"Error processing inventory adjustment {new_adjustment_ids[i]}: {e}")
+
+                if all_new_adjustments:
+                    collection.insert_many(all_new_adjustments, ordered=False)
+                    logger.info(f"Inserted {len(all_new_adjustments)} new inventory adjustments")
+                else:
+                    logger.info("No new inventory adjustments to insert after processing")
+
+        duration = time.time() - start_time
+        send_slack_notification(
+            "Inventory Adjustments Cron",
+            success=True,
+            details={
+                "processed": total_checked,
+                "inserted": len(all_new_adjustments),
+                "duration": duration,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error in inventory adjustments sync: {e}")
+        send_slack_notification(
+            "Inventory Adjustments Cron Error", success=False, error_msg=str(e)
+        )
+
+
 async def bills_cron():
     """Cron job for syncing bills from Zoho Books - fetch last 2 pages, delete and reinsert."""
     logger.info("Starting daily bills sync...")
@@ -2690,6 +2876,19 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added transfer_orders_cron job")
+
+        scheduler_instance.add_job(
+            inventory_adjustments_cron,
+            "cron",
+            hour=17,
+            minute=45,
+            id="inventory_adjustments_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added inventory_adjustments_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
