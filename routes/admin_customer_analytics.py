@@ -36,6 +36,27 @@ s3_client = boto3.client(
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
 )
 
+# Fixed column ordering for the brand breakdown sheet; brands not listed here
+# are appended alphabetically after these.
+BRAND_DISPLAY_ORDER = [
+    "FOFOS",
+    "Truelove",
+    "Dogfest",
+    "Barkbutler",
+    "Zippy Paws",
+    "Catfest",
+    "Joyser",
+    "Squeezys",
+    "FIDA",
+    "Afterbath",
+    "Scents of Freshness",
+    "Honst",
+    "Dux",
+    "Waggyzone",
+    "Waggie Wag",
+    "Unknown",
+]
+
 
 def build_customer_analytics_pipeline(
     match_stage,
@@ -1684,9 +1705,18 @@ def download_customer_analytics_report(
             all_brands_set = {brand for cid_brands in brand_totals.values() for brand in cid_brands}
             if brands:
                 requested_brands = {b.strip() for b in brands.split(",") if b.strip()}
-                all_brands = sorted(all_brands_set & requested_brands)
+                selected_brands = all_brands_set & requested_brands
             else:
-                all_brands = sorted(all_brands_set)
+                selected_brands = all_brands_set
+            all_brands = sorted(
+                selected_brands,
+                key=lambda b: (
+                    BRAND_DISPLAY_ORDER.index(b)
+                    if b in BRAND_DISPLAY_ORDER
+                    else len(BRAND_DISPLAY_ORDER),
+                    b,
+                ),
+            )
 
         # Build combined Address & Brand Breakdown sheet
         COLS_PER_BRAND = 5
