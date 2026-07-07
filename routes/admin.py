@@ -2381,7 +2381,7 @@ def download_payments_due_xlsx(sales_person: str):
         parts = []
         for cn in cns or []:
             num = cn.get("creditnote_number", "")
-            total = cn.get("total", 0)
+            total = cn.get("balance") if cn.get("balance") is not None else cn.get("total", 0)
             status = cn.get("status", "")
             parts.append(f"{num} - ₹{total} ({status})")
         return "; ".join(parts)
