@@ -8,7 +8,8 @@ from email.mime.base import MIMEBase
 from email import encoders
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
-from ..config.whatsapp import send_whatsapp 
+from datetime import date, datetime
+from ..config.whatsapp import send_whatsapp
 
 load_dotenv()
 org_id = os.getenv("ORG_ID")
@@ -491,3 +492,75 @@ def notify_person(template, params, person):
     if phone != "":
         send_whatsapp(phone, template_doc, parameters)
     pass
+
+
+# Lightweight field set for listing overdue invoices. Deliberately EXCLUDES
+# line_items (which can be very large and would make us drag the whole
+# collection's item arrays over the wire just to sort/count/paginate). Callers
+# that need line_items (e.g. the admin drawer's Products table) should fetch
+# them for the current page's invoices only.
+_OVERDUE_INVOICE_PROJECTION = {
+    "invoice_id": 1,
+    "invoice_number": 1,
+    "date": 1,
+    "due_date": 1,
+    "status": 1,
+    "customer_id": 1,
+    "customer_name": 1,
+    "total": 1,
+    "balance": 1,
+    "cf_sales_person": 1,
+    "salesperson_name": 1,
+    "created_by_name": 1,
+    "created_at": 1,
+    "invoice_url": 1,
+}
+
+
+def fetch_overdue_invoices(db, extra_query: dict = None, projection: dict = None):
+    """
+    Return all unpaid, overdue (<=365 days), non-void invoices with a
+    computed `overdue_by_days` field, sorted ascending by that field.
+
+    due_date is stored inconsistently as either a string or a real Date
+    across the collection. A single query with `$or` on `{$type: 'string'}`
+    / `{$type: 'date'}` makes Mongo's planner pick one weak index for both
+    branches (observed 8-50s on this cluster). Splitting into two
+    homogeneous-type queries, each hinted to its own best index, and merging
+    client-side is 5-10x faster in practice.
+
+    By default only a lightweight projection is fetched (no line_items) so we
+    don't pull the entire matched set's item arrays across the wire just to
+    sort and paginate. Pass an explicit `projection` to override.
+    """
+    today_str = date.today().isoformat()
+    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    status_filter = {"status": {"$nin": ["paid", "void"]}}
+    proj = projection if projection is not None else _OVERDUE_INVOICE_PROJECTION
+
+    q_date = {"due_date": {"$type": "date", "$lt": today_date}, **status_filter}
+    q_str = {"due_date": {"$type": "string", "$lt": today_str}, **status_filter}
+    if extra_query:
+        q_date = {"$and": [q_date, extra_query]}
+        q_str = {"$and": [q_str, extra_query]}
+
+    docs = list(db.invoices.find(q_date, proj).hint("due_date_1_status_1"))
+    docs += list(db.invoices.find(q_str, proj).hint("status_1"))
+
+    now = datetime.now()
+    result = []
+    for doc in docs:
+        due = doc.get("due_date")
+        if isinstance(due, str):
+            try:
+                due = datetime.fromisoformat(due)
+            except ValueError:
+                continue
+        overdue_by_days = (now - due).days
+        if overdue_by_days > 365:
+            continue
+        doc["overdue_by_days"] = overdue_by_days
+        result.append(doc)
+
+    result.sort(key=lambda d: d["overdue_by_days"])
+    return result

@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Response
-from ..config.root import get_database, serialize_mongo_document  
+from fastapi import APIRouter, Query, HTTPException, File, UploadFile, Form, Response, Depends
+from pydantic import BaseModel
+from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import get_current_user
 from typing import Optional, List
 from bson import ObjectId
 import re, uuid, boto3, os, requests, json
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
-from .helpers import get_access_token
+from .helpers import get_access_token, fetch_overdue_invoices
 
 router = APIRouter()
 
@@ -34,18 +36,35 @@ def get_invoice(
     if result:
         invoice = result
         invoice["status"] = str(invoice["status"]).capitalize()
-        return serialize_mongo_document(invoice)
-    return None
-
-def get_invoice(
-    invoice_id: str,
-):
-    result = invoice_collection.find_one(
-        {"_id": ObjectId(invoice_id), "status": {"$nin": ["void", "paid"]}}
-    )
-    if result:
-        invoice = result
-        invoice["status"] = str(invoice["status"]).capitalize()
+        open_credit_notes = list(
+            db.credit_notes.aggregate(
+                [
+                    {
+                        "$match": {
+                            "customer_id": invoice.get("customer_id"),
+                            "status": {"$nin": ["void", "closed"]},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total": {
+                                "$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}
+                            },
+                        }
+                    },
+                ]
+            )
+        )
+        invoice["open_credit_note_amt"] = (
+            open_credit_notes[0]["total"] if open_credit_notes else 0
+        )
+        invoice_note = db.invoice_notes.find_one(
+            {"invoice_number": invoice.get("invoice_number")}
+        )
+        invoice["invoice_notes"] = (
+            serialize_mongo_document(invoice_note) if invoice_note else None
+        )
         return serialize_mongo_document(invoice)
     return None
 
@@ -67,27 +86,12 @@ def get_invoices(
     forbidden_keywords = (
         "(Company customers|defaulters|Amazon|staff purchase|marketing inv's)"
     )
-
-    # Today's date in ISO format (YYYY-MM-DD) and as Date object
-    today_str = date.today().isoformat()
-    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     escaped_sales_person = re.escape(code)
 
-    # Build the query to match invoices past their due date and not marked as paid.
-    # Handle both string and date formats for due_date
-    query = {
-        "$or": [
-            # Case 1: due_date is a string
-            {
-                "due_date": {"$type": "string", "$lt": today_str}
-            },
-            # Case 2: due_date is a date
-            {
-                "due_date": {"$type": "date", "$lt": today_date}
-            }
-        ],
-        "status": {"$nin": ["paid", "void"]},
-        # Must match 'code' in either cf_sales_person or salesperson_name
+    # Must match 'code' in either cf_sales_person or salesperson_name, and
+    # exclude documents whose cf_sales_person/salesperson_name contain any
+    # forbidden keyword.
+    extra_query = {
         "$and": [
             {
                 "$or": [
@@ -109,7 +113,6 @@ def get_invoices(
                     {"cf_sales_person": "Company customers"},
                 ]
             },
-            # Exclude documents if cf_sales_person or salesperson_name contains any forbidden keywords
             {
                 "$and": [
                     {"cf_sales_person": {"$not": {"$regex": forbidden_keywords, "$options": "i"}}},
@@ -119,86 +122,47 @@ def get_invoices(
         ]
     }
 
-    # Define the projection, including a new field to calculate the overdue days.
-    # Handle both string and date formats for due_date in overdue_by_days calculation
-    project = {
-        "_id": 1,
-        "invoice_id": 1,
-        "invoice_number": 1,
-        "status": {"$toString": "overdue"},
-        "date": 1,
-        "due_date": 1,
-        "customer_id": 1,
-        "customer_name": 1,
-        "total": 1,
-        "balance": 1,
-        "cf_sales_person": 1,
-        "salesperson_name": 1,
-        "created_at": 1,
-        "overdue_by_days": 1,
-        "invoice_notes": 1,
+    matched = fetch_overdue_invoices(db, extra_query)
+
+    invoice_numbers = [d.get("invoice_number") for d in matched]
+    customer_ids = [d.get("customer_id") for d in matched]
+
+    notes_by_invoice = {
+        n["invoice_number"]: n
+        for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
     }
+    credit_note_totals = {}
+    for row in db.credit_notes.aggregate([
+        {"$match": {"customer_id": {"$in": customer_ids}, "status": {"$nin": ["void", "closed"]}}},
+        {"$group": {"_id": "$customer_id", "total": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}}}},
+    ]):
+        credit_note_totals[row["_id"]] = row["total"]
 
-    overdue_days_expr = {
-        "$dateDiff": {
-            "startDate": {
-                "$cond": {
-                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                    "then": {"$dateFromString": {"dateString": "$due_date"}},
-                    "else": "$due_date",
-                }
-            },
-            "endDate": "$$NOW",
-            "unit": "day",
-        }
-    }
-
-    # Construct the aggregation pipeline
-    pipeline = [
-        {"$match": query},
-        # Compute overdue_by_days first so we can filter and sort reliably
-        {"$addFields": {"overdue_by_days": overdue_days_expr}},
-        # Enforce 365-day cap
-        {"$match": {"overdue_by_days": {"$lte": 365}}},
-        {"$sort": {"overdue_by_days": 1}},
-        {
-            "$lookup": {
-                "from": "invoice_notes",
-                "localField": "invoice_number",
-                "foreignField": "invoice_number",
-                "as": "invoice_notes",
-            }
-        },
-        {
-            "$unwind": {
-                "path": "$invoice_notes",
-                "preserveNullAndEmptyArrays": True,
-            }
-        },
-        {"$project": project},
-    ]
-
-    # Execute the pipeline
-    try:
-        fetched_invoices = list(db.invoices.aggregate(pipeline))
-    except Exception as e:
-        print(f"Error during aggregation: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    # Serialize the documents
-    all_invoices = [serialize_mongo_document(doc) for doc in fetched_invoices]
-
-    # Count total matching documents
-    try:
-        total_invoices = db.invoices.count_documents(query)
-    except Exception as e:
-        print(f"Error counting documents: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    all_invoices = []
+    for doc in matched:
+        all_invoices.append(serialize_mongo_document({
+            "_id": doc.get("_id"),
+            "invoice_id": doc.get("invoice_id"),
+            "invoice_number": doc.get("invoice_number"),
+            "status": "overdue",
+            "date": doc.get("date"),
+            "due_date": doc.get("due_date"),
+            "customer_id": doc.get("customer_id"),
+            "customer_name": doc.get("customer_name"),
+            "total": doc.get("total"),
+            "balance": doc.get("balance"),
+            "cf_sales_person": doc.get("cf_sales_person"),
+            "salesperson_name": doc.get("salesperson_name"),
+            "created_at": doc.get("created_at"),
+            "overdue_by_days": doc.get("overdue_by_days"),
+            "invoice_notes": notes_by_invoice.get(doc.get("invoice_number")),
+            "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+        }))
 
     # Return the response
     return {
         "invoices": all_invoices,
-        "total": total_invoices,
+        "total": len(all_invoices),
     }
 
 @router.post("/notes")
@@ -334,6 +298,79 @@ async def update_invoice_note(
         )
 
     return {"message": "Invoice note updated successfully"}
+
+
+class InvoiceFollowUpUpdate(BaseModel):
+    invoice_number: str
+    sp_remarks: Optional[str] = None
+    payment_cleared_details: Optional[str] = None
+    expected_payment_date: Optional[str] = None
+    office_team_remarks: Optional[str] = None
+
+
+def _sales_person_owns_invoice(invoice_number: str, code: str) -> bool:
+    invoice = db.invoices.find_one({"invoice_number": invoice_number})
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found.")
+    escaped_code = re.escape(code or "")
+    pattern = re.compile(rf"(^\s*|,\s*){escaped_code}(\s*,|\s*$)", re.IGNORECASE)
+    cf_sp = invoice.get("cf_sales_person") or ""
+    sp_name = invoice.get("salesperson_name") or ""
+    return bool(pattern.search(cf_sp) or pattern.search(sp_name))
+
+
+@router.patch("/notes/fields")
+async def update_invoice_note_fields(
+    payload: InvoiceFollowUpUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Partial update of the payments-due follow-up fields on an invoice_notes
+    document: sp_remarks, payment_cleared_details, expected_payment_date
+    (sales person editable) and office_team_remarks (admin/sales_admin only).
+    """
+    user_data = current_user.get("data", current_user)
+    role = user_data.get("role", "")
+    code = user_data.get("code", "")
+
+    update_data = {}
+    if payload.sp_remarks is not None:
+        update_data["sp_remarks"] = payload.sp_remarks
+    if payload.payment_cleared_details is not None:
+        update_data["payment_cleared_details"] = payload.payment_cleared_details
+    if payload.expected_payment_date is not None:
+        update_data["expected_payment_date"] = payload.expected_payment_date
+    if payload.office_team_remarks is not None:
+        if role not in ("admin", "sales_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Only admin/office team can edit Office Team Remarks.",
+            )
+        update_data["office_team_remarks"] = payload.office_team_remarks
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields provided to update.")
+
+    if role == "sales_person" and not _sales_person_owns_invoice(
+        payload.invoice_number, code
+    ):
+        raise HTTPException(
+            status_code=403, detail="You do not have access to this invoice."
+        )
+
+    update_data["updated_at"] = datetime.now()
+    db.invoice_notes.update_one(
+        {"invoice_number": payload.invoice_number},
+        {
+            "$set": update_data,
+            "$setOnInsert": {
+                "invoice_number": payload.invoice_number,
+                "created_at": datetime.now(),
+            },
+        },
+        upsert=True,
+    )
+    return {"message": "Invoice follow-up fields updated successfully"}
 
 
 @router.delete("/notes/image")
