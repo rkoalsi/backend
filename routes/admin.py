@@ -12,7 +12,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from ..config.root import get_client, get_database, serialize_mongo_document
 from bson.objectid import ObjectId
-from .helpers import get_access_token, fetch_overdue_invoices
+from .helpers import get_access_token, fetch_overdue_invoices, fetch_associated_credit_notes
 from typing import Optional, List
 import re, requests, os, json, time, boto3, io, csv, openpyxl
 from dotenv import load_dotenv
@@ -2179,6 +2179,8 @@ def read_all_orders(
     customer_ids = [d.get("customer_id") for d in page_docs]
     page_ids = [d.get("_id") for d in page_docs]
 
+    associated_cns = fetch_associated_credit_notes(db, page_docs)
+
     notes_by_invoice = {
         n["invoice_number"]: n
         for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
@@ -2233,6 +2235,7 @@ def read_all_orders(
             "overdue_by_days": doc.get("overdue_by_days"),
             "invoice_notes": note,
             "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+            "associated_credit_notes": associated_cns.get(doc.get("invoice_id"), []),
             "note_created_by_name": creator.get("first_name") if creator else None,
         }
         inv.append(serialize_mongo_document(item))
@@ -2297,6 +2300,8 @@ def download_payments_due_xlsx(sales_person: str):
     invoice_numbers = [d.get("invoice_number") for d in matched]
     customer_ids = [d.get("customer_id") for d in matched]
 
+    associated_cns = fetch_associated_credit_notes(db, matched)
+
     notes_by_invoice = {
         n["invoice_number"]: n
         for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
@@ -2333,6 +2338,7 @@ def download_payments_due_xlsx(sales_person: str):
             "overdue_by_days": doc.get("overdue_by_days"),
             "invoice_notes": notes_by_invoice.get(doc.get("invoice_number")),
             "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+            "associated_credit_notes": associated_cns.get(doc.get("invoice_id"), []),
         }))
 
     # Build the XLSX workbook matching the sample "Payment Due Sheet" format
@@ -2357,6 +2363,7 @@ def download_payments_due_xlsx(sales_person: str):
         "Expected Payment date",
         "Remarks Office Team",
         "Open Credit Note Amt.",
+        "Associated Credit Notes",
         "Additional Information",
         "Images",
     ]
@@ -2368,6 +2375,16 @@ def download_payments_due_xlsx(sales_person: str):
         if isinstance(value, (datetime, date)):
             return value.strftime("%Y-%m-%d")
         return str(value)
+
+    def _fmt_credit_notes(cns):
+        # e.g. "CN-00257 - ₹542.64 (closed); CN-00301 - ₹100 (open)"
+        parts = []
+        for cn in cns or []:
+            num = cn.get("creditnote_number", "")
+            total = cn.get("balance") if cn.get("balance") is not None else cn.get("total", 0)
+            status = cn.get("status", "")
+            parts.append(f"{num} - ₹{total} ({status})")
+        return "; ".join(parts)
 
     for invoice in invoices:
         notes = invoice.get("invoice_notes") or {}
@@ -2389,6 +2406,7 @@ def download_payments_due_xlsx(sales_person: str):
                 _fmt_date(notes.get("expected_payment_date")),
                 notes.get("office_team_remarks", ""),
                 invoice.get("open_credit_note_amt", 0),
+                _fmt_credit_notes(invoice.get("associated_credit_notes")),
                 notes.get("additional_info", ""),
                 ", ".join(notes.get("images", []) or []),
             ]

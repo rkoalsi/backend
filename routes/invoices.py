@@ -7,7 +7,7 @@ from bson import ObjectId
 import re, uuid, boto3, os, requests, json
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
-from .helpers import get_access_token, fetch_overdue_invoices
+from .helpers import get_access_token, fetch_overdue_invoices, fetch_associated_credit_notes
 
 router = APIRouter()
 
@@ -58,6 +58,18 @@ def get_invoice(
         )
         invoice["open_credit_note_amt"] = (
             open_credit_notes[0]["total"] if open_credit_notes else 0
+        )
+        associated_cns = fetch_associated_credit_notes(
+            db,
+            [
+                {
+                    "invoice_id": invoice.get("invoice_id"),
+                    "customer_id": invoice.get("customer_id"),
+                }
+            ],
+        )
+        invoice["associated_credit_notes"] = associated_cns.get(
+            invoice.get("invoice_id"), []
         )
         invoice_note = db.invoice_notes.find_one(
             {"invoice_number": invoice.get("invoice_number")}
@@ -127,6 +139,8 @@ def get_invoices(
     invoice_numbers = [d.get("invoice_number") for d in matched]
     customer_ids = [d.get("customer_id") for d in matched]
 
+    associated_cns = fetch_associated_credit_notes(db, matched)
+
     notes_by_invoice = {
         n["invoice_number"]: n
         for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
@@ -157,6 +171,7 @@ def get_invoices(
             "overdue_by_days": doc.get("overdue_by_days"),
             "invoice_notes": notes_by_invoice.get(doc.get("invoice_number")),
             "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+            "associated_credit_notes": associated_cns.get(doc.get("invoice_id"), []),
         }))
 
     # Return the response
