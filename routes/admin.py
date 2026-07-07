@@ -12,7 +12,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from ..config.root import get_client, get_database, serialize_mongo_document
 from bson.objectid import ObjectId
-from .helpers import get_access_token
+from .helpers import get_access_token, fetch_overdue_invoices
 from typing import Optional, List
 import re, requests, os, json, time, boto3, io, csv, openpyxl
 from dotenv import load_dotenv
@@ -2131,20 +2131,6 @@ def read_all_orders(
     page:  0-based page index
     limit: number of invoices per page
     """
-    # Get today's date in ISO format (YYYY-MM-DD) and as Date object
-    today_str = date.today().isoformat()
-    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Broad pre-filter: unpaid invoices past due (mixed string/date types)
-    base_query = {
-        "$or": [
-            {"due_date": {"$type": "string", "$lt": today_str}},
-            {"due_date": {"$type": "date", "$lt": today_date}},
-        ],
-        "status": {"$nin": ["paid", "void"]}
-    }
-
-    # Additional filters
     additional_conditions = []
 
     if sales_person:
@@ -2174,113 +2160,82 @@ def read_all_orders(
             }
         })
 
-    # Combine base query with additional conditions
-    if additional_conditions:
-        query = {"$and": [base_query] + additional_conditions}
-    else:
-        query = base_query
+    extra_query = {"$and": additional_conditions} if additional_conditions else None
 
-    # Compute overdue_by_days early so we can filter and sort on it reliably
-    overdue_days_expr = {
-        "$dateDiff": {
-            "startDate": {
-                "$cond": {
-                    "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                    "then": {"$dateFromString": {"dateString": "$due_date"}},
-                    "else": "$due_date",
-                }
-            },
-            "endDate": "$$NOW",
-            "unit": "day",
-        }
-    }
-
-    # Accurate count: compute overdue_by_days then filter to <= 365
-    count_pipeline = [
-        {"$match": query},
-        {"$addFields": {"overdue_by_days": overdue_days_expr}},
-        {"$match": {"overdue_by_days": {"$lte": 365}}},
-        {"$count": "total"},
-    ]
-    count_result = list(db.invoices.aggregate(count_pipeline))
-    total_count = count_result[0]["total"] if count_result else 0
-
-    # Build the aggregation pipeline
-    pipeline = [
-        {"$match": query},
-        # Compute overdue_by_days before lookups so we can filter on it
-        {"$addFields": {"overdue_by_days": overdue_days_expr}},
-        # Enforce 365-day cap reliably on the computed field
-        {"$match": {"overdue_by_days": {"$lte": 365}}},
-        {"$sort": {"overdue_by_days": 1}},
-        {
-            "$lookup": {
-                "from": "invoice_notes",
-                "localField": "invoice_number",
-                "foreignField": "invoice_number",
-                "as": "invoice_notes",
-            }
-        },
-        {
-            "$unwind": {
-                "path": "$invoice_notes",
-                "preserveNullAndEmptyArrays": True,
-            }
-        },
-        {
-            "$lookup": {
-                "from": "users",
-                "localField": "invoice_notes.created_by",
-                "foreignField": "_id",
-                "as": "user_created_by",
-            }
-        },
-        {
-            "$unwind": {
-                "path": "$user_created_by",
-                "preserveNullAndEmptyArrays": True,
-            }
-        },
-        {
-            "$project": {
-                "created_at": 1,
-                "total": 1,
-                "due_date": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
-                    }
-                },
-                "balance": 1,
-                "status": {"$toString": "overdue"},
-                "cf_sales_person": 1,
-                "salesperson_name": 1,
-                "customer_id": 1,
-                "customer_name": 1,
-                "invoice_url": 1,
-                "invoice_number": 1,
-                "invoice_id": 1,
-                "line_items": 1,
-                "created_by_name": 1,
-                "overdue_by_days": 1,
-                "invoice_notes": 1,
-                "note_created_by_name": "$user_created_by.first_name",
-            }
-        },
-        {"$skip": page * limit},
-        {"$limit": limit},
-    ]
-    # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
-
-    # Convert each Mongo document to a JSON-serializable Python dict
-    inv = [serialize_mongo_document(doc) for doc in invoices_cursor]
+    # Fetch + sort happens in Python (see fetch_overdue_invoices docstring for why:
+    # the mixed string/date due_date type makes Mongo's planner pick a slow index
+    # for a combined $or query).
+    matched = fetch_overdue_invoices(db, extra_query)
+    total_count = len(matched)
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
-    # Validate page number
     if page > total_pages and total_pages != 0:
         raise HTTPException(status_code=400, detail="Page number out of range")
+
+    page_docs = matched[page * limit : page * limit + limit]
+
+    # Enrich only the current page's rows (not the whole matched set)
+    invoice_numbers = [d.get("invoice_number") for d in page_docs]
+    customer_ids = [d.get("customer_id") for d in page_docs]
+    page_ids = [d.get("_id") for d in page_docs]
+
+    notes_by_invoice = {
+        n["invoice_number"]: n
+        for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
+    }
+    note_creator_ids = [
+        n["created_by"] for n in notes_by_invoice.values() if n.get("created_by")
+    ]
+    users_by_id = {
+        u["_id"]: u for u in db.users.find({"_id": {"$in": note_creator_ids}})
+    }
+    # line_items were excluded from the listing projection (they can be huge);
+    # fetch them only for this page's invoices, for the admin drawer.
+    line_items_by_id = {
+        d["_id"]: d.get("line_items")
+        for d in db.invoices.find(
+            {"_id": {"$in": page_ids}}, {"line_items": 1}
+        )
+    }
+    credit_note_totals = {}
+    for row in db.credit_notes.aggregate([
+        {"$match": {"customer_id": {"$in": customer_ids}, "status": {"$nin": ["void", "closed"]}}},
+        {"$group": {"_id": "$customer_id", "total": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}}}},
+    ]):
+        credit_note_totals[row["_id"]] = row["total"]
+
+    inv = []
+    for doc in page_docs:
+        note = notes_by_invoice.get(doc.get("invoice_number"))
+        creator = users_by_id.get(note.get("created_by")) if note else None
+        due_date = doc.get("due_date")
+        if isinstance(due_date, str):
+            try:
+                due_date = datetime.fromisoformat(due_date)
+            except ValueError:
+                pass
+        item = {
+            "_id": doc.get("_id"),
+            "created_at": doc.get("created_at"),
+            "total": doc.get("total"),
+            "due_date": due_date,
+            "balance": doc.get("balance"),
+            "status": "overdue",
+            "cf_sales_person": doc.get("cf_sales_person"),
+            "salesperson_name": doc.get("salesperson_name"),
+            "customer_id": doc.get("customer_id"),
+            "customer_name": doc.get("customer_name"),
+            "invoice_url": doc.get("invoice_url"),
+            "invoice_number": doc.get("invoice_number"),
+            "invoice_id": doc.get("invoice_id"),
+            "line_items": line_items_by_id.get(doc.get("_id")),
+            "created_by_name": doc.get("created_by_name"),
+            "overdue_by_days": doc.get("overdue_by_days"),
+            "invoice_notes": note,
+            "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+            "note_created_by_name": creator.get("first_name") if creator else None,
+        }
+        inv.append(serialize_mongo_document(item))
 
     return {
         "invoices": inv,
@@ -2299,179 +2254,93 @@ def get_payments_due_aging_stats(
     Return aggregate aging bucket stats (counts + balances) across ALL overdue invoices.
     Buckets: 0-30, 31-60, 61+ days overdue.
     """
-    today_str = date.today().isoformat()
-    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    due_date_filter = {"$or": [
-        {"due_date": {"$type": "string", "$lt": today_str}},
-        {"due_date": {"$type": "date", "$lt": today_date}},
-    ]}
-
-    and_clauses = [due_date_filter, {"status": {"$nin": ["paid", "void"]}}]
-
+    extra_query = None
     if sales_person:
         escaped = re.escape(sales_person)
-        and_clauses.append({"$or": [
+        extra_query = {"$or": [
             {"cf_sales_person": {"$regex": f"^{escaped}$", "$options": "i"}},
             {"salesperson_name": {"$regex": f"^{escaped}$", "$options": "i"}},
-        ]})
+        ]}
 
-    base_query = {"$and": and_clauses}
-
-    pipeline = [
-        {"$match": base_query},
-        {"$project": {
-            "balance": 1,
-            "overdue_by_days": {
-                "$dateDiff": {
-                    "startDate": {
-                        "$cond": {
-                            "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                            "then": {"$dateFromString": {"dateString": "$due_date"}},
-                            "else": "$due_date",
-                        }
-                    },
-                    "endDate": "$$NOW",
-                    "unit": "day",
-                }
-            },
-        }},
-        {"$match": {"overdue_by_days": {"$lte": 365}}},
-        {"$group": {
-            "_id": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$lte": ["$overdue_by_days", 30]}, "then": "current"},
-                        {"case": {"$lte": ["$overdue_by_days", 60]}, "then": "overdue30"},
-                    ],
-                    "default": "overdue60",
-                }
-            },
-            "count": {"$sum": 1},
-            "balance": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}},
-        }},
-    ]
-
-    rows = list(db.invoices.aggregate(pipeline))
+    matched = fetch_overdue_invoices(db, extra_query)
     result = {
         "current": {"count": 0, "balance": 0},
         "overdue30": {"count": 0, "balance": 0},
         "overdue60": {"count": 0, "balance": 0},
     }
-    for row in rows:
-        key = row["_id"]
-        if key in result:
-            result[key] = {"count": row["count"], "balance": round(row["balance"], 2)}
+    for doc in matched:
+        days = doc["overdue_by_days"]
+        key = "current" if days <= 30 else "overdue30" if days <= 60 else "overdue60"
+        result[key]["count"] += 1
+        result[key]["balance"] += float(doc.get("balance") or 0)
+
+    for key in result:
+        result[key]["balance"] = round(result[key]["balance"], 2)
     return result
 
 
-@router.get("/payments_due/download_csv")
-def download_payments_due_csv(sales_person: str):
+@router.get("/payments_due/download_xlsx")
+def download_payments_due_xlsx(sales_person: str):
     """
-    Download all invoices past their due_date (and not paid) as a CSV file.
+    Download all invoices past their due_date (and not paid) as an XLSX file,
+    matching the "Payment Due Sheet" sample format.
     """
-    # Get today's date in ISO format (YYYY-MM-DD) and as Date object
-    today_str = date.today().isoformat()
-    today_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Broad pre-filter: unpaid invoices past due
-    base_query = {
-        "$or": [
-            {"due_date": {"$type": "string", "$lt": today_str}},
-            {"due_date": {"$type": "date", "$lt": today_date}},
-        ],
-        "status": {"$nin": ["paid", "void"]}
-    }
-
+    extra_query = None
     if sales_person:
-        query = {
-            "$and": [
-                base_query,
-                {
-                    "$or": [
-                        {"cf_sales_person": sales_person},
-                        {"salesperson_name": sales_person},
-                    ]
-                }
-            ]
-        }
-    else:
-        query = base_query
+        extra_query = {"$or": [
+            {"cf_sales_person": sales_person},
+            {"salesperson_name": sales_person},
+        ]}
 
-    match_stage = {"$match": query}
+    matched = fetch_overdue_invoices(db, extra_query)
 
-    # Build the aggregation pipeline similar to the table data route
-    pipeline = [
-        match_stage,
-        {
-            "$addFields": {
-                "overdue_by_days": {
-                    "$dateDiff": {
-                        "startDate": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                                "then": {"$dateFromString": {"dateString": "$due_date"}},
-                                "else": "$due_date",
-                            }
-                        },
-                        "endDate": "$$NOW",
-                        "unit": "day",
-                    }
-                }
-            }
-        },
-        # Enforce 365-day cap on the computed field
-        {"$match": {"overdue_by_days": {"$lte": 365}}},
-        {"$sort": {"overdue_by_days": 1}},
-        {
-            "$lookup": {
-                "from": "invoice_notes",
-                "localField": "invoice_number",
-                "foreignField": "invoice_number",
-                "as": "invoice_notes",
-            }
-        },
-        {
-            "$unwind": {
-                "path": "$invoice_notes",
-                "preserveNullAndEmptyArrays": True,
-            }
-        },
-        {
-            "$project": {
-                "created_at": 1,
-                "total": 1,
-                "due_date": {
-                    "$cond": {
-                        "if": {"$eq": [{"$type": "$due_date"}, "string"]},
-                        "then": {"$dateFromString": {"dateString": "$due_date"}},
-                        "else": "$due_date"
-                    }
-                },
-                "balance": 1,
-                "status": {"$toString": "overdue"},
-                "cf_sales_person": 1,
-                "created_by_name": 1,
-                "salesperson_name": 1,
-                "customer_id": 1,
-                "customer_name": 1,
-                "invoice_url": 1,
-                "invoice_number": 1,
-                "invoice_id": 1,
-                "line_items": 1,
-                "overdue_by_days": 1,
-                "invoice_notes": 1,
-            }
-        },
-    ]
+    invoice_numbers = [d.get("invoice_number") for d in matched]
+    customer_ids = [d.get("customer_id") for d in matched]
 
-    # Execute the aggregation pipeline
-    invoices_cursor = db.invoices.aggregate(pipeline, allowDiskUse=True)
-    invoices = [serialize_mongo_document(doc) for doc in invoices_cursor]
+    notes_by_invoice = {
+        n["invoice_number"]: n
+        for n in db.invoice_notes.find({"invoice_number": {"$in": invoice_numbers}})
+    }
+    credit_note_totals = {}
+    for row in db.credit_notes.aggregate([
+        {"$match": {"customer_id": {"$in": customer_ids}, "status": {"$nin": ["void", "closed"]}}},
+        {"$group": {"_id": "$customer_id", "total": {"$sum": {"$toDouble": {"$ifNull": ["$balance", 0]}}}}},
+    ]):
+        credit_note_totals[row["_id"]] = row["total"]
 
-    # Create a CSV in memory
-    output = io.StringIO()
-    fieldnames = [
+    invoices = []
+    for doc in matched:
+        due_date = doc.get("due_date")
+        if isinstance(due_date, str):
+            try:
+                due_date = datetime.fromisoformat(due_date)
+            except ValueError:
+                pass
+        invoices.append(serialize_mongo_document({
+            "created_at": doc.get("created_at"),
+            "total": doc.get("total"),
+            "due_date": due_date,
+            "balance": doc.get("balance"),
+            "status": "overdue",
+            "cf_sales_person": doc.get("cf_sales_person"),
+            "created_by_name": doc.get("created_by_name"),
+            "salesperson_name": doc.get("salesperson_name"),
+            "customer_id": doc.get("customer_id"),
+            "customer_name": doc.get("customer_name"),
+            "invoice_url": doc.get("invoice_url"),
+            "invoice_number": doc.get("invoice_number"),
+            "invoice_id": doc.get("invoice_id"),
+            "overdue_by_days": doc.get("overdue_by_days"),
+            "invoice_notes": notes_by_invoice.get(doc.get("invoice_number")),
+            "open_credit_note_amt": credit_note_totals.get(doc.get("customer_id"), 0),
+        }))
+
+    # Build the XLSX workbook matching the sample "Payment Due Sheet" format
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Payments Due"
+
+    headers = [
         "Created At",
         "Due Date",
         "Invoice Number",
@@ -2483,40 +2352,58 @@ def download_payments_due_csv(sales_person: str):
         "Created By",
         "Total",
         "Balance",
+        "SP Remarks",
+        "Payment cleared - Details",
+        "Expected Payment date",
+        "Remarks Office Team",
+        "Open Credit Note Amt.",
         "Additional Information",
         "Images",
     ]
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
+    ws.append(headers)
+
+    def _fmt_date(value):
+        if not value:
+            return ""
+        if isinstance(value, (datetime, date)):
+            return value.strftime("%Y-%m-%d")
+        return str(value)
 
     for invoice in invoices:
-        writer.writerow(
-            {
-                "Created At": invoice.get("created_at"),
-                "Due Date": invoice.get("due_date"),
-                "Invoice Number": invoice.get("invoice_number"),
-                "Overdue by Days": invoice.get("overdue_by_days"),
-                "Customer Name": invoice.get("customer_name"),
-                "Status": invoice.get("status"),
-                "CF Sales Person": invoice.get("cf_sales_person")
-                or invoice.get("salesperson_name", "-"),
-                "Invoice Sales Person": invoice.get("salesperson_name"),
-                "Created By": invoice.get("created_by_name"),
-                "Total": invoice.get("total"),
-                "Balance": invoice.get("balance"),
-                "Additional Information": invoice.get("invoice_notes", {}).get(
-                    "additional_info", ""
-                ),
-                "Images": ", ".join(invoice.get("invoice_notes", {}).get("images", [])),
-            }
+        notes = invoice.get("invoice_notes") or {}
+        ws.append(
+            [
+                _fmt_date(invoice.get("created_at")),
+                _fmt_date(invoice.get("due_date")),
+                invoice.get("invoice_number"),
+                invoice.get("overdue_by_days"),
+                invoice.get("customer_name"),
+                invoice.get("status"),
+                invoice.get("cf_sales_person") or invoice.get("salesperson_name", "-"),
+                invoice.get("salesperson_name"),
+                invoice.get("created_by_name"),
+                invoice.get("total"),
+                invoice.get("balance"),
+                notes.get("sp_remarks", ""),
+                notes.get("payment_cleared_details", ""),
+                _fmt_date(notes.get("expected_payment_date")),
+                notes.get("office_team_remarks", ""),
+                invoice.get("open_credit_note_amt", 0),
+                notes.get("additional_info", ""),
+                ", ".join(notes.get("images", []) or []),
+            ]
         )
 
-    csv_data = output.getvalue()
+    stream = io.BytesIO()
+    wb.save(stream)
+    stream.seek(0)
 
-    # Return CSV file as attachment
-    response = Response(content=csv_data, media_type="text/csv")
-    response.headers["Content-Disposition"] = "attachment; filename=payments_due.csv"
-    return response
+    filename = f"payments_due_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @router.get("/sales-people")
 def get_sales_people():
