@@ -564,3 +564,69 @@ def fetch_overdue_invoices(db, extra_query: dict = None, projection: dict = None
 
     result.sort(key=lambda d: d["overdue_by_days"])
     return result
+
+
+# Minimal fields shown for each credit note associated with an invoice.
+_ASSOCIATED_CREDIT_NOTE_PROJECTION = {
+    "creditnote_id": 1,
+    "creditnote_number": 1,
+    "invoice_id": 1,
+    "customer_id": 1,
+    "date": 1,
+    "status": 1,
+    "total": 1,
+    "balance": 1,
+}
+
+_CLOSED_CN_STATUSES = ("void", "closed")
+
+
+def fetch_associated_credit_notes(db, invoices):
+    """
+    Given a list of invoice docs (each with `invoice_id` and `customer_id`),
+    return a dict mapping each invoice's Zoho `invoice_id` -> list of its
+    associated credit notes.
+
+    "Associated" is the union of:
+      * the customer's OPEN credit notes (status not void/closed) — these are
+        the notes that make up the customer-level "Open Credit Note Amt.", so
+        the two stay consistent; and
+      * any credit note linked to that specific invoice via invoice_id (any
+        status), for full per-invoice tracking.
+
+    Notes are de-duplicated per invoice and sorted newest-first by date.
+    """
+    invoice_ids = [i.get("invoice_id") for i in invoices if i.get("invoice_id")]
+    customer_ids = [i.get("customer_id") for i in invoices if i.get("customer_id")]
+    if not invoice_ids and not customer_ids:
+        return {}
+
+    query = {
+        "$or": [
+            {
+                "customer_id": {"$in": customer_ids},
+                "status": {"$nin": list(_CLOSED_CN_STATUSES)},
+            },
+            {"invoice_id": {"$in": invoice_ids}},
+        ]
+    }
+
+    open_by_customer = {}
+    by_invoice = {}
+    for cn in db.credit_notes.find(query, _ASSOCIATED_CREDIT_NOTE_PROJECTION):
+        if cn.get("status") not in _CLOSED_CN_STATUSES:
+            open_by_customer.setdefault(cn.get("customer_id"), []).append(cn)
+        if cn.get("invoice_id"):
+            by_invoice.setdefault(cn.get("invoice_id"), []).append(cn)
+
+    result = {}
+    for inv in invoices:
+        inv_id = inv.get("invoice_id")
+        cust_id = inv.get("customer_id")
+        seen = {}
+        for cn in open_by_customer.get(cust_id, []) + by_invoice.get(inv_id, []):
+            seen[cn.get("creditnote_id")] = cn
+        notes = list(seen.values())
+        notes.sort(key=lambda n: n.get("date") or "", reverse=True)
+        result[inv_id] = notes
+    return result
