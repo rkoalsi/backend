@@ -42,7 +42,7 @@ def get_catalogues(
     limit: int = Query(10, ge=1, description="Number of items per page"),
 ):
     try:
-        match_statement = {}
+        match_statement = {"is_deleted": {"$ne": True}}
         pipeline = [
             {"$match": match_statement},
             {"$skip": page * limit},
@@ -85,6 +85,27 @@ def delete_catalogue(catalogue_id: str):
         else:
             raise HTTPException(status_code=404, detail="Catalogue not found")
 
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{catalogue_id}/soft_delete")
+def soft_delete_catalogue(catalogue_id: str):
+    """
+    Soft delete a catalogue by marking it as deleted.
+    The document is retained in the database but excluded from listings.
+    """
+    try:
+        result = db.catalogues.update_one(
+            {"_id": ObjectId(catalogue_id)},
+            {"$set": {"is_deleted": True, "is_active": False}},
+        )
+        if result.matched_count == 1:
+            return {"detail": "Catalogue deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Catalogue not found")
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
