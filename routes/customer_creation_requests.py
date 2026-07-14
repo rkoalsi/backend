@@ -6,7 +6,11 @@ from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import get_current_user
 from ..config.whatsapp import send_whatsapp
-from .notifications import create_notification
+from .notifications import (
+    create_notification,
+    create_notifications_for_emails,
+    ADMIN_NOTIFICATION_EMAILS,
+)
 import os
 import requests
 import logging
@@ -1080,42 +1084,19 @@ async def create_customer_request(
         # Insert into database
         result = db.customer_creation_requests.insert_one(request_doc)
 
-        # Notify admin via WhatsApp
+        # Notify admins (current admin + invoicee admin) of the new request
         try:
-            # Find admin by email
-            admin_user = db.users.find_one({"email": "pupscribeinvoicee@gmail.com"})
+            sp_first_name = user_data.get("first_name", "Sales Person")
 
-            if admin_user:
-                template = db.templates.find_one(
-                    {"name": "admin_customer_creation_request"}
-                )
-
-                if template and admin_user.get("phone"):
-                    # Prepare parameters: admin first_name, sp first_name, customer name
-                    admin_first_name = admin_user.get("first_name", "Admin")
-                    sp_first_name = user_data.get("first_name", "Sales Person")
-
-                    params = {
-                        "admin_name": admin_first_name,
-                        "sp_name": sp_first_name,
-                        "customer_name": request_data.customer_name,
-                        # "button_url": str(result.inserted_id)
-                    }
-
-                    # send_whatsapp(admin_user.get("phone"), template, params)
-                    # logger.info(
-                    #     f"WhatsApp notification sent to admin: {admin_user.get('email')}"
-                    # )
-
-                # In-app notification to admin
-                create_notification(
-                    db,
-                    str(admin_user["_id"]),
-                    "customer_request_submitted",
-                    f"New customer request: {request_data.customer_name}",
-                    f"{sp_first_name} submitted a new customer creation request.",
-                    f"/admin/customer_requests",
-                )
+            # In-app notification to admins
+            create_notifications_for_emails(
+                db,
+                ADMIN_NOTIFICATION_EMAILS,
+                "customer_request_submitted",
+                f"New customer request: {request_data.customer_name}",
+                f"{sp_first_name} submitted a new customer creation request.",
+                f"/admin/customer_requests",
+            )
         except Exception as e:
             logger.error(f"Failed to send WhatsApp notification to admin: {e}")
 

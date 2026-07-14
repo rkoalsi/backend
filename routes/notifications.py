@@ -44,7 +44,23 @@ NOTIFICATION_TYPES = {
     # cheques
     "cheque_uploaded": "Cheque Uploaded",
     "cheque_comment": "Comment on Cheque",
+    # b2b registration
+    "b2b_user_verified": "New B2B Signup",
+    # leads
+    "new_lead": "New Lead",
 }
+
+# Fixed admin recipients for b2b registration / customer creation request / order
+# placement notifications: the current admin plus the invoicee admin account.
+ADMIN_NOTIFICATION_EMAILS = [
+    "rkoalsi2000@gmail.com",
+    "pupscribeinvoicee@gmail.com",
+]
+
+# Fixed recipient for lead-generation notifications (brand / catalogue / contact leads).
+LEAD_NOTIFICATION_EMAILS = [
+    "barksaleskonark@gmail.com",
+]
 
 
 def get_user_disabled_types(db, recipient_id: str) -> set:
@@ -133,6 +149,23 @@ def create_notifications_for_roles(
 ):
     """Send the same notification to every active user belonging to any of the given roles."""
     users = db.users.find({"role": {"$in": roles}, "status": "active"}, {"_id": 1})
+    for user in users:
+        create_notification(db, str(user["_id"]), notification_type, title, body, link, extra)
+
+
+def create_notifications_for_emails(
+    db,
+    emails: list,
+    notification_type: str,
+    title: str,
+    body: str,
+    link: str,
+    extra: dict = None,
+):
+    """Send the same notification to every user matched by the given list of emails."""
+    if not emails:
+        return
+    users = db.users.find({"email": {"$in": emails}}, {"_id": 1})
     for user in users:
         create_notification(db, str(user["_id"]), notification_type, title, body, link, extra)
 

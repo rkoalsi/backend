@@ -704,22 +704,23 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
     authenticated = serialize_mongo_document(user)
 
     # Notify that a new B2B user verified on the purchase portal.
-    # TESTING: scoped to a single recipient instead of all admins.
+    # Goes to the current admin plus the invoicee admin account.
     if not existing:
         try:
-            from .notifications import create_notification
+            from .notifications import (
+                create_notifications_for_emails,
+                ADMIN_NOTIFICATION_EMAILS,
+            )
 
-            target = db.users.find_one({"email": "rkoalsi2000@gmail.com"}, {"_id": 1})
-            if target:
-                create_notification(
-                    db,
-                    str(target["_id"]),
-                    "b2b_user_verified",
-                    f"New B2B signup verified: +91 {phone10}",
-                    "A new customer verified their mobile number on the purchase portal. "
-                    "They’ll appear under Leads once they submit their business details.",
-                    "/admin/leads?tab=b2b",
-                )
+            create_notifications_for_emails(
+                db,
+                ADMIN_NOTIFICATION_EMAILS,
+                "b2b_user_verified",
+                f"New B2B signup verified: +91 {phone10}",
+                "A new customer verified their mobile number on the purchase portal. "
+                "They’ll appear under Leads once they submit their business details.",
+                "/admin/leads?tab=b2b",
+            )
         except Exception as e:
             print(f"Failed to notify of B2B verification: {e}")
 

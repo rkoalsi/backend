@@ -188,6 +188,24 @@ async def verify_otp(request: VerifyOTPRequest):
             }
         )
 
+        # Notify the leads admin of the new brand lead
+        try:
+            from .notifications import (
+                create_notifications_for_emails,
+                LEAD_NOTIFICATION_EMAILS,
+            )
+
+            create_notifications_for_emails(
+                db,
+                LEAD_NOTIFICATION_EMAILS,
+                "new_lead",
+                f"New brand lead: {brand_name or phone}",
+                f"{phone} verified their number with interest in {brand_name or 'a brand'}.",
+                "/admin/leads",
+            )
+        except Exception as e:
+            print(f"Failed to notify of brand lead: {e}")
+
         return {
             "success": True,
             "message": "Phone number verified successfully",

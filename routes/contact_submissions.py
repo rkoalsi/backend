@@ -43,6 +43,24 @@ async def create_contact_submission(request: ContactSubmissionRequest):
 
         result = db.contact_submissions.insert_one(submission)
 
+        # Notify the leads admin of the new contact form lead
+        try:
+            from .notifications import (
+                create_notifications_for_emails,
+                LEAD_NOTIFICATION_EMAILS,
+            )
+
+            create_notifications_for_emails(
+                db,
+                LEAD_NOTIFICATION_EMAILS,
+                "new_lead",
+                f"New contact form lead: {request.name}",
+                f"{request.name} ({request.email}) submitted a contact form enquiry.",
+                "/admin/leads",
+            )
+        except Exception as e:
+            print(f"Failed to notify of contact lead: {e}")
+
         return {
             "success": True,
             "message": "Contact submission saved successfully",
