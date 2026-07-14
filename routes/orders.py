@@ -14,7 +14,12 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from ..config.constants import terms, STATE_CODES 
 from ..config.whatsapp import send_whatsapp
-from .notifications import create_notification, create_notifications_for_roles
+from .notifications import (
+    create_notification,
+    create_notifications_for_roles,
+    create_notifications_for_emails,
+    ADMIN_NOTIFICATION_EMAILS,
+)
 from .customers import build_salesperson_customer_or_conditions
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -2579,8 +2584,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 else f"Customer {customer_name} has updated order {est_number}."
             )
             notif_body = f"{notif_body} Status: {est_status_label}."
-            for invoicee in db.users.find({"designation": "Invoicee", "status": "active"}, {"_id": 1}):
-                create_notification(db, str(invoicee["_id"]), notif_type, notif_title, notif_body, sp_link, est_extra)
+            create_notifications_for_emails(
+                db, ADMIN_NOTIFICATION_EMAILS, notif_type, notif_title, notif_body, sp_link, est_extra
+            )
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 
