@@ -57,6 +57,43 @@ def build_salesperson_customer_or_conditions(user_code: str):
         )
 
     return or_conditions
+
+
+# Shared bucket labels used in `cf_sales_person` that are not real salesperson
+# codes — excluded when reverse-mapping a customer to its assigned reps.
+SALESPERSON_BUCKET_LABELS = {"defaulter", "company customers"}
+
+
+def get_salesperson_user_ids_for_customer(db, customer_doc: dict) -> list:
+    """Reverse of `build_salesperson_customer_or_conditions`: given a customer
+    document, return the `_id` strings of the active salesperson users assigned
+    to it via `cf_sales_person`.
+
+    `cf_sales_person` may be a comma-separated string or a list of codes. Shared
+    bucket labels ("Defaulter", "Company customers") are ignored so only real
+    reps directly mapped to the customer are returned.
+    """
+    raw = customer_doc.get("cf_sales_person", "") if customer_doc else ""
+    if isinstance(raw, list):
+        parts = raw
+    else:
+        parts = str(raw or "").split(",")
+
+    codes = {
+        c.strip()
+        for c in parts
+        if c and c.strip() and c.strip().lower() not in SALESPERSON_BUCKET_LABELS
+    }
+    if not codes:
+        return []
+
+    users = db.users.find(
+        {"role": "salesperson", "status": "active", "code": {"$in": list(codes)}},
+        {"_id": 1},
+    )
+    return [str(u["_id"]) for u in users]
+
+
 org_id = os.getenv("ORG_ID")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")

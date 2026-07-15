@@ -20,7 +20,10 @@ from .notifications import (
     create_notifications_for_emails,
     ADMIN_NOTIFICATION_EMAILS,
 )
-from .customers import build_salesperson_customer_or_conditions
+from .customers import (
+    build_salesperson_customer_or_conditions,
+    get_salesperson_user_ids_for_customer,
+)
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
@@ -2587,6 +2590,26 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             create_notifications_for_emails(
                 db, ADMIN_NOTIFICATION_EMAILS, notif_type, notif_title, notif_body, sp_link, est_extra
             )
+
+            # Also notify the salesperson(s) assigned to this customer (same
+            # cf_sales_person mapping shown on /admin/customers). Fires on both
+            # first finalise (order_placed) and later edits (order_edited).
+            customer_doc = (
+                db.customers.find_one({"_id": ObjectId(order.get("customer_id", ""))})
+                if order.get("customer_id")
+                else None
+            )
+            if customer_doc:
+                for sp_user_id in get_salesperson_user_ids_for_customer(db, customer_doc):
+                    create_notification(
+                        db,
+                        sp_user_id,
+                        notif_type,
+                        notif_title,
+                        notif_body,
+                        sp_link,
+                        est_extra,
+                    )
     except Exception as _e:
         print(f"[notifications] order_placed error: {_e}")
 
