@@ -2038,6 +2038,126 @@ def read_order(order_id: str):
     return order
 
 
+@router.get("/{order_id}/bootstrap")
+def read_order_bootstrap(order_id: str, request: Request):
+    """
+    Single-request bootstrap for the order form. Returns the same payload as
+    GET /{order_id} plus everything the new-order page otherwise fetches in a
+    multi-hop waterfall:
+
+      • `customer`            — full customer document (was GET /customers/{id})
+      • `special_margins_list`— special margin products (was GET /customers/special_margins/{id})
+      • `address_details`     — per-address metadata (was GET /customer_address_details/{id})
+      • `product_details`     — {product_id: product} for every order line (was GET /products/batch)
+
+    All four are fetched concurrently so the client makes ONE round trip instead
+    of four sequential ones — the big win on high-latency connections.
+
+    SECURITY: the orders router is intentionally public (shared-link access via
+    ?shared=true), but /customers and /customer_address_details are JWT-only.
+    So customer PII, address details and special margins are embedded ONLY when
+    the request carries a valid token — unauthenticated shared-link guests get
+    exactly what they get today (the order + public product details + the
+    pricing `special_margins` map already embedded by read_order). This keeps
+    the existing security boundary intact.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from jose import jwt, JWTError
+    from ..config.auth import JWT_SECRET_KEY, JWT_ALGORITHM
+
+    order = read_order(order_id)  # already raises 404 when missing
+
+    # Optional auth: valid token (cookie or Bearer header) → include PII.
+    is_authenticated = False
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):].strip()
+    if token:
+        try:
+            jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            is_authenticated = True
+        except JWTError:
+            is_authenticated = False
+
+    customer_oid_str = order.get("customer_id")
+
+    def fetch_customer():
+        if not is_authenticated or not customer_oid_str:
+            return None
+        try:
+            return serialize_mongo_document(
+                customers_collection.find_one({"_id": ObjectId(customer_oid_str)})
+            )
+        except Exception as e:
+            print(f"bootstrap: customer fetch failed for {order_id}: {e}")
+            return None
+
+    def fetch_special_margins_list():
+        if not is_authenticated or not customer_oid_str:
+            return []
+        try:
+            return [
+                serialize_mongo_document(doc)
+                for doc in db["special_margins"].find(
+                    {"customer_id": ObjectId(customer_oid_str)}
+                )
+            ]
+        except Exception as e:
+            print(f"bootstrap: special margins fetch failed for {order_id}: {e}")
+            return []
+
+    def fetch_address_details():
+        if not is_authenticated or not customer_oid_str:
+            return []
+        try:
+            return [
+                serialize_mongo_document(d)
+                for d in db["customer_address_details"].find(
+                    {"customer_id": str(customer_oid_str)}
+                )
+            ]
+        except Exception as e:
+            print(f"bootstrap: address details fetch failed for {order_id}: {e}")
+            return []
+
+    def fetch_product_details():
+        try:
+            object_ids = []
+            for p in order.get("products", []):
+                pid = p.get("product_id")
+                if not pid:
+                    continue
+                try:
+                    object_ids.append(ObjectId(pid))
+                except Exception:
+                    pass
+            if not object_ids:
+                return {}
+            result = {}
+            for prod in db.products.find({"_id": {"$in": object_ids}}):
+                serialized = serialize_mongo_document(prod)
+                result[serialized["_id"]] = serialized
+            return result
+        except Exception as e:
+            print(f"bootstrap: product details fetch failed for {order_id}: {e}")
+            return {}
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        customer_future = executor.submit(fetch_customer)
+        margins_future = executor.submit(fetch_special_margins_list)
+        addresses_future = executor.submit(fetch_address_details)
+        products_future = executor.submit(fetch_product_details)
+
+        order["customer"] = customer_future.result()
+        order["special_margins_list"] = margins_future.result()
+        order["address_details"] = addresses_future.result()
+        order["product_details"] = products_future.result()
+
+    return order
+
+
 # Get all orders
 @router.get("")
 def read_all_orders(
