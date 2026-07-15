@@ -1,5 +1,11 @@
-from fastapi import APIRouter, Query, HTTPException, Body
+from fastapi import APIRouter, Query, HTTPException, Body, Response
 from fastapi.responses import HTMLResponse
+
+# Read-only catalogue metadata (brands, counts, categories) changes rarely.
+# A short shared cache with stale-while-revalidate lets browsers/proxies serve
+# instantly on repeat loads while refreshing in the background — big perceived
+# win on slow networks without risking meaningfully stale data.
+_CATALOGUE_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300"
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
@@ -33,11 +39,12 @@ def get_product(product_id: str, collection: Collection):
 
 
 @router.get("/counts")
-def get_product_counts():
+def get_product_counts(response: Response):
     """
     Returns the number of active products grouped by brand and category.
     Also includes a count of new products under a special "New Arrivals" brand.
     """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
     try:
         base_query = {
             "stock": {"$gt": 0},
@@ -119,10 +126,11 @@ def get_product_counts():
 
 
 @router.get("/brands")
-def get_all_brands():
+def get_all_brands(response: Response):
     """
     Retrieve a list of all distinct brands.
     """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
     try:
         # Get distinct brand names
         brand_names = products_collection.distinct(
@@ -163,12 +171,13 @@ def get_all_brands():
 
 
 @router.get("/categories", response_model=dict)
-def get_categories_for_brand(brand: str):
+def get_categories_for_brand(brand: str, response: Response):
     """
     Retrieve a list of all distinct categories for a given brand.
 
     - **brand**: The name of the brand to fetch categories for.
     """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
     try:
         # Fetch distinct categories for the specified brand
         categories = products_collection.distinct(
@@ -704,11 +713,12 @@ def get_all_products(
 
 
 @router.get("/all_categories", response_model=dict)
-def get_all_product_categories():
+def get_all_product_categories(response: Response):
     """
     Retrieve a sorted list of all distinct product categories (across all brands).
     Only categories for products with stock > 0 and not marked as deleted are returned.
     """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
     try:
         # Use distinct to fetch unique categories across all products meeting the criteria
         categories = products_collection.distinct(
@@ -1001,12 +1011,13 @@ def get_all_products_catalogue(
 
 
 @router.get("/catalogue/init")
-def get_catalogue_init(brand: Optional[str] = Query(None, description="Active brand to preload products for")):
+def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, description="Active brand to preload products for")):
     """
     Combined init endpoint: returns brands, product counts, categories for the given brand,
     and the first page of grouped products — all in one request.
     Eliminates the brands→categories→products waterfall on initial catalogue load.
     """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
     try:
         from concurrent.futures import ThreadPoolExecutor
 
