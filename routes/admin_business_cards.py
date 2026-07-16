@@ -64,6 +64,73 @@ def list_cards():
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.get("/users")
+def list_cardable_users():
+    """Return every user who can have a card (any role except customer), with the
+    fields needed to pre-fill a card and whether one already exists for them.
+
+    Declared before `/{card_id}` so the literal path isn't treated as a card id.
+    """
+    try:
+        users = list(
+            db.users.find(
+                {"role": {"$ne": "customer"}},
+                {"password": 0},
+            ).sort("name", 1)
+        )
+        # One query maps each linked user_id → its existing card.
+        cards_by_user = {
+            c.get("user_id"): c
+            for c in db.business_cards.find(
+                {"user_id": {"$in": [str(u["_id"]) for u in users]}},
+                {"slug": 1, "user_id": 1, "is_active": 1, "name": 1},
+            )
+        }
+
+        def _plus91(raw) -> str:
+            """Format a stored phone as +91XXXXXXXXXX (last 10 digits); "" if none."""
+            digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+            if not digits:
+                return ""
+            return f"+91{digits[-10:]}"
+
+        results = []
+        for u in users:
+            uid = str(u["_id"])
+            card = cards_by_user.get(uid)
+            # Prefer an explicit full name; otherwise stitch first + last.
+            name = (
+                u.get("full_name")
+                or u.get("name")
+                or f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+            )
+            phone = _plus91(u.get("phone"))
+            results.append(
+                {
+                    "_id": uid,
+                    "name": name,
+                    "first_name": u.get("first_name", ""),
+                    "last_name": u.get("last_name", ""),
+                    "email": u.get("email", ""),
+                    "phone": phone,
+                    "role": u.get("role", ""),
+                    "designation": u.get("designation", ""),
+                    "department": u.get("department", ""),
+                    "code": u.get("code", ""),
+                    "photo_url": u.get("photo_url", ""),
+                    "city": u.get("city", ""),
+                    "country": u.get("country", ""),
+                    "whatsapp": _plus91(u.get("whatsapp")) or phone,
+                    "socials": u.get("socials") or {},
+                    "has_card": bool(card),
+                    "card_slug": card.get("slug") if card else None,
+                }
+            )
+        return results
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.get("/{card_id}/scans")
 def list_card_scans(card_id: str, limit: int = 100):
     """Return recent QR scans for one card, newest first, plus the total count."""
@@ -100,6 +167,13 @@ def create_card(card: dict):
     """Create a new business card. Slug is auto-generated from the name if not provided."""
     try:
         card.pop("_id", None)
+        # One card per linked user — keeps the homepage "your card" widget unambiguous.
+        user_id = card.get("user_id")
+        if user_id and db.business_cards.find_one({"user_id": user_id}):
+            raise HTTPException(
+                status_code=409,
+                detail="This user already has a card. Edit the existing one instead.",
+            )
         base = _slugify(card.get("slug") or card.get("name") or "card")
         card["slug"] = _unique_slug(base)
         card.setdefault("is_active", True)
@@ -116,6 +190,8 @@ def create_card(card: dict):
         result = db.business_cards.insert_one(card)
         doc = db.business_cards.find_one({"_id": result.inserted_id})
         return serialize_mongo_document(doc)
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
