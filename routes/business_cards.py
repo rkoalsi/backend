@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
+from datetime import datetime, timezone
 import logging
 
 from ..config.root import get_database, serialize_mongo_document
@@ -10,6 +11,12 @@ logger = logging.getLogger(__name__)
 logger.propagate = False
 
 db = get_database()
+
+# Scans are queried per card, newest first — index once at startup (idempotent).
+try:
+    db.business_card_scans.create_index([("card_id", 1), ("ts", -1)])
+except Exception:
+    pass
 
 
 def _escape_vcard(value: str) -> str:
@@ -76,6 +83,40 @@ def get_card(slug: str):
     except Exception as e:
         logger.error(f"Error fetching business card '{slug}': {e}")
         return JSONResponse(content={"detail": "Card not found"}, status_code=404)
+
+
+@router.post("/{slug}/scan")
+def record_scan(slug: str, request: Request):
+    """Public endpoint: log one QR-code scan for a card.
+
+    Called by the card page when it's opened via a QR code (?src=qr).
+    Scans are anonymous — we store when it happened plus coarse client
+    details (IP, user agent, referer) for the admin dashboard.
+    """
+    try:
+        doc = db.business_cards.find_one({"slug": slug, "is_active": True}, {"_id": 1})
+        if not doc:
+            return JSONResponse(content={"detail": "Card not found"}, status_code=404)
+        # Respect proxies (nginx/CDN) that pass the real client IP along.
+        forwarded = request.headers.get("x-forwarded-for", "")
+        ip = forwarded.split(",")[0].strip() if forwarded else (
+            request.client.host if request.client else ""
+        )
+        db.business_card_scans.insert_one(
+            {
+                "card_id": doc["_id"],
+                "slug": slug,
+                "ts": datetime.now(timezone.utc),
+                "ip": ip,
+                "user_agent": request.headers.get("user-agent", "")[:512],
+                "referer": request.headers.get("referer", "")[:512],
+            }
+        )
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error recording scan for '{slug}': {e}")
+        # Tracking must never break the public page.
+        return {"ok": False}
 
 
 @router.get("/{slug}/vcard")

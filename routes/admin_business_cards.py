@@ -47,10 +47,36 @@ def _unique_slug(base: str, exclude_id: ObjectId = None) -> str:
 
 @router.get("")
 def list_cards():
-    """Return all business cards, newest first."""
+    """Return all business cards, newest first, each with its QR scan count."""
     try:
-        docs = db.business_cards.find().sort("created_at", -1)
-        return [serialize_mongo_document(d) for d in docs]
+        docs = [serialize_mongo_document(d) for d in db.business_cards.find().sort("created_at", -1)]
+        # One aggregation for all cards instead of a count query per card.
+        counts = {
+            str(row["_id"]): row["count"]
+            for row in db.business_card_scans.aggregate(
+                [{"$group": {"_id": "$card_id", "count": {"$sum": 1}}}]
+            )
+        }
+        for d in docs:
+            d["scan_count"] = counts.get(d["_id"], 0)
+        return docs
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/{card_id}/scans")
+def list_card_scans(card_id: str, limit: int = 100):
+    """Return recent QR scans for one card, newest first, plus the total count."""
+    try:
+        oid = ObjectId(card_id)
+        total = db.business_card_scans.count_documents({"card_id": oid})
+        scans = [
+            serialize_mongo_document(s)
+            for s in db.business_card_scans.find({"card_id": oid})
+            .sort("ts", -1)
+            .limit(max(1, min(limit, 500)))
+        ]
+        return {"total": total, "scans": scans}
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
