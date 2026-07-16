@@ -228,6 +228,15 @@ def activity_summary(_=Depends(JWTBearer())):
                 },
                 "total_actions": {"$sum": 1},
                 "actions": {"$push": "$action"},
+                "finalized_order_ids": {
+                    "$addToSet": {
+                        "$cond": [
+                            {"$eq": ["$action", "finalize_order"]},
+                            "$metadata.order_id",
+                            "$$REMOVE",
+                        ]
+                    }
+                },
             }
         },
         {"$sort": {"last_seen": -1}},
@@ -250,6 +259,7 @@ def activity_summary(_=Depends(JWTBearer())):
             "total_actions": r.get("total_actions", 0),
             "last_seen": r.get("last_seen"),
             "action_counts": action_counts,
+            "distinct_orders": len(r.get("finalized_order_ids", [])),
         }))
 
     return {"summary": summaries, "total_customers": len(summaries)}
