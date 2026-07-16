@@ -77,6 +77,13 @@ def create_card(card: dict):
         base = _slugify(card.get("slug") or card.get("name") or "card")
         card["slug"] = _unique_slug(base)
         card.setdefault("is_active", True)
+        # Sensible defaults (all still editable from the admin form).
+        if not card.get("company"):
+            card["company"] = "Pupscribe Enterprises Pvt. Ltd."
+        if not card.get("city"):
+            card["city"] = "Mumbai"
+        if not card.get("country"):
+            card["country"] = "India"
         now = datetime.now(timezone.utc)
         card["created_at"] = now
         card["updated_at"] = now
