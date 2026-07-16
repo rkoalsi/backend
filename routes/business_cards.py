@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse, Response
 from datetime import datetime, timezone
 import logging
 
 from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import get_current_user
 
 router = APIRouter()
 
@@ -70,6 +71,24 @@ def _build_vcard(card: dict) -> str:
 
     lines.append("END:VCARD")
     return "\r\n".join(lines)
+
+
+@router.get("/mine")
+def get_my_card(current_user: dict = Depends(get_current_user)):
+    """Authenticated: return the caller's own business card (linked by user_id), or
+    null if they don't have one. Powers the "Your Digital Card" widget on the home
+    page. Declared before `/{slug}` so "mine" isn't matched as a slug.
+    """
+    try:
+        data = current_user.get("data") if isinstance(current_user, dict) else None
+        user_id = data.get("_id") if isinstance(data, dict) else None
+        if not user_id:
+            return {"card": None}
+        doc = db.business_cards.find_one({"user_id": user_id})
+        return {"card": serialize_mongo_document(doc) if doc else None}
+    except Exception as e:
+        logger.error(f"Error fetching own card: {e}")
+        return {"card": None}
 
 
 @router.get("/{slug}")
