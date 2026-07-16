@@ -1081,6 +1081,21 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
                 "status": "active", "created_at": {"$gte": three_months_ago},
             })
             result["New Arrivals"] = {"All Products": new_count}
+
+            # Pre Orders — products marked pre_order=true (no stock filter).
+            # Must mirror /products/counts so the Pre Orders tab renders on the
+            # first (default landing) load, not only after a refresh.
+            pre_orders_count = db.products.count_documents({
+                "pre_order": True, "is_deleted": {"$exists": False},
+            })
+            result["Pre Orders"] = {"All Products": pre_orders_count}
+
+            # Clearance — products marked clearance=true with stock.
+            clearance_count = db.products.count_documents({
+                "clearance": True, "stock": {"$gt": 0}, "is_deleted": {"$exists": False},
+            })
+            if clearance_count > 0:
+                result["Clearance"] = {"All Products": clearance_count}
             return result
 
         def fetch_categories():
