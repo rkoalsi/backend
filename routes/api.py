@@ -40,6 +40,7 @@ from .admin_expense_estimates import router as admin_expense_estimates
 from .cheques import router as cheques
 from .salesperson_customer_logins import router as salesperson_customer_logins
 from .linktree import router as linktree
+from .business_cards import router as business_cards
 from .payments import router as payments
 from .tracking import router as tracking
 from ..config.auth import JWTBearer
@@ -65,6 +66,8 @@ router.include_router(customer_creation_requests, prefix="/customer_creation_req
 router.include_router(blog, prefix="/blog", tags=["Blog"])
 # public link-tree landing page (content managed via /admin/linktree)
 router.include_router(linktree, prefix="/linktree", tags=["Link Tree"])
+# public digital business cards (content managed via /admin/cards)
+router.include_router(business_cards, prefix="/cards", tags=["Business Cards"])
 # payments: Razorpay payment links for the (public) order form + webhook callback
 router.include_router(payments, prefix="/payments", tags=["Payments"])
 # utility helpers (city list etc.) — read-only, non-sensitive
