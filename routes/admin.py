@@ -1638,6 +1638,7 @@ def read_all_orders(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     has_pre_order: Optional[bool] = Query(None, description="Filter orders containing pre-order items"),
+    order_id: Optional[str] = Query(None, description="Fetch a single order by its Mongo _id"),
 ):
     """
     Retrieve all orders for admin, with pagination and optional filters,
@@ -1645,6 +1646,13 @@ def read_all_orders(
     """
     # Initialize the match stage for the main pipeline
     initial_match_conditions = {}
+
+    # Deep-link support: fetch one specific order by _id (ignores other filters).
+    if order_id:
+        try:
+            initial_match_conditions["_id"] = ObjectId(order_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid order_id")
 
     date_filter = {}
     if start_date:
