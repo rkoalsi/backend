@@ -36,6 +36,14 @@ load_dotenv()
 org_id = os.getenv("ORG_ID")
 ESTIMATE_URL = os.getenv("ESTIMATE_URL")
 PDF_URL = os.getenv("PDF_URL")
+INVOICE_PDF_URL = os.getenv(
+    "INVOICE_PDF_URL",
+    "https://books.zoho.com/api/v3/invoices/{invoice_id}?accept=pdf&organization_id={org_id}",
+)
+SALESORDER_PDF_URL = os.getenv(
+    "SALESORDER_PDF_URL",
+    "https://books.zoho.com/api/v3/salesorders/{salesorder_id}?accept=pdf&organization_id={org_id}",
+)
 
 
 # Connect to MongoDB
@@ -2676,6 +2684,145 @@ async def download_pdf(order_id: str = "", estimate_type: str = Query("stock", a
         raise e
     except Exception as e:
         print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def _collect_estimate_docs(estimate_id, result, source):
+    """
+    Look up an estimate by its Zoho id and append its sales orders (and, when the
+    estimate is invoiced, its invoices with live status from the invoices
+    collection) onto the shared `result` dict. `source` tags where the docs came
+    from ("stock" / "pre_order").
+    """
+    if not estimate_id:
+        return None
+    est = db.estimates.find_one({"estimate_id": str(estimate_id)})
+    if not est:
+        return None
+
+    for so in est.get("salesorders", []) or []:
+        result["sales_orders"].append({
+            "salesorder_id": so.get("salesorder_id"),
+            "salesorder_number": so.get("salesorder_number"),
+            "status": so.get("salesorder_order_status") or so.get("status"),
+            "total": so.get("total"),
+            "source": source,
+        })
+
+    if str(est.get("status", "")).lower() == "invoiced":
+        invoice_ids = est.get("invoice_ids", []) or []
+        if invoice_ids:
+            inv_map = {
+                inv["invoice_id"]: inv
+                for inv in db.invoices.find(
+                    {"invoice_id": {"$in": invoice_ids}},
+                    {"invoice_id": 1, "invoice_number": 1, "status": 1,
+                     "invoice_url": 1, "total": 1},
+                )
+            }
+            for iid in invoice_ids:
+                inv = inv_map.get(iid, {})
+                result["invoices"].append({
+                    "invoice_id": iid,
+                    "invoice_number": inv.get("invoice_number", iid),
+                    "status": inv.get("status"),
+                    "invoice_url": inv.get("invoice_url"),
+                    "total": inv.get("total"),
+                    "source": source,
+                })
+    return est.get("status")
+
+
+@router.get("/{order_id}/documents")
+def order_documents(order_id: str):
+    """
+    Return every downstream Zoho document tied to an order: the (pre-order)
+    estimate(s), their sales orders, and — when an estimate is invoiced — its
+    invoices with live status pulled from the invoices collection. Powers the
+    consolidated documents section in the admin orders drawer.
+    """
+    try:
+        order = db.orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid order_id")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    result = {
+        "estimate": None,
+        "pre_order_estimate": None,
+        "sales_orders": [],
+        "invoices": [],
+    }
+
+    if order.get("estimate_created") and order.get("estimate_id"):
+        est_status = _collect_estimate_docs(order.get("estimate_id"), result, "stock")
+        result["estimate"] = {
+            "estimate_id": order.get("estimate_id"),
+            "estimate_number": order.get("estimate_number"),
+            "estimate_url": order.get("estimate_url"),
+            "status": est_status or order.get("estimate_status") or order.get("status"),
+        }
+
+    if order.get("pre_order_estimate_created") and order.get("pre_order_estimate_id"):
+        pre_status = _collect_estimate_docs(
+            order.get("pre_order_estimate_id"), result, "pre_order"
+        )
+        result["pre_order_estimate"] = {
+            "estimate_id": order.get("pre_order_estimate_id"),
+            "estimate_number": order.get("pre_order_estimate_number"),
+            "estimate_url": order.get("pre_order_estimate_url"),
+            "status": pre_status,
+        }
+
+    return serialize_mongo_document(result)
+
+
+def _fetch_zoho_pdf(url: str, filename: str) -> Response:
+    """Fetch a PDF from Zoho Books and return it as an attachment Response."""
+    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
+    response = requests.get(url=url, headers=headers, allow_redirects=False)
+    if response.status_code == 200:
+        return Response(
+            content=response.content,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    raise HTTPException(
+        status_code=response.status_code,
+        detail=f"Failed to fetch PDF: {response.text}",
+    )
+
+
+@router.get("/download_salesorder/{salesorder_id}")
+async def download_salesorder(salesorder_id: str):
+    """Download a sales order PDF from Zoho by its salesorder_id."""
+    try:
+        return _fetch_zoho_pdf(
+            SALESORDER_PDF_URL.format(salesorder_id=salesorder_id, org_id=org_id),
+            f"{salesorder_id}.pdf",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected error downloading sales order: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/download_invoice/{invoice_id}")
+async def download_invoice(invoice_id: str):
+    """Download an invoice PDF from Zoho by its invoice_id."""
+    inv = db.invoices.find_one({"invoice_id": invoice_id}, {"invoice_number": 1})
+    filename = f"{(inv or {}).get('invoice_number', invoice_id)}.pdf"
+    try:
+        return _fetch_zoho_pdf(
+            INVOICE_PDF_URL.format(invoice_id=invoice_id, org_id=org_id),
+            filename,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected error downloading invoice: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

@@ -194,8 +194,58 @@ def list_activity(
         activity_collection.find(query).sort("timestamp", -1).skip(skip).limit(per_page)
     )
 
+    # Enrich finalize_order entries with the order's current (live) status so the
+    # admin drawer can show status + link to the order in /admin/orders.
+    order_ids = {
+        str(d.get("metadata", {}).get("order_id"))
+        for d in docs
+        if d.get("action") == "finalize_order" and (d.get("metadata") or {}).get("order_id")
+    }
+    order_status_map: dict = {}
+    if order_ids:
+        object_ids = []
+        for oid in order_ids:
+            try:
+                object_ids.append(ObjectId(oid))
+            except Exception:
+                pass
+        order_docs = db.orders.find(
+            {"_id": {"$in": object_ids}},
+            {"status": 1, "estimate_id": 1, "estimate_number": 1},
+        )
+        estimate_ids = []
+        order_meta = {}
+        for od in order_docs:
+            order_meta[str(od["_id"])] = od
+            if od.get("estimate_id"):
+                estimate_ids.append(od["estimate_id"])
+        # Live estimate status is the point of truth (kept current by Zoho webhook).
+        estimate_status_map = {}
+        if estimate_ids:
+            for est in db.estimates.find(
+                {"estimate_id": {"$in": estimate_ids}}, {"estimate_id": 1, "status": 1}
+            ):
+                estimate_status_map[est["estimate_id"]] = est.get("status")
+        for oid, od in order_meta.items():
+            status_val = estimate_status_map.get(od.get("estimate_id")) or od.get("status")
+            order_status_map[oid] = {
+                "order_status": status_val,
+                "estimate_number": od.get("estimate_number"),
+            }
+
+    serialized = []
+    for d in docs:
+        doc = serialize_mongo_document(d)
+        if d.get("action") == "finalize_order":
+            oid = str((d.get("metadata") or {}).get("order_id") or "")
+            info = order_status_map.get(oid)
+            if info:
+                doc["order_status"] = info["order_status"]
+                doc["estimate_number"] = info["estimate_number"]
+        serialized.append(doc)
+
     return {
-        "activities": [serialize_mongo_document(d) for d in docs],
+        "activities": serialized,
         "total": total,
         "page": page,
         "per_page": per_page,
