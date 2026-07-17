@@ -62,10 +62,47 @@ _PROD_STATS = {
                 }
             },
             "qty": {"$cond": [{"$isNumber": "$$p.quantity"}, "$$p.quantity", 0]},
+            # NET line value = price * qty * (1 - margin%). `price` is the gross
+            # list rate; B2B customers buy at a margin (stored as a string like
+            # "45%" / "48"), so gross far exceeds the actual order total. Applying
+            # the margin makes this reconcile with order total_amount / the funnel.
             "value": {
                 "$multiply": [
                     {"$cond": [{"$isNumber": "$$p.price"}, "$$p.price", 0]},
                     {"$cond": [{"$isNumber": "$$p.quantity"}, "$$p.quantity", 0]},
+                    {
+                        "$max": [
+                            0,
+                            {
+                                "$subtract": [
+                                    1,
+                                    {
+                                        "$divide": [
+                                            {
+                                                "$convert": {
+                                                    "input": {
+                                                        "$replaceAll": {
+                                                            "input": {
+                                                                "$toString": {
+                                                                    "$ifNull": ["$$p.margin", "0"]
+                                                                }
+                                                            },
+                                                            "find": "%",
+                                                            "replacement": "",
+                                                        }
+                                                    },
+                                                    "to": "double",
+                                                    "onError": 0,
+                                                    "onNull": 0,
+                                                }
+                                            },
+                                            100,
+                                        ]
+                                    },
+                                ]
+                            },
+                        ]
+                    },
                 ]
             },
         },
@@ -104,10 +141,10 @@ def _metrics_group(id_expr):
         "customerPaidOrders": {
             "$sum": {"$cond": [{"$and": ["$isCustomerCreated", "$paid"]}, 1, 0]}
         },
-        "totalValue": {"$sum": "$totalAmountNum"},
-        "estimateValue": {"$sum": {"$cond": ["$estimateCreated", "$totalAmountNum", 0]}},
-        "finalisedValue": {"$sum": {"$cond": ["$finalised", "$totalAmountNum", 0]}},
-        "paidValue": {"$sum": {"$cond": ["$paid", "$totalAmountNum", 0]}},
+        "totalValue": {"$sum": "$orderNetValue"},
+        "estimateValue": {"$sum": {"$cond": ["$estimateCreated", "$orderNetValue", 0]}},
+        "finalisedValue": {"$sum": {"$cond": ["$finalised", "$orderNetValue", 0]}},
+        "paidValue": {"$sum": {"$cond": ["$paid", "$orderNetValue", 0]}},
         "customerAddedItems": {"$sum": "$customerAddedItems"},
         "customerAddedQty": {"$sum": "$customerAddedQty"},
         "customerAddedValue": {"$sum": "$customerAddedValue"},
@@ -265,6 +302,10 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
     # Orders that produced a paid (non-void) invoice — chain starts at orders.
     paid_order_ids = list(_build_paid_order_ids())
 
+    # Orders a customer started / finalised *by logging in* (activity tracking).
+    started_oids = _activity_order_ids("create_order")
+    finalised_oids = _activity_order_ids("finalize_order")
+
     # ── Base match ───────────────────────────────────────────────────────
     # Require a real date so period grouping works. We intentionally do NOT
     # filter `is_deleted` here: status='deleted' orders (all soft-deleted) are
@@ -309,6 +350,8 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                 # Paid = order's estimate produced a paid (non-void) invoice.
                 "paid": {"$in": ["$_id", paid_order_ids]},
                 "isCustomerCreated": {"$in": ["$created_by", customer_user_ids]},
+                # Customer logged in and finalised this order themselves.
+                "customerSelfFinalised": {"$in": ["$_id", finalised_oids]},
                 "period": {"$dateToString": {"format": fmt, "date": "$created_at"}},
             }
         },
@@ -316,6 +359,11 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
         {
             "$addFields": {
                 "totalQty": {"$sum": {"$map": {"input": "$_prodStats", "as": "s", "in": "$$s.qty"}}},
+                # Order value = sum of NET line-item values. Using this everywhere
+                # (instead of order total_amount, which also carries shipping /
+                # adjustments and non-line-item imported orders) makes the funnel /
+                # period / list value columns tie out exactly with the products table.
+                "orderNetValue": {"$sum": {"$map": {"input": "$_prodStats", "as": "s", "in": "$$s.value"}}},
                 "customerAddedItems": _added_agg("customer", "items"),
                 "customerAddedQty": _added_agg("customer", "qty"),
                 "customerAddedValue": _added_agg("customer", "value"),
@@ -387,7 +435,7 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                         "$group": {
                             "_id": {"$ifNull": ["$status", "unknown"]},
                             "count": {"$sum": 1},
-                            "value": {"$sum": "$totalAmountNum"},
+                            "value": {"$sum": "$orderNetValue"},
                         }
                     },
                     {"$sort": {"count": -1}},
@@ -402,9 +450,18 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                             "orders": {"$sum": 1},
                             "finalised": {"$sum": {"$cond": ["$finalised", 1, 0]}},
                             "paid": {"$sum": {"$cond": ["$paid", 1, 0]}},
-                            "value": {"$sum": "$totalAmountNum"},
-                            "paidValue": {"$sum": {"$cond": ["$paid", "$totalAmountNum", 0]}},
+                            "value": {"$sum": "$orderNetValue"},
+                            "paidValue": {"$sum": {"$cond": ["$paid", "$orderNetValue", 0]}},
                             "customerAddedItems": {"$sum": "$customerAddedItems"},
+                            # Orders where the customer added product(s) via the
+                            # shared link (added_by='customer').
+                            "sharedLinkOrders": {
+                                "$sum": {"$cond": [{"$gt": ["$customerAddedItems", 0]}, 1, 0]}
+                            },
+                            # Orders the customer finalised themselves by logging in.
+                            "selfFinalisedOrders": {
+                                "$sum": {"$cond": ["$customerSelfFinalised", 1, 0]}
+                            },
                             "lastOrder": {"$max": "$created_at"},
                         }
                     },
@@ -419,8 +476,8 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                             "orders": {"$sum": 1},
                             "finalised": {"$sum": {"$cond": ["$finalised", 1, 0]}},
                             "paid": {"$sum": {"$cond": ["$paid", 1, 0]}},
-                            "value": {"$sum": "$totalAmountNum"},
-                            "paidValue": {"$sum": {"$cond": ["$paid", "$totalAmountNum", 0]}},
+                            "value": {"$sum": "$orderNetValue"},
+                            "paidValue": {"$sum": {"$cond": ["$paid", "$orderNetValue", 0]}},
                             "customerAddedItems": {"$sum": "$customerAddedItems"},
                             "lastOrder": {"$max": "$created_at"},
                         }
@@ -463,8 +520,7 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
 
     # Customer engagement from activity tracking (matches /admin/customer_activity):
     # customers who started (create_order) / ended (finalize_order) orders themselves.
-    started_oids = _activity_order_ids("create_order")
-    finalised_oids = _activity_order_ids("finalize_order")
+    # started_oids / finalised_oids were computed once above.
     oid_date_q = {}
     if date_bounds:
         oid_date_q = {"created_at": {"$type": "date", **date_bounds}}
@@ -522,6 +578,8 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                 "value": round(float(g.get("value") or 0), 2),
                 "paidValue": round(float(g.get("paidValue") or 0), 2),
                 "productsAdded": int(g.get("customerAddedItems") or 0),
+                "sharedLinkOrders": int(g.get("sharedLinkOrders") or 0),
+                "selfFinalisedOrders": int(g.get("selfFinalisedOrders") or 0),
                 "lastOrder": last.strftime("%Y-%m-%d") if last else None,
             }
         )
@@ -638,6 +696,11 @@ def _periods_rows(data):
             p["estimateOrders"],
             p["finalisedOrders"],
             p["paidOrders"],
+            (
+                round(100 * p["finalisedOrders"] / p["estimateOrders"], 1)
+                if p["estimateOrders"]
+                else 0
+            ),
             p["customerCreatedOrders"],
             p["customerFinalisedOrders"],
             p["salespersonCreatedOrders"],
@@ -658,6 +721,7 @@ _PERIODS_HEADERS = [
     "Estimates Created",
     "Finalised (Invoiced)",
     "Paid",
+    "Fulfilment %",
     "Created by Customers",
     "Finalised by Customers",
     "Created by Salespeople",
@@ -685,6 +749,8 @@ def _customers_rows(data):
             c["finalised"],
             c["paid"],
             c["productsAdded"],
+            c.get("sharedLinkOrders", 0),
+            c.get("selfFinalisedOrders", 0),
             c["value"],
             c["paidValue"],
             c["lastOrder"] or "",
@@ -714,7 +780,7 @@ _SECTIONS = {
     "periods": ("Period Breakdown", _PERIODS_HEADERS, _periods_rows),
     "products": (
         "Products Added",
-        ["Added By", "Line Items", "Units", "Value"],
+        ["Added By", "Line Items", "Units", "Net Value"],
         _products_rows,
     ),
     "customers": (
@@ -725,6 +791,8 @@ _SECTIONS = {
             "Finalised",
             "Paid",
             "Self-Added Items",
+            "Orders w/ Shared-Link Products",
+            "Finalised by Login",
             "Value",
             "Paid Value",
             "Last Order",
