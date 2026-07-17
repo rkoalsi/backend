@@ -1,4 +1,5 @@
 import logging
+import os
 
 logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
 
@@ -74,11 +75,14 @@ async def shutdown_db():
     disconnect_on_exit()
 
 
-# Add shutdown handler for MongoDB
-app.add_event_handler("startup", notification_scheduler_startup)
-app.add_event_handler("startup", cron_startup)
-app.add_event_handler("shutdown", cron_shutdown)
-app.add_event_handler("shutdown", notification_scheduler_shutdown)
+# Add scheduler/cron handlers (skipped locally to avoid running crons in dev)
+if os.getenv("RUN_CRONS", "true").lower() not in ("false", "0", "no"):
+    app.add_event_handler("startup", notification_scheduler_startup)
+    app.add_event_handler("startup", cron_startup)
+    app.add_event_handler("shutdown", cron_shutdown)
+    app.add_event_handler("shutdown", notification_scheduler_shutdown)
+else:
+    logging.info("RUN_CRONS is disabled — skipping cron and notification schedulers")
 
 
 @app.get("/")

@@ -38,6 +38,7 @@ from .admin_external_links import router as admin_external_links_router
 from .admin_linktree import router as admin_linktree_router
 from .admin_business_cards import router as admin_business_cards_router
 from .admin_customer_analytics import router as admin_customer_analytics_router
+from .admin_order_analytics import router as admin_order_analytics_router
 from .admin_catalogue_leads import router as admin_catalogue_leads_router
 from .admin_brand_leads import router as admin_brand_leads_router
 from .admin_b2b_registrations import router as admin_b2b_registrations_router
@@ -3608,6 +3609,12 @@ router.include_router(
     admin_customer_analytics_router,
     prefix="/customer_analytics",
     tags=["Admin Customer Analytics"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_order_analytics_router,
+    prefix="/order_analytics",
+    tags=["Admin Order Analytics"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
