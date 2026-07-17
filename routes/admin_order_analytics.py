@@ -465,6 +465,10 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                             "lastOrder": {"$max": "$created_at"},
                         }
                     },
+                    # "Using the order form" = the customer added product(s)
+                    # themselves (added_by='customer'), not orders where only the
+                    # salesperson added products.
+                    {"$match": {"customerAddedItems": {"$gt": 0}}},
                     {"$sort": {"orders": -1, "value": -1}},
                 ],
                 # Users who create orders (resolved to name/role in Python).
