@@ -625,6 +625,9 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
             "lastOrder": last.strftime("%Y-%m-%d") if last else None,
         }
         if role == "customer":
+            # Skip internal/test accounts, matching the activity-stats exclusion.
+            if (u.get("email") or "") in _EXCLUDED_ACTIVITY_EMAILS:
+                continue
             customer_creators_list.append(row)
         else:
             salespeople_list.append(row)
