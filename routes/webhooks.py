@@ -1570,7 +1570,7 @@ def handle_shipment(data: dict):
         # Check shipment status and use appropriate template and parameters
         if shipment.get('status',"") == 'delivered':
             template = serialize_mongo_document(
-                dict(db.templates.find_one({"name": "shipment_delivery_notification"}))
+                dict(db.templates.find_one({"name": "shipment_delivered"}))
             )
 
             # Extract and format delivery_date from shipment_delivery_notification field
