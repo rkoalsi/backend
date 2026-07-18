@@ -2599,6 +2599,33 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
                 db, ADMIN_NOTIFICATION_EMAILS, notif_type, notif_title, notif_body, sp_link, est_extra
             )
 
+            # WhatsApp the Invoicee so the invoice team is alerted the moment a
+            # customer finalises an order. Utility template; gated to the first
+            # submit so edits don't re-notify (avoids WhatsApp volume/throttling).
+            if is_first_create:
+                try:
+                    invoicee = db.users.find_one({"email": "pupscribeinvoicee@gmail.com"})
+                    invoicee_phone = str(invoicee.get("phone")) if invoicee else ""
+                    finalise_template = db.templates.find_one({"name": "order_finalised_invoicee"})
+                    if invoicee_phone and finalise_template:
+                        order_total = (
+                            f"Rs. {round(total_amount):,}"
+                            if isinstance(total_amount, (int, float))
+                            else str(total_amount or "-")
+                        )
+                        send_whatsapp(
+                            invoicee_phone,
+                            serialize_mongo_document(dict(finalise_template)),
+                            {
+                                "customer_name": customer_name or "-",
+                                "estimate_number": est_number or "-",
+                                "order_total": order_total,
+                                "status": est_status_label,
+                            },
+                        )
+                except Exception as _we:
+                    print(f"[whatsapp] invoicee finalise notify error: {_we}")
+
             # Also notify the salesperson(s) assigned to this customer (same
             # cf_sales_person mapping shown on /admin/customers). Fires on both
             # first finalise (order_placed) and later edits (order_edited).
