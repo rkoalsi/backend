@@ -56,6 +56,7 @@ def _enrich_outgoing(chat: dict, templates_map: dict | None = None) -> dict:
 @router.get("")
 def get_admin_chats(
     chat_type: str = Query(None, description="Filter: outgoing, incoming, callback"),
+    status: str = Query(None, description="Filter by delivery status (e.g. failed, delivered, queued)"),
     phone: str = Query(None, description="Filter by phone number (from or to)"),
     limit: int = Query(50, le=100000),
     skip: int = Query(0, ge=0),
@@ -63,6 +64,8 @@ def get_admin_chats(
     query: dict = {}
     if chat_type:
         query["type"] = chat_type
+    if status:
+        query["status"] = status
     if phone:
         stripped = phone.strip().lstrip("+")
         query["$or"] = [

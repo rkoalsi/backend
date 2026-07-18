@@ -1,5 +1,6 @@
 import plivo
 import os
+import re
 import datetime
 from dotenv import load_dotenv
 from plivo.utils.template import Template  # Import the Template class
@@ -123,14 +124,9 @@ def send_template_message(to: str, template_doc: dict, params: dict, campaign_id
     to `chats` (so the conversation view keeps working) and tags the chat row with
     campaign_id for cross-referencing.
     """
-    phone_str = str(to).strip()
-    if phone_str.startswith("+"):
-        dst_phone = phone_str
-    else:
-        cleaned_phone = "".join(ch for ch in phone_str if ch.isdigit())
-        if not cleaned_phone:
-            return {"message_uuid": None, "status": "failed", "error": "invalid_phone", "dst": to}
-        dst_phone = f"+91{cleaned_phone}"
+    dst_phone = _normalize_dst(to)
+    if not dst_phone:
+        return {"message_uuid": None, "status": "failed", "error": "invalid_phone", "dst": to}
 
     chats_col = _get_chats_collection()
 
@@ -181,15 +177,10 @@ def send_template_message(to: str, template_doc: dict, params: dict, campaign_id
 
 def send_whatsapp(to: str, template_doc: dict, params: dict):
     # Resolve phone number before try/except so we can log failures
-    phone_str = str(to).strip()
-    if phone_str.startswith('+'):
-        dst_phone = phone_str
-    else:
-        cleaned_phone = ''.join(char for char in phone_str if char.isdigit())
-        if not cleaned_phone:
-            print(f"Invalid phone number after cleaning: {to}")
-            return None
-        dst_phone = f"+91{cleaned_phone}"
+    dst_phone = _normalize_dst(to)
+    if not dst_phone:
+        print(f"Invalid phone number after cleaning: {to}")
+        return None
 
     chats_col = _get_chats_collection()
 
@@ -231,22 +222,55 @@ def send_whatsapp(to: str, template_doc: dict, params: dict):
         _log_chat(chats_col, dst_phone, template_doc, params, status=status, error=error_msg)
 
 
+def _india_subscriber(digits: str):
+    """Reduce a run of digits to a valid 10-digit Indian mobile, or None.
+    Handles a '00' international prefix, a leading national '0', and a
+    (possibly duplicated) '91' country code."""
+    if digits.startswith("00"):           # 0091... international prefix
+        digits = digits[2:]
+    if len(digits) == 11 and digits.startswith("0"):  # 08104298709 national format
+        digits = digits[1:]
+    # Strip a country code, even when duplicated ('+91918104298709').
+    while len(digits) > 10 and digits.startswith("91"):
+        digits = digits[2:]
+    if len(digits) == 10 and digits[0] in "6789":  # valid Indian mobile
+        return digits
+    return None
+
+
 def _normalize_dst(to) -> str:
-    """Normalize a destination to E.164. Handles bare 10-digit, leading-0 national,
-    and numbers that already carry a country code (e.g. Plivo inbound '918104298709')."""
-    phone_str = str(to).strip()
-    if phone_str.startswith("+"):
-        return phone_str
-    cleaned = "".join(ch for ch in phone_str if ch.isdigit())
-    if not cleaned:
+    """Normalize a raw phone value to a single E.164 number ('+91…' for bare Indian
+    mobiles). Returns '' when no usable number can be extracted.
+
+    Real customer data crams several numbers into one field separated by commas,
+    slashes, spaces or hyphens (e.g. '+91-9819442211,9819445588'), duplicates the
+    country code ('+91918104298709'), or carries a leading-0 national format. We
+    split on separators and return the first candidate that yields a valid 10-digit
+    Indian mobile; failing that, the first candidate that already looks like a
+    complete international number. A leading '+' is NOT trusted verbatim — the value
+    is always cleaned first, since the bad data that reaches Plivo starts with '+'."""
+    if to is None:
         return ""
-    if cleaned.startswith("00"):          # 0091... international prefix
-        cleaned = cleaned[2:]
-    if len(cleaned) == 11 and cleaned.startswith("0"):  # 08104298709 national format
-        cleaned = cleaned[1:]
-    if len(cleaned) == 10:                # bare local number -> assume India
-        return f"+91{cleaned}"
-    return f"+{cleaned}"                   # already has a country code
+    raw = str(to).strip()
+    if not raw:
+        return ""
+    candidates = [c for c in re.split(r"[,;/\s]+", raw) if c.strip()] or [raw]
+
+    # Pass 1: first candidate that is a valid Indian mobile.
+    for cand in candidates:
+        digits = "".join(ch for ch in cand if ch.isdigit())
+        if not digits:
+            continue
+        sub = _india_subscriber(digits)
+        if sub:
+            return f"+91{sub}"
+    # Pass 2: first candidate that already carries a plausible country code.
+    for cand in candidates:
+        had_plus = cand.strip().startswith("+")
+        digits = "".join(ch for ch in cand if ch.isdigit())
+        if had_plus and 10 <= len(digits) <= 15:
+            return f"+{digits}"
+    return ""
 
 
 def _extract_uuid(response) -> str:
