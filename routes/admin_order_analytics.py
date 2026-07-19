@@ -40,6 +40,110 @@ logger = logging.getLogger(__name__)
 logger.propagate = False
 
 
+def _attach_customer_details(customers_list):
+    """Enrich each customer row with their assigned salesperson and whether a
+    `users` account with role 'customer' exists for that customer's Zoho
+    `contact_id`. `orders.customer_id` is the `customers._id` (ObjectId)."""
+    oids = []
+    for c in customers_list:
+        try:
+            oids.append(ObjectId(c["id"]))
+        except Exception:
+            continue
+
+    cust_fields = {
+        "contact_id": 1,
+        "salesperson_name": 1,
+        "cf_sales_person": 1,
+        "contact_name": 1,
+        "company_name": 1,
+    }
+    cust_map = {
+        str(c["_id"]): c
+        for c in db["customers"].find({"_id": {"$in": oids}}, cust_fields)
+    }
+
+    # Some orders reference a `customers._id` that no longer exists — the
+    # customer was deleted and re-synced from Zoho under a new _id (e.g.
+    # PETHUT). Fall back to the order's `customer_name` against
+    # contact_name/company_name, merging the SPs of every match.
+    missing_names = {
+        row["name"]
+        for row in customers_list
+        if row.get("name") and row["name"] != "Unknown"
+        and row.get("id") not in cust_map
+    }
+    name_map = {}
+    if missing_names:
+        for c in db["customers"].find(
+            {
+                "$or": [
+                    {"contact_name": {"$in": list(missing_names)}},
+                    {"company_name": {"$in": list(missing_names)}},
+                ]
+            },
+            cust_fields,
+        ):
+            for key in (c.get("contact_name"), c.get("company_name")):
+                if key in missing_names:
+                    name_map.setdefault(key, []).append(c)
+
+    contact_ids = [
+        str(c.get("contact_id")) for c in cust_map.values() if c.get("contact_id")
+    ]
+    for matches in name_map.values():
+        contact_ids += [str(c["contact_id"]) for c in matches if c.get("contact_id")]
+    user_map = {
+        u["customer_id"]: u
+        for u in users_collection.find(
+            {"role": "customer", "customer_id": {"$in": contact_ids}},
+            {"customer_id": 1, "email": 1, "name": 1, "status": 1},
+        )
+    }
+
+    # `cf_sales_person` holds SP codes ("SP20, SP24") for real salespeople and
+    # free text for the catch-all buckets ("Company customers") — map the codes
+    # to names and leave anything unmatched as-is.
+    code_map = {
+        u["code"]: u.get("name") or u.get("email") or u["code"]
+        for u in users_collection.find(
+            {"code": {"$exists": True, "$nin": [None, ""]}}, {"code": 1, "name": 1, "email": 1}
+        )
+    }
+
+    for row in customers_list:
+        exact = cust_map.get(row.get("id"))
+        matches = [exact] if exact else name_map.get(row.get("name"), [])
+
+        # Union the SP codes across matches, preserving first-seen order.
+        codes = []
+        for cust in matches:
+            sp = cust.get("salesperson_name") or cust.get("cf_sales_person") or ""
+            if isinstance(sp, list):
+                sp = ", ".join([str(x) for x in sp if x])
+            for part in str(sp).split(","):
+                part = part.strip()
+                if part and part not in codes:
+                    codes.append(part)
+
+        contact_id = ""
+        user = None
+        for cust in matches:
+            cid = str(cust.get("contact_id") or "")
+            if not cid:
+                continue
+            contact_id = contact_id or cid
+            if not user and user_map.get(cid):
+                user = user_map[cid]
+                contact_id = cid
+
+        row["contactId"] = contact_id or None
+        row["salesPerson"] = ", ".join(code_map.get(c, c) for c in codes)
+        row["resolvedBy"] = "id" if exact else ("name" if matches else None)
+        row["hasCustomerLogin"] = bool(user)
+        row["customerLoginEmail"] = (user or {}).get("email", "")
+
+
 def _safe_num(field):
     """Coerce a possibly-string / missing numeric field to a double (0 on error)."""
     return {"$convert": {"input": field, "to": "double", "onError": 0, "onNull": 0}}
@@ -588,6 +692,8 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
             }
         )
 
+    _attach_customer_details(customers_list)
+
     # ── Salespeople list (resolve created_by -> user name/role) ──────────
     creator_groups = facet.get("byCreator", [])
     creator_ids = [g["_id"] for g in creator_groups if g.get("_id")]
@@ -752,6 +858,9 @@ def _customers_rows(data):
     return [
         [
             c["name"],
+            c.get("salesPerson", ""),
+            "Yes" if c.get("hasCustomerLogin") else "No",
+            c.get("customerLoginEmail", ""),
             c["orders"],
             c["finalised"],
             c["paid"],
@@ -794,6 +903,9 @@ _SECTIONS = {
         "Customers",
         [
             "Customer",
+            "Sales Person",
+            "Has Customer Login",
+            "Login Email",
             "Orders",
             "Finalised",
             "Paid",

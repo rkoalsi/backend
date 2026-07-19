@@ -32,16 +32,21 @@ def get_all_users(
     search: Optional[str] = Query(None, description="Search by name or email"),
     role: Optional[str] = Query(None, description="Filter by role"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    linked: Optional[str] = Query(
+        None, description="Filter by customer link: 'linked' or 'unlinked'"
+    ),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100)
 ):
     """
     Get all users with optional filtering and pagination.
     """
-    query = {}
+    # Base query = search + role, but NOT status. The stats cards are computed
+    # against this so they stay stable while the user toggles the status filter.
+    base_query = {}
 
     if search:
-        query["$or"] = [
+        base_query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}},
             {"first_name": {"$regex": search, "$options": "i"}},
@@ -49,7 +54,15 @@ def get_all_users(
         ]
 
     if role:
-        query["role"] = role
+        base_query["role"] = role
+
+    # A user counts as "linked" only if customer_id is present and non-empty.
+    if linked == "linked":
+        base_query["customer_id"] = {"$nin": [None, ""], "$exists": True}
+    elif linked == "unlinked":
+        base_query["customer_id"] = {"$in": [None, ""]}
+
+    query = dict(base_query)
 
     if status:
         query["status"] = status
@@ -66,11 +79,12 @@ def get_all_users(
     for user in users:
         user.pop("password", None)
 
-    # Get statistics
+    # Get statistics, scoped to the current search/role filters so the cards
+    # describe the same population the table is paginating through.
     stats = {
-        "total": db.users.count_documents({}),
-        "active": db.users.count_documents({"status": "active"}),
-        "inactive": db.users.count_documents({"status": "inactive"}),
+        "total": db.users.count_documents(base_query),
+        "active": db.users.count_documents({**base_query, "status": "active"}),
+        "inactive": db.users.count_documents({**base_query, "status": "inactive"}),
         "by_role": {}
     }
 
