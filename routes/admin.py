@@ -1819,6 +1819,36 @@ def read_all_orders(
                     if _k.endswith("_at") or _k in ("paid_at",):
                         _obj[_k] = _to_ist_str(_v)
 
+    # Order lines snapshot `image_url` at save time, but many products have it
+    # empty/None while still carrying a valid `images` array. Backfill from the
+    # products collection so the admin drawer doesn't render placeholders.
+    try:
+        _missing_pids = {
+            str(p.get("product_id"))
+            for _o in orders_with_user_info
+            for p in (_o.get("products") or [])
+            if p.get("product_id") and not p.get("image_url")
+        }
+        if _missing_pids:
+            _img_by_pid = {}
+            for _d in db.products.find(
+                {"_id": {"$in": [ObjectId(x) for x in _missing_pids]}},
+                {"image_url": 1, "images": 1},
+            ):
+                _imgs = _d.get("images") or []
+                _url = _d.get("image_url") or (_imgs[0] if _imgs else None)
+                if _url:
+                    _img_by_pid[str(_d["_id"])] = _url
+            for _o in orders_with_user_info:
+                for p in _o.get("products") or []:
+                    if not p.get("image_url"):
+                        _url = _img_by_pid.get(str(p.get("product_id")))
+                        if _url:
+                            p["image_url"] = _url
+    except Exception as e:
+        # Images are cosmetic — never fail the orders list over them
+        print(f"Error backfilling order product images: {e}")
+
     total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
     # Validate page number - this check should use the *actual* total pages
