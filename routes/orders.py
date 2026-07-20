@@ -52,6 +52,15 @@ orders_collection = db["orders"]
 customers_collection = db["customers"]
 users_collection = db["users"]
 
+# The order detail endpoint looks up estimates by `order_id` to embed live
+# per-line margins. Without this index that's a full scan of the estimates
+# collection (20k+ docs, each with a line_items array), which blows past the
+# 20s socket timeout and stalls the page.
+try:
+    db["estimates"].create_index("order_id", background=True)
+except Exception as e:
+    print(f"Could not ensure estimates.order_id index: {e}")
+
 router = APIRouter()
 
 timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
@@ -1977,7 +1986,13 @@ def read_order(order_id: str):
                 str(d["_id"]): d
                 for d in db.products.find(
                     {"_id": {"$in": prod_ids}},
-                    {"item_id": 1, "clearance": 1, "clearance_margin": 1},
+                    {
+                        "item_id": 1,
+                        "clearance": 1,
+                        "clearance_margin": 1,
+                        "image_url": 1,
+                        "images": 1,
+                    },
                 )
             }
             for p in order.get("products", []):
@@ -1988,6 +2003,13 @@ def read_order(order_id: str):
                     item_id_by_pid[str(p.get("product_id"))] = str(doc["item_id"])
                 p["clearance"] = doc.get("clearance", False)
                 p["clearance_margin"] = doc.get("clearance_margin", 0)
+                # Order lines snapshot `image_url` at save time and many products
+                # have it empty while still having an `images` array.
+                if not p.get("image_url"):
+                    imgs = doc.get("images") or []
+                    p["image_url"] = doc.get("image_url") or (
+                        imgs[0] if imgs else ""
+                    )
     except Exception as e:
         print(f"Error embedding clearance context on order {order_id}: {e}")
 
