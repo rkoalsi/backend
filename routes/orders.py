@@ -2942,6 +2942,12 @@ async def duplicate_order(order_dict: dict):
             order.pop("estimate_number")
             order.pop("estimate_id")
             order.pop("estimate_url")
+        # A duplicated order is a fresh draft — it must NOT inherit the source
+        # order's payment or Zoho payment-chain state, otherwise the new draft
+        # would appear already paid/COD (payment.status) and carry stale
+        # Razorpay/link IDs and idempotency keys.
+        for field in ("payment", "zoho_flow"):
+            order.pop(field, None)
         result = db.orders.insert_one(order)
         return str(result.inserted_id)
     except Exception as e:
