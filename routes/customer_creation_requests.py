@@ -52,7 +52,7 @@ def send_account_approved_email(to_email: str, customer_name: str, shop_name: st
         logger.warning("RESEND_API_KEY not set; skipping approval email")
         return False
 
-    login_url = f"{os.getenv('FRONTEND_URL', 'https://orderform.pupscribe.in').rstrip('/')}/login"
+    login_url = f"{os.getenv('FRONTEND_URL', 'https://marketplace.pupscribe.in').rstrip('/')}/login"
     first_name = (customer_name or "there").split()[0]
     shop_line = (
         f"<strong>{shop_name}</strong> is now set up on the Pupscribe order portal."
@@ -125,7 +125,7 @@ def send_account_rejected_email(to_email: str, customer_name: str, shop_name: st
         logger.warning("RESEND_API_KEY not set; skipping rejection email")
         return False
 
-    login_url = f"{os.getenv('FRONTEND_URL', 'https://orderform.pupscribe.in').rstrip('/')}/customer/account"
+    login_url = f"{os.getenv('FRONTEND_URL', 'https://marketplace.pupscribe.in').rstrip('/')}/customer/account"
     first_name = (customer_name or "there").split()[0]
     shop_line = f"for <strong>{shop_name}</strong> " if shop_name else ""
     reason_block = (

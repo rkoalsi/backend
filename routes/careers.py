@@ -407,7 +407,7 @@ async def apply_for_career(
             hr_users = list(db.users.find({"role": "hr", "status": "active"}, {"email": 1}))
             hr_emails = [u["email"] for u in hr_users if u.get("email")]
             if hr_emails:
-                admin_url = os.getenv("ADMIN_URL", "https://order.pupscribe.in/admin/career_applications")
+                admin_url = os.getenv("ADMIN_URL", "https://marketplace.pupscribe.in/admin/career_applications")
                 hr_html = render_template(
                     "hr_new_application.html",
                     applicant_name=applicant_name,
