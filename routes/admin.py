@@ -76,6 +76,45 @@ db = get_database()
 _stats_cache: dict = {"data": None, "ts": 0.0}
 _STATS_TTL = 60  # seconds
 
+# Cache for the /admin/orders total count. Counting the (unindexed) "non-empty
+# orders" predicate is expensive on a large collection, so we cache per filter
+# signature and guard the query with maxTimeMS so a slow count can never hang
+# the request past the socket timeout.
+_orders_count_cache: dict = {}  # signature -> {"count": int, "ts": float}
+_ORDERS_COUNT_TTL = 30  # seconds
+_ORDERS_COUNT_MAX_MS = 8000  # give up counting well before the socket timeout
+
+
+def _orders_count_signature(match: dict) -> str:
+    import json
+
+    return json.dumps(match, default=str, sort_keys=True)
+
+
+def _cached_orders_count(match: dict) -> int:
+    """Total count for the orders list, cached by filter signature. On a slow
+    count we serve the last cached value (or a cheap estimate) rather than let
+    the request time out."""
+    sig = _orders_count_signature(match)
+    now = time.time()
+    entry = _orders_count_cache.get(sig)
+    if entry and (now - entry["ts"]) < _ORDERS_COUNT_TTL:
+        return entry["count"]
+    try:
+        count = orders_collection.count_documents(
+            match, maxTimeMS=_ORDERS_COUNT_MAX_MS
+        )
+    except Exception as e:
+        print(f"orders count fell back (slow/failed): {e}")
+        if entry:
+            return entry["count"]
+        try:
+            count = orders_collection.estimated_document_count()
+        except Exception:
+            count = 0
+    _orders_count_cache[sig] = {"count": count, "ts": now}
+    return count
+
 products_collection = db["products"]
 customers_collection = db["customers"]
 orders_collection = db["orders"]
@@ -1624,7 +1663,7 @@ def delete_customer_address(customer_id: str, address_id: str):
 @router.get("/orders")
 def read_all_orders(
     page: int = Query(0, ge=0, description="0-based page index"),
-    limit: int = Query(10, ge=1, description="Number of items per page"),
+    limit: int = Query(25, ge=1, description="Number of items per page"),
     sales_person: Optional[str] = Query(
         None, description="Filter by sales person name"
     ),
@@ -1632,13 +1671,30 @@ def read_all_orders(
     estimate_created: Optional[bool] = Query(
         None, description="Filter by whether estimate was created"
     ),
+    spreadsheet_created: Optional[bool] = Query(
+        None, description="Filter by whether the spreadsheet was created"
+    ),
     amount: Optional[str] = Query(None, description="Filter by amount"),
     estimate_number: Optional[str] = Query(
         None, description="Search by estimate number"
     ),
+    search: Optional[str] = Query(
+        None,
+        description=(
+            "Free-text search across invoice number, customer name, estimate "
+            "number, sales person (name/code) and order id (_id)."
+        ),
+    ),
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     has_pre_order: Optional[bool] = Query(None, description="Filter orders containing pre-order items"),
+    hide_empty: bool = Query(
+        True,
+        description=(
+            "When true (default), hide orders with no customer or nothing added "
+            "to the cart. Set false to include those empty orders."
+        ),
+    ),
     order_id: Optional[str] = Query(None, description="Fetch a single order by its Mongo _id"),
 ):
     """
@@ -1681,6 +1737,9 @@ def read_all_orders(
     if estimate_created is not None:
         initial_match_conditions["estimate_created"] = estimate_created
 
+    if spreadsheet_created is not None:
+        initial_match_conditions["spreadsheet_created"] = spreadsheet_created
+
     if amount:
         # Assuming you want to filter for total_amount > 0 when 'amount' is provided
         initial_match_conditions["total_amount"] = {"$gt": 0}
@@ -1688,11 +1747,90 @@ def read_all_orders(
     if has_pre_order:
         initial_match_conditions["products"] = {"$elemMatch": {"pre_order": True}}
 
-    # Now build our aggregation pipeline
-    pipeline = [
-        # 1. Initial match stage for basic filters (date, estimate number, status, estimate_created, amount)
-        {"$match": initial_match_conditions},
-        # 2. Join user info from "users" collection (do this early if sales_person filter is based on joined data)
+    # By default, hide "empty" orders — those with no customer attached or with
+    # nothing actually added to the cart. Toggleable via `hide_empty`. A
+    # deep-link (order_id) or an explicit search bypasses this so any order can
+    # still be located. Applied in the initial match (top-level fields only) so
+    # it runs before the lookups.
+    if hide_empty and not order_id and not search:
+        initial_match_conditions.setdefault("$and", [])
+        initial_match_conditions["$and"].append(
+            {"customer_id": {"$exists": True, "$nin": [None, ""]}}
+        )
+        initial_match_conditions["$and"].append(
+            {
+                "$or": [
+                    {"products": {"$elemMatch": {"quantity": {"$gt": 0}}}},
+                    {"products": {"$elemMatch": {"pre_order_quantity": {"$gt": 0}}}},
+                ]
+            }
+        )
+
+    # Resolve join-based filters (sales person, free-text search) to
+    # order-native conditions so they can be applied in the initial match. This
+    # keeps the fast "paginate then enrich" path for every request and avoids
+    # $lookup-based filtering across the whole collection.
+    extra_and = []
+
+    if sales_person:
+        sp_ids = [
+            u["_id"]
+            for u in users_collection.find({"code": sales_person}, {"_id": 1})
+        ]
+        # Unknown salesperson → match nothing rather than everything.
+        extra_and.append({"created_by": {"$in": sp_ids}})
+
+    if search:
+        term = search.strip()
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        or_search = [
+            {"customer_name": rx},
+            {"estimate_number": rx},
+            {"pre_order_estimate_number": rx},
+            {"reference_number": rx},
+            {"zoho_flow.invoice_number": rx},
+        ]
+        if ObjectId.is_valid(term):
+            or_search.append({"_id": ObjectId(term)})
+        # Sales person by name/code → created_by ids.
+        _user_ids = [
+            u["_id"]
+            for u in users_collection.find(
+                {"$or": [{"name": rx}, {"code": rx}]}, {"_id": 1}
+            )
+        ]
+        if _user_ids:
+            or_search.append({"created_by": {"$in": _user_ids}})
+        # Invoice number → its estimate(s) → the order carrying that estimate_id.
+        # Anchored prefix match so this can use the invoice_number index instead
+        # of scanning the whole invoices collection; capped as a safety net.
+        _inv_rx = {"$regex": f"^{re.escape(term)}", "$options": "i"}
+        _inv_ids = [
+            i["invoice_id"]
+            for i in db.invoices.find(
+                {"invoice_number": _inv_rx}, {"invoice_id": 1}
+            ).limit(200)
+        ]
+        if _inv_ids:
+            _est_ids = [
+                e["estimate_id"]
+                for e in db.estimates.find(
+                    {"invoice_ids": {"$in": _inv_ids}}, {"estimate_id": 1}
+                )
+            ]
+            if _est_ids:
+                or_search.append({"estimate_id": {"$in": _est_ids}})
+        extra_and.append({"$or": or_search})
+
+    if extra_and:
+        initial_match_conditions.setdefault("$and", [])
+        initial_match_conditions["$and"].extend(extra_and)
+
+    # Enrich only the current page's rows. The users join is cheap and indexed;
+    # estimate status and invoice payment status are batched in Python below
+    # (a $lookup on invoices timed out — its array localField can't use the
+    # index).
+    users_lookup = [
         {
             "$lookup": {
                 "from": "users",
@@ -1701,43 +1839,25 @@ def read_all_orders(
                 "as": "created_by_info",
             }
         },
-        # 3. Unwind the created_by_info array so it's a single object
         {"$unwind": {"path": "$created_by_info", "preserveNullAndEmptyArrays": True}},
-        # 3b. Live estimate status from the estimates collection (point of truth,
-        # kept current by the Zoho webhook) — the order's own `status` can lag
-        # (e.g. a webhook writing "sent" after the chain accepted the estimate).
-        {
-            "$lookup": {
-                "from": "estimates",
-                "localField": "estimate_id",
-                "foreignField": "estimate_id",
-                "as": "estimate_info",
-            }
-        },
-        {"$addFields": {"estimate_status": {"$first": "$estimate_info.status"}}},
-        # 4. Match by sales_person code after the lookup and unwind
-        # This allows filtering on the 'created_by_info.code' field.
-        # Only add this stage if sales_person is provided.
     ]
 
-    if sales_person:
-        pipeline.append({"$match": {"created_by_info.code": sales_person}})
+    sort_stage = {"$sort": {"created_at": -1}}
+    paginate_stages = [{"$skip": page * limit}, {"$limit": limit}]
 
-    # 5. Sort the results
-    pipeline.append({"$sort": {"created_at": -1}})
+    total_count = _cached_orders_count(initial_match_conditions)
+    pipeline = [{"$match": initial_match_conditions}, sort_stage]
+    pipeline += paginate_stages
+    pipeline += users_lookup
 
-    # Create a pipeline for total count before applying skip and limit
-    count_pipeline = list(pipeline)  # Copy the current pipeline up to sorting
-    count_pipeline.append({"$count": "total"})
+    # Only the unfiltered/date list benefits from streaming the created_at index;
+    # for a targeted search/salesperson/deep-link the planner's own index choice
+    # (with a blocking sort over the small result set) is better.
+    agg_hint = None
+    if not (sales_person or search or order_id):
+        agg_hint = "created_at_1"
 
-    total_count_result = list(orders_collection.aggregate(count_pipeline))
-    total_count = total_count_result[0]["total"] if total_count_result else 0
-
-    # 6. Apply pagination
-    pipeline.append({"$skip": page * limit})
-    pipeline.append({"$limit": limit})
-
-    # 7. Project stage to format fields (including date conversion)
+    # Project stage to format fields (including date conversion)
     pipeline.append(
         {
             "$project": {
@@ -1764,7 +1884,6 @@ def read_all_orders(
                 "spreadsheet_created": 1,
                 "payment": 1,
                 "zoho_flow": 1,
-                "estimate_status": 1,
                 "created_at": {
                     "$dateToString": {
                         "date": "$created_at",
@@ -1792,7 +1911,10 @@ def read_all_orders(
     )
 
     # Execute the pipeline for orders data
-    orders_cursor = orders_collection.aggregate(pipeline)
+    _agg_kwargs = {"allowDiskUse": True}
+    if agg_hint:
+        _agg_kwargs["hint"] = agg_hint
+    orders_cursor = orders_collection.aggregate(pipeline, **_agg_kwargs)
     orders_with_user_info = [serialize_mongo_document(doc) for doc in orders_cursor]
 
     # Server stores datetimes in UTC — render payment/zoho_flow timestamps as
@@ -1818,6 +1940,78 @@ def read_all_orders(
                 for _k, _v in list(_obj.items()):
                     if _k.endswith("_at") or _k in ("paid_at",):
                         _obj[_k] = _to_ist_str(_v)
+
+    # Batch-enrich the page's rows with live estimate status (point of truth,
+    # kept current by the Zoho webhook) and, for invoiced estimates, an
+    # invoice-level payment status. Done with simple indexed $in queries over
+    # only the current page instead of a $lookup (an invoices $lookup timed out
+    # because its array localField can't use the invoice_id index).
+    _now = datetime.now()
+
+    def _parse_due(value):
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value).replace(tzinfo=None)
+            except ValueError:
+                return None
+        return None
+
+    _est_ids = {
+        _o.get("estimate_id")
+        for _o in orders_with_user_info
+        if _o.get("estimate_id")
+    }
+    _est_map = {}
+    _inv_ids_all = set()
+    if _est_ids:
+        for _e in db.estimates.find(
+            {"estimate_id": {"$in": list(_est_ids)}},
+            {"estimate_id": 1, "status": 1, "invoice_ids": 1},
+        ):
+            _est_map[_e["estimate_id"]] = _e
+            if str(_e.get("status", "")).lower() == "invoiced":
+                _inv_ids_all.update(_e.get("invoice_ids") or [])
+
+    _inv_map = {}
+    if _inv_ids_all:
+        for _i in db.invoices.find(
+            {"invoice_id": {"$in": list(_inv_ids_all)}},
+            {"invoice_id": 1, "status": 1, "due_date": 1, "balance": 1},
+        ):
+            _inv_map[_i["invoice_id"]] = _i
+
+    # Derive an invoice-level payment status so the client can distinguish a
+    # paid/overdue Zoho invoice from a gateway (Razorpay) payment. Mirrors the
+    # paid/overdue logic used by /admin/payments_due: overdue = a non-void,
+    # unpaid invoice whose due_date is in the past.
+    for _o in orders_with_user_info:
+        _est = _est_map.get(_o.get("estimate_id"))
+        if not _est:
+            continue
+        _o["estimate_status"] = _est.get("status")
+        if str(_est.get("status", "")).lower() != "invoiced":
+            continue
+        _active = [
+            _inv_map[_iid]
+            for _iid in (_est.get("invoice_ids") or [])
+            if _iid in _inv_map
+            and str(_inv_map[_iid].get("status", "")).lower() != "void"
+        ]
+        if not _active:
+            continue
+        _statuses = [str(i.get("status", "")).lower() for i in _active]
+        _overdue = any(
+            st != "paid" and (_parse_due(i.get("due_date")) or _now) < _now
+            for i, st in zip(_active, _statuses)
+        )
+        if _overdue:
+            _o["invoice_payment_status"] = "overdue"
+        elif all(s == "paid" for s in _statuses):
+            _o["invoice_payment_status"] = "paid"
+        else:
+            _o["invoice_payment_status"] = _statuses[0]
 
     # Order lines snapshot `image_url` at save time, but many products have it
     # empty/None while still carrying a valid `images` array. Backfill from the
@@ -1849,11 +2043,16 @@ def read_all_orders(
         # Images are cosmetic — never fail the orders list over them
         print(f"Error backfilling order product images: {e}")
 
-    total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
+    if total_count == -1:
+        # Count was too slow and fell back to "unknown"; don't range-check the
+        # page (the rows for this page were still fetched).
+        total_pages = -1
+    else:
+        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 1
 
-    # Validate page number - this check should use the *actual* total pages
-    if total_pages > 0 and page >= total_pages:
-        raise HTTPException(status_code=400, detail="Page number out of range")
+        # Validate page number - this check should use the *actual* total pages
+        if total_pages > 0 and page >= total_pages:
+            raise HTTPException(status_code=400, detail="Page number out of range")
 
     return {
         "orders": orders_with_user_info,
@@ -2006,8 +2205,11 @@ async def export_orders(
     sales_person: Optional[str] = Query(None),  # Fix 1: Match parameter type
     status: Optional[str] = Query(None),
     estimate_created: Optional[bool] = Query(None),
+    spreadsheet_created: Optional[bool] = Query(None),
     amount: Optional[str] = Query(None),  # Fix 2: Change to Optional[str]
     estimate_number: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    hide_empty: bool = Query(True),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
 ):
@@ -2015,6 +2217,19 @@ async def export_orders(
     match_stage = {"$match": {}}
     second_match_stage = {"$match": {}}
     date_filter = {}
+
+    # Hide "empty" orders (no customer / nothing in the cart) by default, mirroring
+    # the /admin/orders table. A search bypasses it so any order can be exported.
+    if hide_empty and not search:
+        match_stage["$match"]["$and"] = [
+            {"customer_id": {"$exists": True, "$nin": [None, ""]}},
+            {
+                "$or": [
+                    {"products": {"$elemMatch": {"quantity": {"$gt": 0}}}},
+                    {"products": {"$elemMatch": {"pre_order_quantity": {"$gt": 0}}}},
+                ]
+            },
+        ]
 
     if start_date:
         start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(
@@ -2041,12 +2256,31 @@ async def export_orders(
     if estimate_created is not None:
         match_stage["$match"]["estimate_created"] = estimate_created
 
+    if spreadsheet_created is not None:
+        match_stage["$match"]["spreadsheet_created"] = spreadsheet_created
+
     if amount:
         match_stage["$match"]["total_amount"] = {"$gt": 0}
     print(sales_person)
     if sales_person:
         # Assuming 'created_by_info.name' is the field to filter
         second_match_stage["$match"]["Sales Person Code"] = sales_person
+
+    # Free-text search — mirrors the /admin/orders table search. Order-level
+    # fields are matched pre-lookup; sales person (name/code) is matched
+    # post-lookup on the projected fields (see second_match_stage below).
+    if search:
+        term = search.strip()
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        or_search = [
+            {"customer_name": rx},
+            {"estimate_number": rx},
+            {"pre_order_estimate_number": rx},
+            {"reference_number": rx},
+        ]
+        if ObjectId.is_valid(term):
+            or_search.append({"_id": ObjectId(term)})
+        match_stage["$match"]["$or"] = or_search
     # Now build our aggregation pipeline
     pipeline = [
         match_stage,
