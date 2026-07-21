@@ -149,7 +149,7 @@ def send_reset_email(to_email: str, reset_link: str) -> bool:
         "html": f"""
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                 <h2 style="color: #333;">Password Reset Request</h2>
-                <p>You requested a password reset for your Order Form account.</p>
+                <p>You requested a password reset for your Marketplace account.</p>
                 <div style="text-align: center; margin: 30px 0;">
                     <a href="{reset_link}"
                        style="background-color: #007bff; color: white; padding: 12px 30px;

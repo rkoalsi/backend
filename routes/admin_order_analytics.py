@@ -1,7 +1,7 @@
 """
-Admin Order Analytics — how well the order form is actually being used.
+Admin Order Analytics — how well the Marketplace is actually being used.
 
-Gives a month-wise / day-wise breakdown of orders *placed on the order form*
+Gives a month-wise / day-wise breakdown of orders *placed on the Marketplace*
 (the `orders` collection), plus a split of who is driving them:
 
   * "abandoned" orders — a user clicked "Create Order" which inserts a blank
@@ -11,7 +11,7 @@ Gives a month-wise / day-wise breakdown of orders *placed on the order form*
   * created vs finalised — an order is "finalised" once it has been turned
     into a Zoho estimate (`estimate_created` / `pre_order_estimate_created`).
   * customer-driven vs salesperson-driven — an order is "customer created"
-    when its `created_by` user has role "customer" (self-service order form),
+    when its `created_by` user has role "customer" (self-service Marketplace),
     matching the `placed_by_customer` flag used elsewhere in orders.py.
   * products added by the customer vs the salesperson — the per-line-item
     `added_by` field on `products[]`.
@@ -398,7 +398,7 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
     Shared by the JSON endpoint and the XLSX report endpoint."""
     fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m"
 
-    # Users who place orders as customers themselves (self-service order form).
+    # Users who place orders as customers themselves (self-service Marketplace).
     customer_user_ids = [
         u["_id"] for u in users_collection.find({"role": "customer"}, {"_id": 1})
     ]
@@ -569,7 +569,7 @@ def _compute_analytics(granularity, start_date, end_date, created_by):
                             "lastOrder": {"$max": "$created_at"},
                         }
                     },
-                    # "Using the order form" = the customer added product(s)
+                    # "Using the Marketplace" = the customer added product(s)
                     # themselves (added_by='customer'), not orders where only the
                     # salesperson added products.
                     {"$match": {"customerAddedItems": {"$gt": 0}}},

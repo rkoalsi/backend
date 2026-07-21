@@ -782,7 +782,7 @@ async def try_set_permissions(drive_service, spreadsheet_id: str, user_email: Op
 @router.get("/download_order_form")
 async def download_order_form(customer_id: str, order_id: str, sort: str = "default", user_email: Optional[str] = None):
     """
-    Create order form spreadsheet with robust error handling
+    Create Marketplace spreadsheet with robust error handling
     user_email: Optional email to grant specific access to
     """
     
@@ -803,7 +803,7 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
     spreadsheet_id = None
     
     try:
-        print(f"Starting order form creation for order {order_id}")
+        print(f"Starting Marketplace creation for order {order_id}")
         
         # Step 1: Get all required data (CRITICAL)
         print("📊 Fetching data...")
@@ -862,7 +862,7 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
 
         spreadsheet_body = {
             "properties": {
-                "title": f"Order Form - {customer.get('display_name', 'Customer')} - {order_id[:8]}"
+                "title": f"Order - {customer.get('display_name', 'Customer')} - {order_id[:8]}"
             }
         }
 
@@ -1041,9 +1041,9 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
         
         # Build message based on whether cart had products
         if cart_product_count > 0:
-            message = f"Order form created with {len(sorted_brands)} brand sheets. {cart_product_count} product quantities pre-filled from cart."
+            message = f"Order created with {len(sorted_brands)} brand sheets. {cart_product_count} product quantities pre-filled from cart."
         else:
-            message = f"Order form created with {len(sorted_brands)} brand sheets"
+            message = f"Order created with {len(sorted_brands)} brand sheets"
 
         response_data = {
             "google_sheet_url": sheet_url,
@@ -1065,7 +1065,7 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
                 "5. Click 'Done'"
             ]
         
-        print("✅ Order form creation completed")
+        print("✅ Order creation completed")
         return response_data
         
     except HTTPException:
@@ -1089,11 +1089,11 @@ async def download_order_form(customer_id: str, order_id: str, sort: str = "defa
         else:
             raise HTTPException(
                 status_code=500, 
-                detail=f"Failed to create order form: {str(e)}"
+                detail=f"Failed to create Marketplace: {str(e)}"
             )
 @router.get("/download_order_xlsx")
 async def download_order_xlsx(customer_id: str, order_id: str, sort: str = "default"):
-    """Generate and return an XLSX version of the order form with embedded images"""
+    """Generate and return an XLSX version of the Marketplace with embedded images"""
     if not customer_id or not order_id:
         raise HTTPException(status_code=400, detail="Customer and Order IDs are required")
 

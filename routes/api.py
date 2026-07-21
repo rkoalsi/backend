@@ -68,7 +68,7 @@ router.include_router(blog, prefix="/blog", tags=["Blog"])
 router.include_router(linktree, prefix="/linktree", tags=["Link Tree"])
 # public digital business cards (content managed via /admin/cards)
 router.include_router(business_cards, prefix="/cards", tags=["Business Cards"])
-# payments: Razorpay payment links for the (public) order form + webhook callback
+# payments: Razorpay payment links for the (public) Marketplace + webhook callback
 router.include_router(payments, prefix="/payments", tags=["Payments"])
 # utility helpers (city list etc.) — read-only, non-sensitive
 router.include_router(util, prefix="/util", tags=["Util"])

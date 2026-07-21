@@ -406,7 +406,7 @@ def get_payment_link(order_id: str):
 
 @router.get("/order/{order_id}/config")
 def order_payment_config(order_id: str):
-    """Tell the order form whether this order requires online payment (self-registered
+    """Tell the Marketplace whether this order requires online payment (self-registered
     customer) and the minimum cart value before payment is allowed."""
     from .app_settings import get_min_order_value_self_registered
 
