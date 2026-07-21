@@ -1,4 +1,4 @@
-from .root import get_database
+from .root import get_database, effective_upcoming_stock
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta
 import logging, asyncio, aiohttp, time, re, os, requests
@@ -2231,6 +2231,96 @@ async def bills_cron():
         error_msg = f"Error in bills sync: {e}"
         logger.error(error_msg)
         send_slack_notification("Bills Cron Error", success=False, error_msg=str(e))
+
+
+def refresh_preorder_upcoming_stock():
+    """Persist `upcoming_stock`, `inward_date` and `eta_port_date` on every
+    pre_order product, sourced from the latest non-cancelled purchase order whose
+    vendor matches the product's brand (upcoming via effective_upcoming_stock;
+    dates from the matching brand_orders doc). Precomputing these once — instead
+    of per API request — lets the Pre Orders tab read them straight off the
+    product document with no per-request purchase_orders/brand_orders joins.
+    Runs after each stock/PO sync. Pre-order products with no matching PO have
+    these three fields cleared so stale values never linger."""
+    db = get_database()
+    pre_order_prods = list(db.products.find(
+        {"pre_order": True, "is_deleted": {"$exists": False}},
+        {"item_id": 1, "brand": 1},
+    ))
+    if not pre_order_prods:
+        return
+
+    brand_names = list({p.get("brand") for p in pre_order_prods if p.get("brand")})
+    brand_to_vendor = {
+        b["name"]: b.get("vendor_id")
+        for b in db.brands.find({"name": {"$in": brand_names}}, {"name": 1, "vendor_id": 1})
+        if b.get("vendor_id")
+    }
+    item_id_to_vendor = {
+        p["item_id"]: brand_to_vendor[p["brand"]]
+        for p in pre_order_prods
+        if p.get("item_id") and p.get("brand") in brand_to_vendor
+    }
+
+    upcoming_by_item: dict = {}
+    po_number_by_item: dict = {}
+    if item_id_to_vendor:
+        vendor_ids = list(set(item_id_to_vendor.values()))
+        pos = list(db.purchase_orders.find(
+            {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]},
+             "line_items": {"$elemMatch": {"item_id": {"$in": list(item_id_to_vendor.keys())}}}},
+            {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
+        ).sort("date", -1))
+
+        seen: set = set()
+        for po in pos:
+            for li in po.get("line_items", []):
+                iid = li.get("item_id")
+                if not iid or iid in seen or item_id_to_vendor.get(iid) != po.get("vendor_id"):
+                    continue
+                upcoming_by_item[iid] = effective_upcoming_stock(
+                    li.get("quantity"), li.get("quantity_received")
+                )
+                if po.get("purchaseorder_number"):
+                    po_number_by_item[iid] = po["purchaseorder_number"]
+                seen.add(iid)
+
+    # Logistics dates (inward / ETA-at-port) from brand_orders, keyed by PO number.
+    dates_by_po: dict = {}
+    po_numbers = list(set(po_number_by_item.values()))
+    if po_numbers:
+        for bo in db.brand_orders.find(
+            {"purchaseorder_number": {"$in": po_numbers}},
+            {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
+        ):
+            dates_by_po[bo["purchaseorder_number"]] = {
+                "inward_date": bo.get("inward_date"),
+                "eta_port_date": bo.get("eta_port_date"),
+            }
+
+    updated = 0
+    cleared = 0
+    for p in pre_order_prods:
+        iid = p.get("item_id")
+        if iid and iid in upcoming_by_item:
+            dates = dates_by_po.get(po_number_by_item.get(iid)) or {}
+            db.products.update_one(
+                {"_id": p["_id"]},
+                {"$set": {
+                    "upcoming_stock": upcoming_by_item[iid],
+                    "inward_date": dates.get("inward_date"),
+                    "eta_port_date": dates.get("eta_port_date"),
+                }},
+            )
+            updated += 1
+        else:
+            # No matching PO — drop any previously persisted values.
+            db.products.update_one(
+                {"_id": p["_id"]},
+                {"$unset": {"upcoming_stock": "", "inward_date": "", "eta_port_date": ""}},
+            )
+            cleared += 1
+    logger.info(f"Refreshed pre-order upcoming/dates: {updated} set, {cleared} cleared")
 
 
 async def purchase_orders_cron():

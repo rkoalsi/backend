@@ -98,13 +98,15 @@ def get_product_counts(response: Response):
 
         result["New Arrivals"] = {"All Products": new_products_count}
 
-        # Add count for "Pre Orders" — products marked pre_order=true (no stock filter)
-        pre_orders_count = db.products.count_documents(
-            {
-                "pre_order": True,
-                "is_deleted": {"$exists": False},
-            }
-        )
+        # Add count for "Pre Orders" — products marked pre_order=true (no stock
+        # filter), excluding those whose incoming stock is fully received
+        # (upcoming == 0) while still holding on-hand stock.
+        pre_orders_query = {
+            "pre_order": True,
+            "is_deleted": {"$exists": False},
+            "$nor": [{"upcoming_stock": 0, "stock": {"$gt": 0}}],
+        }
+        pre_orders_count = db.products.count_documents(pre_orders_query)
         result["Pre Orders"] = {"All Products": pre_orders_count}
 
         # Add count for "Clearance" — products marked clearance=true with stock
@@ -341,6 +343,11 @@ def get_products(
     # Don't filter by brand when pre_order, new_only or clearance is true
     if pre_order:
         query["pre_order"] = True
+        # Hide pre-order products whose incoming stock is fully received
+        # (upcoming_stock == 0) while they still hold on-hand stock — nothing
+        # left to pre-order, so they only belong in their regular brand tab.
+        # `upcoming_stock` is precomputed by purchase_orders_cron.
+        query["$nor"] = [{"upcoming_stock": 0, "stock": {"$gt": 0}}]
     elif not new_only and not clearance and brand:
         query["brand"] = brand
 
@@ -500,63 +507,10 @@ def get_products(
 
     all_products = [serialize_mongo_document(doc) for doc in fetched_products]
 
-    # Enrich pre-order products with upcoming stock from purchase orders
-    pre_order_prods = [p for p in all_products if p.get("pre_order")]
-    if pre_order_prods:
-        brand_names = list({p.get("brand") for p in pre_order_prods if p.get("brand")})
-        item_id_to_vendor = {}
-        if brand_names:
-            brand_to_vendor = {
-                b["name"]: b.get("vendor_id")
-                for b in db.brands.find({"name": {"$in": brand_names}}, {"name": 1, "vendor_id": 1})
-                if b.get("vendor_id")
-            }
-            item_id_to_vendor = {
-                p["item_id"]: brand_to_vendor[p["brand"]]
-                for p in pre_order_prods
-                if p.get("item_id") and p.get("brand") in brand_to_vendor
-            }
-        if item_id_to_vendor:
-            vendor_ids = list(set(item_id_to_vendor.values()))
-            pos = list(db.purchase_orders.find(
-                {"vendor_id": {"$in": vendor_ids}, "status": {"$nin": ["cancelled"]},
-                 "line_items": {"$elemMatch": {"item_id": {"$in": list(item_id_to_vendor.keys())}}}},
-                {"vendor_id": 1, "line_items": 1, "date": 1, "purchaseorder_number": 1}
-            ).sort("date", -1))
-            upcoming_by_item: dict = {}
-            po_number_by_item: dict = {}
-            seen_iids: set = set()
-            for po in pos:
-                for li in po.get("line_items", []):
-                    iid = li.get("item_id")
-                    if not iid or iid in seen_iids or item_id_to_vendor.get(iid) != po.get("vendor_id"):
-                        continue
-                    qty = float(li.get("quantity") or 0)
-                    qty_received = float(li.get("quantity_received") or 0)
-                    upcoming_by_item[iid] = max(0, int(qty - qty_received))
-                    if po.get("purchaseorder_number"):
-                        po_number_by_item[iid] = po["purchaseorder_number"]
-                    seen_iids.add(iid)
-            # Join to brand_orders (logistics tracking) for inward / ETA-at-port dates
-            dates_by_po: dict = {}
-            po_numbers = list(set(po_number_by_item.values()))
-            if po_numbers:
-                for bo in db.brand_orders.find(
-                    {"purchaseorder_number": {"$in": po_numbers}},
-                    {"purchaseorder_number": 1, "inward_date": 1, "eta_port_date": 1, "_id": 0}
-                ):
-                    dates_by_po[bo["purchaseorder_number"]] = {
-                        "inward_date": bo.get("inward_date"),
-                        "eta_port_date": bo.get("eta_port_date"),
-                    }
-            for p in all_products:
-                iid = p.get("item_id")
-                if p.get("pre_order") and iid in upcoming_by_item:
-                    p["upcoming_stock"] = upcoming_by_item[iid]
-                    dates = dates_by_po.get(po_number_by_item.get(iid))
-                    if dates:
-                        p["inward_date"] = dates.get("inward_date")
-                        p["eta_port_date"] = dates.get("eta_port_date")
+    # `upcoming_stock`, `inward_date` and `eta_port_date` are precomputed on the
+    # product document by refresh_preorder_upcoming_stock() (run after each
+    # stock/PO sync), so no per-request purchase_orders/brand_orders joins are
+    # needed here — they come straight back from the aggregation above.
 
     try:
         total_products = db.products.count_documents(query)
