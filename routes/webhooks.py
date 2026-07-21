@@ -4,6 +4,7 @@ from ..config.scheduler import schedule_job, remove_scheduled_jobs
 from ..config.whatsapp import send_whatsapp
 from .helpers import get_access_token
 from .notifications import create_notification
+from ..config.crons import process_purchase_order_data, refresh_preorder_upcoming_stock
 from dotenv import load_dotenv
 import datetime, json, os, requests, time, threading
 from dateutil.parser import parse
@@ -611,6 +612,14 @@ def update_stock():
         sync_stock_to_tpack()
     except Exception as e:
         print(f"Error syncing stock to tpack: {e}")
+
+    # Recompute upcoming_stock on pre-order products now that stock is fresh, so
+    # the Pre Orders tab hides fully received items (upcoming == 0 with on-hand
+    # stock) without recomputing per request.
+    try:
+        refresh_preorder_upcoming_stock()
+    except Exception as e:
+        print(f"Error refreshing pre-order upcoming_stock: {e}")
 
     # Check for in-stock notification requests
     try:
@@ -2296,8 +2305,11 @@ async def purchase_order_webhook(request: Request):
             {"purchaseorder_number": purchaseorder_number}
         )
 
-        # Sort all keys alphabetically
-        sorted_data = sort_dict_keys(raw_data)
+        # Normalize datetime fields (date, created_time, due_date, ...) to real
+        # datetimes and sort keys — same processing the daily cron applies, so
+        # webhook-sourced POs don't leave `date` as a raw string (which breaks
+        # date sorting against cron-sourced POs).
+        sorted_data = process_purchase_order_data(raw_data)
 
         # Prepare the document for MongoDB
         current_time = datetime.datetime.now()
@@ -2306,7 +2318,7 @@ async def purchase_order_webhook(request: Request):
             # Update existing purchase order
             sorted_data["updated_at"] = current_time
             # Keep the original created_at if it exists
-            if "created_at" not in sorted_data and "created_at" in existing_po:
+            if "created_at" in existing_po:
                 sorted_data["created_at"] = existing_po["created_at"]
             elif "created_at" not in sorted_data:
                 sorted_data["created_at"] = current_time
@@ -2326,8 +2338,11 @@ async def purchase_order_webhook(request: Request):
             }
 
         else:
-            # Create new purchase order
-            sorted_data["created_at"] = current_time
+            # Create new purchase order — keep the created_at derived from the
+            # PO date/created_time (set by process_purchase_order_data) so it
+            # matches cron-sourced POs; fall back to now only if absent.
+            if "created_at" not in sorted_data:
+                sorted_data["created_at"] = current_time
             sorted_data["updated_at"] = current_time
 
             # Insert the new document

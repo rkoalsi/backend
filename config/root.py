@@ -6,6 +6,24 @@ from datetime import datetime
 
 load_dotenv()
 
+# A purchase order is treated as fully received once this fraction of the
+# ordered quantity has been received. The tiny remainder below this threshold is
+# a short-shipment leftover that won't arrive, so it should not count as
+# "upcoming" pre-order stock.
+PREORDER_RECEIVED_TOLERANCE = 0.98
+
+
+def effective_upcoming_stock(qty, qty_received) -> int:
+    """Upcoming (not-yet-received) quantity for a PO line, treating a
+    near-complete PO (>= PREORDER_RECEIVED_TOLERANCE received) as fully received
+    (0 upcoming). Returns a non-negative int."""
+    qty = float(qty or 0)
+    qty_received = float(qty_received or 0)
+    if qty > 0 and (qty_received / qty) >= PREORDER_RECEIVED_TOLERANCE:
+        return 0
+    return max(0, int(qty - qty_received))
+
+
 # Shared MongoDB client instance (singleton pattern)
 _mongo_client = None
 _mongo_db = None
