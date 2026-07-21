@@ -46,7 +46,7 @@ def validate_gstin_full(gst_number: str) -> dict:
 
 def send_account_approved_email(to_email: str, customer_name: str, shop_name: str) -> bool:
     """Email a self-registered B2B customer that their account is approved and they
-    can start ordering. Sent via Resend, branded to the Pupscribe order portal."""
+    can start ordering. Sent via Resend, branded to the Pupscribe Marketplace."""
     api_key = os.getenv("RESEND_API_KEY")
     if not api_key:
         logger.warning("RESEND_API_KEY not set; skipping approval email")
@@ -55,9 +55,9 @@ def send_account_approved_email(to_email: str, customer_name: str, shop_name: st
     login_url = f"{os.getenv('FRONTEND_URL', 'https://marketplace.pupscribe.in').rstrip('/')}/login"
     first_name = (customer_name or "there").split()[0]
     shop_line = (
-        f"<strong>{shop_name}</strong> is now set up on the Pupscribe order portal."
+        f"<strong>{shop_name}</strong> is now set up on the Pupscribe Marketplace."
         if shop_name
-        else "Your account is now set up on the Pupscribe order portal."
+        else "Your account is now set up on the Pupscribe Marketplace."
     )
 
     html = f"""
