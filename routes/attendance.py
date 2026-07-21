@@ -247,7 +247,7 @@ async def check_in(data: dict):
             "employee_name": employee_name,
             "employee_number": employee_number,
             "swipe_datetime": swipe_datetime,
-            "device_name": "Pupscribe Order Form",
+            "device_name": "Pupscribe Marketplace",
             "created_at": datetime.now(),
             "is_check_in": is_check_in,
             "latitude": data.get("latitude"),
@@ -258,7 +258,7 @@ async def check_in(data: dict):
 
         # Send data to GreyTHR
         success, message = send_attendance_to_greythr(
-            door="Pupscribe Order Form",
+            door="Pupscribe Marketplace",
             employee_number=employee_number,
             is_in=is_check_in,
         )
