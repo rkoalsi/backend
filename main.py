@@ -23,8 +23,14 @@ origins = [
     "https://localhost:3001",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
-    "https://orderform.pupscribe.in",  # Frontend (home route)
+    "https://marketplace.pupscribe.in",  # Frontend (home route) — new domain
+    "http://marketplace.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://test.marketplace.pupscribe.in",  # UAT frontend — new domain
+    "http://test.marketplace.pupscribe.in",   # HTTP fallback
+    "https://orderform.pupscribe.in",  # Legacy domain — redirects to marketplace, kept for CORS during migration
     "http://orderform.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://test.orderform.pupscribe.in",  # Legacy UAT domain — redirects to test.marketplace
+    "http://test.orderform.pupscribe.in",   # HTTP fallback
     "https://pupscribe.in",  # Main domain
     "http://pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
     "https://www.pupscribe.in",  # WWW subdomain
