@@ -1034,11 +1034,13 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
             })
             result["New Arrivals"] = {"All Products": new_count}
 
-            # Pre Orders — products marked pre_order=true (no stock filter).
-            # Must mirror /products/counts so the Pre Orders tab renders on the
-            # first (default landing) load, not only after a refresh.
+            # Pre Orders — products marked pre_order=true (no stock filter),
+            # excluding fully-received items still holding on-hand stock. Must
+            # mirror /products/counts (and the GET /products pre_order filter)
+            # exactly, else the tab badge and the tab's product list disagree.
             pre_orders_count = db.products.count_documents({
                 "pre_order": True, "is_deleted": {"$exists": False},
+                "$nor": [{"upcoming_stock": 0, "stock": {"$gt": 0}}],
             })
             result["Pre Orders"] = {"All Products": pre_orders_count}
 
