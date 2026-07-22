@@ -44,6 +44,7 @@ from .linktree import router as linktree
 from .business_cards import router as business_cards
 from .payments import router as payments
 from .tracking import router as tracking
+from .presence import router as presence
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -81,6 +82,9 @@ router.include_router(tracking, prefix="/shipments/track", tags=["Tracking"])
 router.include_router(permissions_router, prefix="/permissions", tags=["Permissions"])
 # webhooks: authenticated by Zoho IP / HMAC — NOT by user JWT
 router.include_router(webhooks, prefix="/zoho/webhooks", tags=["Zoho"])
+# presence: /heartbeat/guest is public (shared links + public pages);
+# /heartbeat and /online carry their own JWTBearer dependency inside the router
+router.include_router(presence, prefix="/presence", tags=["Presence"])
 
 # ── Protected routes (require valid JWT) ─────────────────────────────────────
 _jwt = [Depends(JWTBearer())]
