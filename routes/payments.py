@@ -138,6 +138,13 @@ def _is_self_registered_order(order: dict) -> bool:
     return False
 
 
+def _runs_full_payment_chain(order: dict) -> bool:
+    """Paid orders that run the full post-payment Zoho chain (accepted estimate
+    -> draft sales order -> sent invoice -> customer payment): self-registered
+    customers, and any order the salesperson marked as Upfront Payment (step 0)."""
+    return order.get("payment_mode") == "upfront" or _is_self_registered_order(order)
+
+
 def _customer_contact(order: dict) -> dict:
     """Best-effort prefill of Razorpay's `customer` block from the order's customer."""
     contact = {}
@@ -414,6 +421,10 @@ def order_payment_config(order_id: str):
     return {
         "is_self_registered": _is_self_registered_order(order),
         "min_order_value": get_min_order_value_self_registered(),
+        # Salesperson-chosen payment mode (step 0): 'upfront' shows the payment
+        # gateway to everyone (staff, customer, shared link); 'cheque_cod' tags
+        # the estimate notes instead. Empty = standard flow.
+        "payment_mode": order.get("payment_mode") or "",
     }
 
 
@@ -652,10 +663,11 @@ async def verify_payment(body: dict, request: Request, background_tasks: Backgro
         order.get("estimate_created")
         or str(order.get("status", "")).lower() == "accepted"
     )
-    # Self-registered orders always run the (idempotent) post-payment chain —
-    # even when the estimate already exists it must be accepted and the sales
-    # order / invoice / customer payment created if any step is still missing.
-    if not already_created or _is_self_registered_order(order):
+    # Chain orders (self-registered / upfront) always run the (idempotent)
+    # post-payment chain — even when the estimate already exists it must be
+    # accepted and the sales order / invoice / customer payment created if any
+    # step is still missing.
+    if not already_created or _runs_full_payment_chain(order):
         # The customer confirmation is sent from the background task once the
         # estimate exists, so the message carries the estimate number.
         background_tasks.add_task(
@@ -716,9 +728,10 @@ def order_payment_status(order_id: str):
 
     flow = order.get("zoho_flow") or {}
 
-    if payment_status == "paid" and _is_self_registered_order(order):
-        # Self-registered paid orders run the full Zoho chain (accepted estimate
-        # -> sales order -> invoice -> customer payment). Only report done once
+    if payment_status == "paid" and _runs_full_payment_chain(order):
+        # Chain orders (self-registered / upfront) run the full Zoho chain
+        # (accepted estimate -> sales order -> invoice -> customer payment).
+        # Only report done once
         # the chain finished (or definitively failed) so the confirmation popup
         # shows the final state — not the transient draft estimate.
         done = bool(flow.get("chain_completed_at")) or bool(flow.get("last_error"))
@@ -744,8 +757,9 @@ async def _create_draft_estimate_on_payment(order_id: str, request: Request, bac
     """
     Payment succeeded -> finalise the order's Zoho estimate.
 
-    Self-registered customers: the estimate is ACCEPTED and the full post-payment
-    Zoho chain runs (draft sales order -> invoice marked sent -> customer payment
+    Chain orders (self-registered customers, and salesperson-marked Upfront
+    Payment orders): the estimate is ACCEPTED and the full post-payment Zoho
+    chain runs (draft sales order -> invoice marked sent -> customer payment
     applied, which marks the invoice paid).
 
     Everyone else: the estimate is created in DRAFT status as before (the
@@ -755,7 +769,7 @@ async def _create_draft_estimate_on_payment(order_id: str, request: Request, bac
     from .orders import finalise  # lazy import to avoid circular import
 
     order = orders_collection.find_one({"_id": ObjectId(order_id)})
-    if order is not None and _is_self_registered_order(order):
+    if order is not None and _runs_full_payment_chain(order):
         return await _run_post_payment_zoho_chain(order_id, request, background_tasks)
 
     return await finalise(
@@ -1425,9 +1439,10 @@ async def razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
             order.get("estimate_created")
             or str(order.get("status", "")).lower() == "accepted"
         )
-        # Self-registered orders always run the (idempotent) post-payment chain
-        # so a partially-completed sales order / invoice / payment gets finished.
-        if already_accepted and not _is_self_registered_order(order):
+        # Chain orders (self-registered / upfront) always run the (idempotent)
+        # post-payment chain so a partially-completed sales order / invoice /
+        # payment gets finished.
+        if already_accepted and not _runs_full_payment_chain(order):
             _log_transaction("webhook_estimate_skipped", order_id, reason="already_created")
             # Estimate already exists -> confirm now (order already has its number).
             _notify_customer_payment_success(order)

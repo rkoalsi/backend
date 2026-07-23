@@ -2166,6 +2166,12 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
         # Return validation error message if validation fails
         return {"status": "error", "message": e.detail}
     order = db.orders.find_one({"_id": ObjectId(order_id)})
+    # Salesperson-chosen payment mode (step 0): cheque/COD orders carry the
+    # payment terms on the estimate notes. Guard against double-append when the
+    # caller (e.g. the self-registered COD endpoint) already passed a COD line.
+    if order.get("payment_mode") == "cheque_cod" and "Cheque" not in extra_notes:
+        cheque_note = "Payment Mode: Cheque / Cash on Delivery."
+        extra_notes = f"{extra_notes}\n{cheque_note}".strip() if extra_notes else cheque_note
     estimate_created = order.get("estimate_created", False)
     estimate_id = order.get("estimate_id", "")
     shipping_address_id = order.get("shipping_address", {}).get("address_id", "")
@@ -2341,8 +2347,9 @@ async def finalise(order_dict: dict, request: Request, background_tasks: Backgro
             db.counters.update_one({"_id": counter_id}, {"$max": {"seq": last_num}}, upsert=True)
 
         def _base_payload(line_items_list: list, notes_text: str) -> dict:
+            # Payment terms lead; the "Looking forward…" sign-off stays last.
             if extra_notes:
-                notes_text = f"{notes_text}\n{extra_notes}"
+                notes_text = f"{extra_notes}\n{notes_text}"
             return {
                 "location_id": "3220178000143298047",
                 "contact_persons": [],

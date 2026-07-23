@@ -1883,6 +1883,7 @@ def read_all_orders(
                 "spreadsheet_url": 1,
                 "spreadsheet_created": 1,
                 "payment": 1,
+                "payment_mode": 1,
                 "zoho_flow": 1,
                 "created_at": {
                     "$dateToString": {

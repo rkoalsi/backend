@@ -1342,17 +1342,18 @@ def handle_accepted_estimate(data: dict):
         )
         if order:
             from .payments import (  # lazy import, avoids cycle
-                _is_self_registered_order,
+                _runs_full_payment_chain,
                 _notify_customer_order_accepted,
             )
 
             payment = order.get("payment") or {}
             if (
-                _is_self_registered_order(order)
+                _runs_full_payment_chain(order)
                 and payment.get("status") == "paid"
                 and not payment.get("customer_notified")
             ):
-                # Paid self-registered order whose payment confirmation hasn't
+                # Paid chain order (self-registered / upfront) whose payment
+                # confirmation hasn't
                 # gone out yet: the payment chain sends both messages in the
                 # right order (payment received FIRST, then accepted) — don't
                 # jump the queue here.
