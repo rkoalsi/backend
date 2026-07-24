@@ -335,6 +335,92 @@ async def add_comment(cheque_id: str, payload: dict, current_user: dict = Depend
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.patch("/{cheque_id}/comments/{comment_id}")
+async def edit_comment(
+    cheque_id: str,
+    comment_id: str,
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a comment. Author can edit their own; admins can edit any."""
+    try:
+        user_data = current_user.get("data", current_user)
+        user_id = str(user_data.get("_id", ""))
+        user_role = user_data.get("role", "")
+        is_admin = user_role in ("admin", "super_admin", "sales_admin")
+
+        text = payload.get("text", "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Comment text is required")
+
+        cheque = db.cheques.find_one({"_id": ObjectId(cheque_id)}, {"comments": 1})
+        if not cheque:
+            raise HTTPException(status_code=404, detail="Cheque not found")
+
+        comment = next(
+            (c for c in cheque.get("comments", []) if str(c.get("_id")) == comment_id),
+            None,
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+
+        if not is_admin and str(comment.get("created_by")) != user_id:
+            raise HTTPException(status_code=403, detail="You can only edit your own comments")
+
+        db.cheques.update_one(
+            {"_id": ObjectId(cheque_id), "comments._id": ObjectId(comment_id)},
+            {
+                "$set": {
+                    "comments.$.text": text,
+                    "comments.$.edited_at": datetime.datetime.utcnow(),
+                }
+            },
+        )
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.delete("/{cheque_id}/comments/{comment_id}")
+async def delete_comment(
+    cheque_id: str,
+    comment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a comment. Author can delete their own; admins can delete any."""
+    try:
+        user_data = current_user.get("data", current_user)
+        user_id = str(user_data.get("_id", ""))
+        user_role = user_data.get("role", "")
+        is_admin = user_role in ("admin", "super_admin", "sales_admin")
+
+        cheque = db.cheques.find_one({"_id": ObjectId(cheque_id)}, {"comments": 1})
+        if not cheque:
+            raise HTTPException(status_code=404, detail="Cheque not found")
+
+        comment = next(
+            (c for c in cheque.get("comments", []) if str(c.get("_id")) == comment_id),
+            None,
+        )
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+
+        if not is_admin and str(comment.get("created_by")) != user_id:
+            raise HTTPException(status_code=403, detail="You can only delete your own comments")
+
+        db.cheques.update_one(
+            {"_id": ObjectId(cheque_id)},
+            {"$pull": {"comments": {"_id": ObjectId(comment_id)}}},
+        )
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.delete("/{cheque_id}")
 def delete_cheque(cheque_id: str, current_user: dict = Depends(get_current_user)):
     try:
