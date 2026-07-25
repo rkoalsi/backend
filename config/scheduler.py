@@ -1,6 +1,6 @@
 # scheduler.py
 from datetime import datetime
-import logging, os, smtplib
+import logging, os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -10,12 +10,6 @@ from dotenv import load_dotenv
 from .whatsapp import send_whatsapp
 
 load_dotenv()  # ensure .env is loaded
-
-RESET_EMAIL_SENDER = os.getenv("RESET_EMAIL_SENDER")
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 # Job stores configuration remains the same
 jobstores = {

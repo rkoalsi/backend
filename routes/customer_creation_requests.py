@@ -14,6 +14,7 @@ from .notifications import (
 from .admin_users import hash_password, generate_password
 from .users import make_login_link_token
 from ..config.phone import normalize_indian_mobile
+from ..config.email import send_email, esc, SITE_URL
 import os
 import requests
 import logging
@@ -54,148 +55,56 @@ def validate_gstin_full(gst_number: str) -> dict:
 
 def send_account_approved_email(to_email: str, customer_name: str, shop_name: str) -> bool:
     """Email a self-registered B2B customer that their account is approved and they
-    can start ordering. Sent via Resend, branded to the Pupscribe Marketplace."""
-    api_key = os.getenv("RESEND_API_KEY")
-    if not api_key:
-        logger.warning("RESEND_API_KEY not set; skipping approval email")
-        return False
-
-    login_url = f"{os.getenv('FRONTEND_URL', 'https://marketplace.pupscribe.in').rstrip('/')}/login"
+    can start ordering."""
+    login_url = f"{SITE_URL}/login"
     first_name = (customer_name or "there").split()[0]
     shop_line = (
-        f"<strong>{shop_name}</strong> is now set up on the Pupscribe Marketplace."
+        f"<strong style=\"color:#1A1014;\">{esc(shop_name)}</strong> is now set up on the "
+        "Pupscribe Marketplace."
         if shop_name
         else "Your account is now set up on the Pupscribe Marketplace."
     )
 
-    html = f"""
-    <div style="margin:0;padding:0;background-color:#f4f5f7;">
-      <div style="max-width:600px;margin:0 auto;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;">
-        <div style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(15,25,35,0.08);">
-          <!-- Header -->
-          <div style="background:#ffffff;padding:32px 32px 24px;text-align:center;border-bottom:1px solid #eef0f2;">
-            <img src="https://assets.pupscribe.in/branding/pupscribe_logo.jpg" alt="Pupscribe" width="190" style="display:block;width:190px;max-width:62%;height:auto;margin:0 auto;border:0;" />
-            <h1 style="margin:18px 0 0;color:#0f1923;font-size:22px;font-weight:700;">You're approved! 🎉</h1>
-          </div>
-          <!-- Body -->
-          <div style="padding:32px;">
-            <p style="margin:0 0 16px;color:#1a2533;font-size:16px;">Hi {first_name},</p>
-            <p style="margin:0 0 16px;color:#44515f;font-size:15px;line-height:1.7;">
-              Great news — your B2B account has been verified and approved. {shop_line}
-            </p>
-            <p style="margin:0 0 28px;color:#44515f;font-size:15px;line-height:1.7;">
-              You can now sign in and start placing your orders right away.
-            </p>
-            <div style="text-align:center;margin:0 0 28px;">
-              <a href="{login_url}"
-                 style="background:#2B4864;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:600;display:inline-block;">
-                Start ordering
-              </a>
-            </div>
-            <p style="margin:0;color:#8a96a3;font-size:13px;line-height:1.6;">
-              Sign in with your registered mobile number and the OTP we send to your WhatsApp.
-            </p>
-          </div>
-          <!-- Footer -->
-          <div style="border-top:1px solid #eef0f2;padding:20px 32px;text-align:center;">
-            <p style="margin:0;color:#aab2bd;font-size:12px;">© Pupscribe. All rights reserved.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-
-    try:
-        resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": "no-reply@no-reply.pupscribe.in",
-                "to": [to_email],
-                "subject": "Your Pupscribe account is approved — start ordering",
-                "html": html,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        logger.info(f"✅ Approval email sent to {to_email}: {resp.json().get('id')}")
-        return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Approval email failed for {to_email}: {e}")
-        return False
+    return send_email(
+        to_email,
+        "Your Pupscribe account is approved — start ordering",
+        eyebrow="Approved",
+        tone="success",
+        heading="You're approved",
+        greeting=f"Hi {first_name},",
+        paragraphs=[
+            f"Great news — your B2B account has been verified and approved. {shop_line}",
+            "You can now sign in and start placing your orders right away.",
+        ],
+        cta=("Start ordering", login_url),
+        meta="Sign in with your registered mobile number and the OTP we send to your WhatsApp.",
+    )
 
 
 def send_account_rejected_email(to_email: str, customer_name: str, shop_name: str, reason: str = "") -> bool:
     """Email a self-registered B2B customer that their details need changes, with a
-    CTA back to the portal where they can edit and resubmit. Sent via Resend."""
-    api_key = os.getenv("RESEND_API_KEY")
-    if not api_key:
-        logger.warning("RESEND_API_KEY not set; skipping rejection email")
-        return False
-
-    login_url = f"{os.getenv('FRONTEND_URL', 'https://marketplace.pupscribe.in').rstrip('/')}/customer/account"
+    CTA back to the portal where they can edit and resubmit."""
+    account_url = f"{SITE_URL}/customer/account"
     first_name = (customer_name or "there").split()[0]
-    shop_line = f"for <strong>{shop_name}</strong> " if shop_name else ""
-    reason_block = (
-        f'<div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px 16px;margin:0 0 24px;">'
-        f'<p style="margin:0;color:#9a3412;font-size:14px;line-height:1.6;"><strong>Reason:</strong> {reason}</p></div>'
-        if reason else ""
+    shop_line = f"for <strong style=\"color:#1A1014;\">{esc(shop_name)}</strong> " if shop_name else ""
+
+    return send_email(
+        to_email,
+        "Action needed — update your Pupscribe account details",
+        eyebrow="Action required",
+        tone="action",
+        heading="Your details need a quick update",
+        greeting=f"Hi {first_name},",
+        paragraphs=[
+            f"Thanks for registering with Pupscribe. We reviewed the business details "
+            f"{shop_line}and weren't able to approve them just yet.",
+            "Please sign in, review your business details and resubmit — we'll take "
+            "another look right away.",
+        ],
+        callout=f"<strong>Reason:</strong> {esc(reason)}" if reason else "",
+        cta=("Update my details", account_url),
+        meta="Need a hand? Just reply to this email and our team will help.",
     )
-
-    html = f"""
-    <div style="margin:0;padding:0;background-color:#f4f5f7;">
-      <div style="max-width:600px;margin:0 auto;padding:24px 16px;font-family:Arial,Helvetica,sans-serif;">
-        <div style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(15,25,35,0.08);">
-          <div style="background:#ffffff;padding:32px 32px 24px;text-align:center;border-bottom:1px solid #eef0f2;">
-            <img src="https://assets.pupscribe.in/branding/pupscribe_logo.jpg" alt="Pupscribe" width="190" style="display:block;width:190px;max-width:62%;height:auto;margin:0 auto;border:0;" />
-            <h1 style="margin:18px 0 0;color:#0f1923;font-size:22px;font-weight:700;">Your details need a quick update</h1>
-          </div>
-          <div style="padding:32px;">
-            <p style="margin:0 0 16px;color:#1a2533;font-size:16px;">Hi {first_name},</p>
-            <p style="margin:0 0 16px;color:#44515f;font-size:15px;line-height:1.7;">
-              Thanks for registering with Pupscribe. We reviewed the business details {shop_line}and
-              weren’t able to approve them just yet.
-            </p>
-            {reason_block}
-            <p style="margin:0 0 28px;color:#44515f;font-size:15px;line-height:1.7;">
-              Please sign in, review your business details and resubmit — we’ll take another look right away.
-            </p>
-            <div style="text-align:center;margin:0 0 28px;">
-              <a href="{login_url}"
-                 style="background:#2B4864;color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:600;display:inline-block;">
-                Update my details
-              </a>
-            </div>
-            <p style="margin:0;color:#8a96a3;font-size:13px;line-height:1.6;">
-              Need a hand? Just reply to this email and our team will help.
-            </p>
-          </div>
-          <div style="border-top:1px solid #eef0f2;padding:20px 32px;text-align:center;">
-            <p style="margin:0;color:#aab2bd;font-size:12px;">© Pupscribe. All rights reserved.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-
-    try:
-        resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": "no-reply@no-reply.pupscribe.in",
-                "to": [to_email],
-                "subject": "Action needed — update your Pupscribe account details",
-                "html": html,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        logger.info(f"✅ Rejection email sent to {to_email}: {resp.json().get('id')}")
-        return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Rejection email failed for {to_email}: {e}")
-        return False
 
 
 # Zoho configuration from environment variables

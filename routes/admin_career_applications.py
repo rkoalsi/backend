@@ -1,6 +1,3 @@
-import os
-import requests
-from pathlib import Path
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -15,29 +12,54 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
-
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "emails"
-
-
-def _render_template(template_name: str, **kwargs) -> str:
-    html = (TEMPLATES_DIR / template_name).read_text(encoding="utf-8")
-    for key, value in kwargs.items():
-        html = html.replace("{" + key + "}", str(value))
-    return html
+from ..config.email import send_email, esc
 
 
-def _send_career_email(to: list, subject: str, html: str):
-    url = "https://api.resend.com/emails"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    requests.post(url, headers=headers, json={
-        "from": "no-reply@no-reply.pupscribe.in",
-        "to": to,
-        "subject": subject,
-        "html": html,
-    })
+def _send_application_accepted_email(to_email: str, applicant_name: str, role_title: str):
+    send_email(
+        to_email,
+        f"Congratulations — your application for {role_title} has been accepted",
+        eyebrow="Accepted",
+        tone="success",
+        context="Careers",
+        heading="Congratulations!",
+        greeting=f"Hi {applicant_name},",
+        paragraphs=[
+            "We are delighted to inform you that your application for "
+            f"<strong style=\"color:#1A1014;\">{esc(role_title)}</strong> at Pupscribe has been accepted!",
+            "We look forward to having you on board and are excited about the "
+            "possibility of you joining our team.",
+        ],
+        callout=(
+            "Our team will be in touch shortly to discuss the next steps in the hiring "
+            "process. Please keep an eye on your email and phone."
+        ),
+    )
+
+
+def _send_application_rejected_email(to_email: str, applicant_name: str, role_title: str):
+    send_email(
+        to_email,
+        f"Update on your application for {role_title}",
+        eyebrow="Application update",
+        tone="brand",
+        context="Careers",
+        heading="Update on your application",
+        greeting=f"Hi {applicant_name},",
+        paragraphs=[
+            "Thank you for your interest in the "
+            f"<strong style=\"color:#1A1014;\">{esc(role_title)}</strong> position at Pupscribe, "
+            "and for the time you invested in your application.",
+            "After careful consideration, we won't be moving forward with your "
+            "application at this time. This was a difficult decision — we received "
+            "many strong applications.",
+            "We wish you all the best in your job search and future endeavours.",
+        ],
+        callout=(
+            "We encourage you to apply for future openings that match your skills and "
+            "experience. We'll keep your profile in mind for suitable opportunities."
+        ),
+    )
 
 router = APIRouter()
 db = get_database()
@@ -264,15 +286,10 @@ def send_status_email(application_id: str):
         if not applicant_email:
             raise HTTPException(status_code=400, detail="Applicant email not found")
 
-        template_name = "applicant_accepted.html" if status == "accepted" else "applicant_rejected.html"
-        html = _render_template(template_name, applicant_name=applicant_name, role_title=role_title)
-        subject = (
-            f"Congratulations! Your Application for {role_title} - Accepted"
-            if status == "accepted"
-            else f"Update on Your Application for {role_title}"
-        )
-
-        _send_career_email([applicant_email], subject, html)
+        if status == "accepted":
+            _send_application_accepted_email(applicant_email, applicant_name, role_title)
+        else:
+            _send_application_rejected_email(applicant_email, applicant_name, role_title)
 
         db.career_applications.update_one(
             {"_id": obj_id},

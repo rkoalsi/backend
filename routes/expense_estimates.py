@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, File, UploadFile
 from bson import ObjectId
-import boto3, datetime, os, uuid, requests as req_lib
+import boto3, datetime, os, uuid
 from ..config.root import get_database, get_client, serialize_mongo_document
 from ..config.auth import get_current_user
+from ..config.email import send_email, esc, SITE_URL
 from .notifications import create_notification
 
 router = APIRouter()
@@ -44,35 +45,19 @@ APPROVER_CHAIN = [
     },
 ]
 
-RESEND_FROM = "no-reply@no-reply.pupscribe.in"
-RESEND_URL = "https://api.resend.com/emails"
+EXPENSES_URL = f"{SITE_URL}/admin/expense_estimates"
 
 
-def _send_email(to_email: str, subject: str, html: str):
-    try:
-        r = req_lib.post(
-            RESEND_URL,
-            headers={
-                "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
-                "Content-Type": "application/json",
-            },
-            json={"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html},
-            timeout=10,
-        )
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[expense email] failed to {to_email}: {e}")
-
-
-def _notify_user_by_email(user_email: str, subject: str, html: str):
-    _send_email(user_email, subject, html)
+def _send_expense_email(to_email: str, subject: str, **content):
+    """Every expense email goes through the standard shell, tagged 'Expenses'."""
+    send_email(to_email, subject, context="Expenses", **content)
 
 
 def _get_user_by_email(email: str):
     return db.users.find_one({"email": email})
 
 
-def _notify_approver(approver_email: str, estimate: dict, subject: str, body_html: str):
+def _notify_approver(approver_email: str, estimate: dict, subject: str, content: dict):
     user = _get_user_by_email(approver_email)
     if user:
         create_notification(
@@ -83,10 +68,10 @@ def _notify_approver(approver_email: str, estimate: dict, subject: str, body_htm
             f"Expense estimate from {estimate.get('created_by_name')} for trip on {estimate.get('travel_start_date', '')[:10] if isinstance(estimate.get('travel_start_date'), str) else ''}",
             f"/admin/expense_estimates",
         )
-    _send_email(approver_email, subject, body_html)
+    _send_expense_email(approver_email, subject, **content)
 
 
-def _notify_salesperson(estimate: dict, notif_type: str, title: str, body: str):
+def _notify_salesperson(estimate: dict, notif_type: str, title: str, body: str, tone: str = "brand"):
     creator_id = str(estimate.get("created_by"))
     create_notification(
         db,
@@ -98,7 +83,15 @@ def _notify_salesperson(estimate: dict, notif_type: str, title: str, body: str):
     )
     creator = db.users.find_one({"_id": estimate.get("created_by")})
     if creator and creator.get("email"):
-        _send_email(creator["email"], title, f"<p>{body}</p>")
+        _send_expense_email(
+            creator["email"],
+            title,
+            eyebrow="Expense update",
+            tone=tone,
+            heading=title,
+            paragraphs=[esc(body)],
+            cta=("View my expenses", f"{SITE_URL}/expenses"),
+        )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -280,25 +273,31 @@ async def create_estimate(
     est_id = str(result.inserted_id)
 
     first_approver = APPROVER_CHAIN[0]
-    subject = f"New Expense Estimate – {user.get('name', '')} (Trip: {body.get('travel_start_date', '')[:10]})"
-    html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-        <h2>New Expense Estimate for Review</h2>
-        <p><b>{user.get('name', '')}</b> has submitted an expense estimate.</p>
-        <ul>
-            <li><b>Trip Dates:</b> {body.get('travel_start_date','')[:10]} to {body.get('travel_end_date','')[:10]}</li>
-            <li><b>Locations:</b> {body.get('locations_visited','')}</li>
-            <li><b>Estimated Total:</b> ₹{totals['estimated_total']:,.2f}</li>
-            <li><b>Advance Requested:</b> ₹{float(body.get('advance_requested') or 0):,.2f}</li>
-        </ul>
-        <p>Please log in to review and approve.</p>
-    </div>"""
+    sp_name = user.get("name", "")
+    subject = f"New expense estimate — {sp_name} (trip: {body.get('travel_start_date', '')[:10]})"
+    content = {
+        "eyebrow": "Awaiting your review",
+        "tone": "action",
+        "heading": "New expense estimate",
+        "paragraphs": [
+            f"<strong style=\"color:#1A1014;\">{esc(sp_name)}</strong> has submitted an expense "
+            "estimate and it needs your approval."
+        ],
+        "details": [
+            ("Trip dates", f"{body.get('travel_start_date','')[:10]} to {body.get('travel_end_date','')[:10]}"),
+            ("Locations", body.get("locations_visited", "") or "—"),
+            ("Estimated total", f"₹{totals['estimated_total']:,.2f}"),
+            ("Advance requested", f"₹{float(body.get('advance_requested') or 0):,.2f}"),
+        ],
+        "cta": ("Review estimate", EXPENSES_URL),
+        "meta": "You're an approver in the expense chain for this stage.",
+    }
     background_tasks.add_task(
         _notify_approver,
         first_approver["email"],
-        {"_id": result.inserted_id, "created_by_name": user.get("name", ""), "travel_start_date": body.get("travel_start_date", "")},
+        {"_id": result.inserted_id, "created_by_name": sp_name, "travel_start_date": body.get("travel_start_date", "")},
         subject,
-        html,
+        content,
     )
 
     doc["_id"] = result.inserted_id
@@ -479,8 +478,24 @@ async def submit_actuals(
     updated = db.expense_estimates.find_one({"_id": ObjectId(estimate_id)})
 
     name = est.get("created_by_name", "")
-    subject = f"Expense Actuals Submitted – {name}"
-    html = f"<p>{name} has submitted their actual expenses for the trip starting {est.get('travel_start_date','')[:10]}. Please review and process settlement.</p>"
+    trip_date = est.get("travel_start_date", "")[:10]
+    subject = f"Expense actuals submitted — {name}"
+    content = {
+        "eyebrow": "Awaiting settlement",
+        "tone": "action",
+        "heading": "Actual expenses submitted",
+        "paragraphs": [
+            f"<strong style=\"color:#1A1014;\">{esc(name)}</strong> has submitted their actual "
+            "expenses. Please review and process the settlement."
+        ],
+        "details": [
+            ("Trip starting", trip_date),
+            ("Actual total", f"₹{float(updated.get('actual_total') or 0):,.2f}"),
+            ("Advance released", f"₹{float(est.get('advance_requested') or 0):,.2f}"),
+        ],
+        "cta": ("Review actuals", EXPENSES_URL),
+        "meta": "You're an approver in the expense chain for this stage.",
+    }
     for approver_email in ["events@barkbutler.in", "barksalesamit@gmail.com"]:
         approver_user = _get_user_by_email(approver_email)
         if approver_user:
@@ -489,10 +504,10 @@ async def submit_actuals(
                 str(approver_user["_id"]),
                 "expense_actuals_submitted",
                 subject,
-                f"{name} submitted actuals for trip {est.get('travel_start_date','')[:10]}",
+                f"{name} submitted actuals for trip {trip_date}",
                 f"/admin/expense_estimates",
             )
-        background_tasks.add_task(_send_email, approver_email, subject, html)
+        background_tasks.add_task(_send_expense_email, approver_email, subject, **content)
 
     return serialize_mongo_document(updated)
 
