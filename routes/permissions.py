@@ -4,7 +4,7 @@ from typing import List, Optional
 import jwt
 from pymongo import MongoClient
 from functools import lru_cache
-from ..config.root import get_database
+from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import JWT_SECRET_KEY
 from pydantic import BaseModel, field_validator
 from bson import ObjectId
@@ -148,13 +148,9 @@ class PermissionService:
 
             # Sort by order
             permissions_docs.sort(key=lambda x: x.get("order", 0))
-            
+
             # Remove MongoDB ObjectId for JSON serialization
-            for doc in permissions_docs:
-                if '_id' in doc:
-                    doc['_id'] = str(doc['_id'])
-            
-            return permissions_docs
+            return [serialize_mongo_document(doc) for doc in permissions_docs]
 
         except Exception as e:
             print(f"Error fetching menu items: {e}")
@@ -214,11 +210,7 @@ class PermissionService:
         """Get all menu items (admin only)"""
         try:
             permissions_docs = list(self.permissions_collection.find({}))
-            # Convert ObjectId to string
-            for doc in permissions_docs:
-                if '_id' in doc:
-                    doc['_id'] = str(doc['_id'])
-            return permissions_docs
+            return [serialize_mongo_document(doc) for doc in permissions_docs]
         except Exception as e:
             print(f"Error fetching all menu items: {e}")
             return []
@@ -257,10 +249,11 @@ class PermissionService:
         """Get all users (admin and sales_admin only)"""
         try:
             users_docs = list(self.users_collection.find({}).sort("name", 1))
-            # Convert ObjectId to string, add permissions, and strip secrets
+            # Serialize the whole doc, not just _id: user records can carry other
+            # ObjectId fields (created_from_request_id, created_by_salesperson_id,
+            # ...) which FastAPI cannot encode and which used to 500 this endpoint.
+            users_docs = [serialize_mongo_document(doc) for doc in users_docs]
             for doc in users_docs:
-                if '_id' in doc:
-                    doc['_id'] = str(doc['_id'])
                 # Issue 12: never expose password hashes
                 doc.pop("password", None)
                 # Get user permissions based on role
