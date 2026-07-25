@@ -10,7 +10,6 @@ import datetime, json, os, requests, time, threading
 from dateutil.parser import parse
 from pymongo import UpdateOne
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .helpers import send_email
 from typing import Dict, Any, List
 from bson import ObjectId
 from collections import defaultdict

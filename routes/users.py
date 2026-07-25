@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Request, Response
 from ..config.root import get_database, serialize_mongo_document
 from ..config.auth import JWTBearer
+from ..config.email import send_email
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
@@ -139,45 +140,22 @@ def _set_auth_cookie(response: Response, token: str) -> None:
 
 
 def send_reset_email(to_email: str, reset_link: str) -> bool:
-    import requests as req_lib
-
-    url = "https://api.resend.com/emails"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "from": "no-reply@no-reply.pupscribe.in",
-        "to": [to_email],
-        "subject": "Password Reset Request",
-        "html": f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #333;">Password Reset Request</h2>
-                <p>You requested a password reset for your Marketplace account.</p>
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="{reset_link}"
-                       style="background-color: #007bff; color: white; padding: 12px 30px;
-                              text-decoration: none; border-radius: 5px; display: inline-block;">
-                        Reset Your Password
-                    </a>
-                </div>
-                <p style="color: #666; font-size: 14px;">
-                    If you did not request this reset, please ignore this email.
-                    This link will expire in 1 hour.
-                </p>
-                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
-                <p style="color: #999; font-size: 12px;">Thanks,<br>The Pupscribe Team</p>
-            </div>
-        """,
-    }
-    try:
-        r = req_lib.post(url, headers=headers, json=data, timeout=10)
-        r.raise_for_status()
-        print(f"✅ Reset email sent: {r.json().get('id')}")
-        return True
-    except req_lib.exceptions.RequestException as e:
-        print(f"❌ Reset email failed: {e}")
-        return False
+    return send_email(
+        to_email,
+        "Reset your Pupscribe password",
+        eyebrow="Action required",
+        tone="action",
+        heading="Reset your password",
+        paragraphs=[
+            "We received a request to reset the password on your Marketplace account. "
+            "Tap below to choose a new one.",
+        ],
+        cta=("Reset password", reset_link),
+        meta=(
+            "This link expires in 1 hour. If you didn't request a reset, you can safely "
+            "ignore this email — nothing has changed."
+        ),
+    )
 
 
 # ── OTP / mobile-auth helpers ──────────────────────────────────────────────────

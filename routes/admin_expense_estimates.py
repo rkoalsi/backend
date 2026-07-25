@@ -9,13 +9,15 @@ from ..config.auth import get_current_user
 from .notifications import create_notification
 from .expense_estimates import (
     APPROVER_CHAIN,
-    _send_email,
+    EXPENSES_URL,
+    _send_expense_email,
     _get_user_by_email,
     _notify_salesperson,
     _current_user_id,
     _get_estimate_or_404,
     _compute_actual_totals,
 )
+from ..config.email import esc
 
 router = APIRouter()
 db = get_database()
@@ -171,19 +173,24 @@ async def approve_estimate(
 
     if next_status == "Pending Second Review":
         next_approver = APPROVER_CHAIN[1]
-        subject = f"Expense Estimate Approved – Action Required ({sp_name})"
-        html = f"""
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-            <h2>Expense Estimate – Second Review Required</h2>
-            <p>Expense estimate from <b>{sp_name}</b> (trip: {trip_date}) has been approved by {approver['label']}
-            and is now awaiting your review.</p>
-            <ul>
-                <li><b>Estimated Total:</b> ₹{est.get('estimated_total', 0):,.2f}</li>
-                <li><b>Advance Requested:</b> ₹{est.get('advance_requested', 0):,.2f}</li>
-            </ul>
-            <p>Please log in to review and approve.</p>
-        </div>"""
-        background_tasks.add_task(_send_email, next_approver["email"], subject, html)
+        subject = f"Expense estimate needs your review — {sp_name}"
+        content = {
+            "eyebrow": "Awaiting your review",
+            "tone": "action",
+            "heading": "Estimate awaiting your approval",
+            "paragraphs": [
+                f"<strong style=\"color:#1A1014;\">{esc(sp_name)}</strong> submitted a trip expense "
+                f"estimate. {esc(approver['label'])} has approved it; it now needs your review."
+            ],
+            "details": [
+                ("Trip starting", trip_date),
+                ("Estimated total", f"₹{float(est.get('estimated_total') or 0):,.2f}"),
+                ("Advance requested", f"₹{float(est.get('advance_requested') or 0):,.2f}"),
+            ],
+            "cta": ("Review estimate", EXPENSES_URL),
+            "meta": "You're an approver in the expense chain for this stage.",
+        }
+        background_tasks.add_task(_send_expense_email, next_approver["email"], subject, **content)
         next_user = _get_user_by_email(next_approver["email"])
         if next_user:
             create_notification(db, str(next_user["_id"]), "expense_submitted", subject,
@@ -191,19 +198,25 @@ async def approve_estimate(
 
     elif next_status == "Pending Payment":
         next_approver = APPROVER_CHAIN[2]
-        subject = f"Expense Estimate Cleared for Payment – {sp_name}"
-        html = f"""
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-            <h2>Expense Estimate – Payment Processing Required</h2>
-            <p>Expense estimate from <b>{sp_name}</b> (trip: {trip_date}) has been approved and is ready
-            for advance payment processing.</p>
-            <ul>
-                <li><b>Estimated Total:</b> ₹{est.get('estimated_total', 0):,.2f}</li>
-                <li><b>Advance Requested:</b> ₹{est.get('advance_requested', 0):,.2f}</li>
-            </ul>
-        </div>"""
-        background_tasks.add_task(_send_email, next_approver["email"], subject, html)
-        background_tasks.add_task(_send_email, "spupscribeacc@gmail.com", subject, html)
+        subject = f"Expense cleared for payment — {sp_name}"
+        content = {
+            "eyebrow": "Approved",
+            "tone": "success",
+            "heading": "Cleared for advance payment",
+            "paragraphs": [
+                f"<strong style=\"color:#1A1014;\">{esc(sp_name)}</strong>'s estimate for the trip "
+                f"starting {esc(trip_date)} has cleared second review and is ready for advance processing."
+            ],
+            "details": [
+                ("Estimated total", f"₹{float(est.get('estimated_total') or 0):,.2f}"),
+                ("Advance requested", f"₹{float(est.get('advance_requested') or 0):,.2f}"),
+                ("Approved by", ", ".join(a["label"] for a in APPROVER_CHAIN[:2])),
+            ],
+            "cta": ("Process payment", EXPENSES_URL),
+            "meta": "You're an approver in the expense chain for this stage.",
+        }
+        background_tasks.add_task(_send_expense_email, next_approver["email"], subject, **content)
+        background_tasks.add_task(_send_expense_email, "spupscribeacc@gmail.com", subject, **content)
         next_user = _get_user_by_email(next_approver["email"])
         if next_user:
             create_notification(db, str(next_user["_id"]), "expense_submitted", subject,
@@ -213,22 +226,25 @@ async def approve_estimate(
         advance_msg = "Advance has been released." if update.get("yogesh_advance_released") else "Your trip expenses are approved."
         background_tasks.add_task(
             _notify_salesperson, updated, "expense_advance_released",
-            f"Expense Estimate Approved – {approver['label']}",
+            f"Expense estimate fully approved",
             f"Your expense estimate for the trip on {trip_date} has been fully approved. {advance_msg} "
             "Please submit your actual expenses after you return.",
+            tone="success",
         )
 
     if next_status == "Pending Second Review":
         background_tasks.add_task(
             _notify_salesperson, updated, "expense_approved_stage",
-            f"Expense Estimate Approved – Stage 1",
+            "Expense estimate approved — stage 1",
             f"Your expense estimate for trip on {trip_date} has been approved by {approver['label']} and forwarded for second review.",
+            tone="success",
         )
     elif next_status == "Pending Payment":
         background_tasks.add_task(
             _notify_salesperson, updated, "expense_approved_stage",
-            f"Expense Estimate Approved – Stage 2",
+            "Expense estimate approved — stage 2",
             f"Your expense estimate for trip on {trip_date} has been approved by {approver['label']} and is now being processed for advance payment.",
+            tone="success",
         )
 
     return serialize_mongo_document(updated)
@@ -267,8 +283,9 @@ async def reject_estimate(
     trip_date = (est.get("travel_start_date") or "")[:10]
     background_tasks.add_task(
         _notify_salesperson, updated, "expense_rejected",
-        "Expense Estimate Rejected",
+        "Expense estimate rejected",
         f"Your expense estimate for trip on {trip_date} was rejected by {approver['label']}. Reason: {reason}",
+        tone="danger",
     )
 
     return serialize_mongo_document(updated)
@@ -308,8 +325,9 @@ async def complete_settlement(
     msg = f"Reimbursement of ₹{reimburse:,.2f} will be processed." if reimburse > 0 else f"Please return ₹{returned:,.2f}." if returned > 0 else "Settlement complete — no amount to exchange."
     background_tasks.add_task(
         _notify_salesperson, updated, "expense_approved_stage",
-        "Expense Settlement Completed",
+        "Expense settlement completed",
         f"Your expense report has been settled. {msg}",
+        tone="success",
     )
 
     return serialize_mongo_document(updated)

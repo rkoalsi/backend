@@ -1,15 +1,12 @@
-import io, requests, os, smtplib
+import io, requests, os, base64
 import pandas as pd
 from functools import lru_cache
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from datetime import date, datetime
 from ..config.whatsapp import send_whatsapp
+from ..config.email import send_email
 
 load_dotenv()
 org_id = os.getenv("ORG_ID")
@@ -23,10 +20,6 @@ clientSecret = os.getenv("CLIENT_SECRET")
 grantType = os.getenv("GRANT_TYPE")
 inventory_refresh_token = os.getenv("INVENTORY_REFRESH_TOKEN")
 books_refresh_token = os.getenv("BOOKS_REFRESH_TOKEN")
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = os.getenv("SMTP_PORT")
-SENDER_EMAIL = os.getenv("SMTP_USERNAME")  # Use your email
-SENDER_PASSWORD = os.getenv("SMTP_PASSWORD")  # Use your email app password
 
 
 def validate_file(file) -> dict:
@@ -68,56 +61,25 @@ def validate_file(file) -> dict:
         return {"status": "error", "message": f"An error occurred: {str(e)}"}
 
 
-def send_email(subject, body, email, cc):
-    """Send email with multiple in-memory attachments and CC."""
-    msg = MIMEMultipart()
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = email
-    msg["Subject"] = subject
-    if cc:
-        msg["Cc"] = cc  # Add CC header to the email
-    msg.attach(MIMEText(body, "plain"))
-
-    # Combine primary recipient and CC recipients for sending
-    recipient_list = [email] + [cc_email.strip() for cc_email in cc.split(",")]
-
-    # Send the email
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()  # Encrypt connection
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, recipient_list, msg.as_string())
-        server.quit()
-        print(f"Email sent to {email} with CC: {cc}")
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-
-
 def send_email_with_attachments_in_memory(workbook, subject, body, filename, email):
-    """Send email with multiple in-memory attachments."""
-    msg = MIMEMultipart()
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    # Attach each in-memory workbook
-    part = MIMEBase("application", "octet-stream")
-    part.set_payload(workbook)
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{filename}.xlsx"')
-    msg.attach(part)
-
-    # Send the email
-    try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()  # Encrypt connection
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, email, msg.as_string())
-        server.quit()
-        print(f"Email sent to {email} with in-memory attachments.")
-    except Exception as e:
-        print(f"Failed to send email: {e}")
+    """Send a generated workbook through the standard email shell."""
+    send_email(
+        email,
+        subject,
+        eyebrow="Report ready",
+        tone="brand",
+        context="Reports",
+        heading=subject,
+        paragraphs=[body],
+        details=[("Attached", f"{filename}.xlsx")],
+        meta="Generated automatically from your upload.",
+        attachments=[
+            {
+                "filename": f"{filename}.xlsx",
+                "content": base64.b64encode(workbook).decode(),
+            }
+        ],
+    )
 
 
 def get_access_token(tkn: str):

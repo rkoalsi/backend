@@ -3,25 +3,15 @@ import re
 import time
 import random
 import boto3
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
 from ..config.root import get_database, serialize_mongo_document
 from ..config.whatsapp import send_whatsapp
+from ..config.email import send_email, esc
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
 from typing import Optional
-
-TEMPLATES_DIR = Path(__file__).parent.parent / "templates" / "emails"
-
-
-def render_template(template_name: str, **kwargs) -> str:
-    template_path = TEMPLATES_DIR / template_name
-    html = template_path.read_text(encoding="utf-8")
-    for key, value in kwargs.items():
-        html = html.replace("{" + key + "}", str(value))
-    return html
 
 router = APIRouter()
 db = get_database()
@@ -85,20 +75,44 @@ ALLOWED_RESUME_TYPES = [
 MAX_RESUME_SIZE_MB = 5
 
 
-def send_career_email(to: list, subject: str, html: str):
-    import requests
-    url = "https://api.resend.com/emails"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('RESEND_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "from": "no-reply@no-reply.pupscribe.in",
-        "to": to,
-        "subject": subject,
-        "html": html,
-    }
-    requests.post(url, headers=headers, json=data)
+def send_application_received_email(to_email: str, applicant_name: str, role_title: str):
+    """Confirm to a candidate that their application landed."""
+    send_email(
+        to_email,
+        f"Application received — {role_title}",
+        eyebrow="Application received",
+        tone="brand",
+        context="Careers",
+        heading="Thanks for applying",
+        greeting=f"Hi {applicant_name},",
+        paragraphs=[
+            f"Thank you for applying for <strong style=\"color:#1A1014;\">{esc(role_title)}</strong> "
+            "at Pupscribe. We've received your application and our team will review it shortly.",
+            "We appreciate your interest in joining our team and wish you the best!",
+        ],
+        callout=(
+            "We'll reach out if your profile matches our requirements. In the meantime, "
+            "feel free to explore more about us on our website."
+        ),
+    )
+
+
+def send_hr_new_application_email(to_emails: list, applicant_name: str, role_title: str, admin_url: str):
+    """Tell the HR team a new application is waiting in the admin panel."""
+    send_email(
+        to_emails,
+        f"New application — {role_title}",
+        eyebrow="New application",
+        tone="info",
+        context="Careers",
+        heading=role_title,
+        paragraphs=[
+            "A candidate applied through the careers site and is waiting in the admin panel."
+        ],
+        details=[("Applicant", applicant_name), ("Role", role_title)],
+        cta=("Open in admin panel", admin_url),
+        meta="You're receiving this because you're on the HR team.",
+    )
 
 
 @router.get("")
@@ -392,33 +406,23 @@ async def apply_for_career(
             role_title = career.get("title", "the position")
             applicant_name = full_name.strip()
 
-            applicant_html = render_template(
-                "applicant_received.html",
-                applicant_name=applicant_name,
-                role_title=role_title,
-            )
             background_tasks.add_task(
-                send_career_email,
-                [email.strip().lower()],
-                f"Application Received - {role_title}",
-                applicant_html,
+                send_application_received_email,
+                email.strip().lower(),
+                applicant_name,
+                role_title,
             )
 
             hr_users = list(db.users.find({"role": "hr", "status": "active"}, {"email": 1}))
             hr_emails = [u["email"] for u in hr_users if u.get("email")]
             if hr_emails:
                 admin_url = os.getenv("ADMIN_URL", "https://marketplace.pupscribe.in/admin/career_applications")
-                hr_html = render_template(
-                    "hr_new_application.html",
-                    applicant_name=applicant_name,
-                    role_title=role_title,
-                    admin_url=admin_url,
-                )
                 background_tasks.add_task(
-                    send_career_email,
+                    send_hr_new_application_email,
                     hr_emails,
-                    f"New Application - {role_title}",
-                    hr_html,
+                    applicant_name,
+                    role_title,
+                    admin_url,
                 )
 
             return {"message": "Application submitted successfully", "id": str(result.inserted_id)}
