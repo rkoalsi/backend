@@ -708,6 +708,70 @@ async def resolve_login_link(
     return {"masked_phone": mask_phone(phone10)}
 
 
+@router.post("/login-link/{token}/start")
+async def start_login_link(
+    token: str, request: Request, background_tasks: BackgroundTasks
+):
+    """
+    One-tap entry point for the WhatsApp button: resolve the token, log the click
+    and send the OTP in a single round trip, so the customer lands straight on the
+    code entry screen with the code already in their chat.
+
+    POST because it sends a message — a GET here would fire on any prefetch.
+
+    A number already inside the resend cooldown is NOT an error: a code is already
+    sitting in their chat, so report `otp_sent: false` with `already_sent: true`
+    and let the page show the input anyway. Reopening the link therefore never
+    burns an extra template message or dead-ends the customer.
+    """
+    phone10 = resolve_login_link_token(token)
+    if not phone10:
+        raise HTTPException(status_code=400, detail="This login link is invalid or has expired")
+
+    user = find_user_by_phone(phone10)
+    if not user:
+        raise HTTPException(status_code=404, detail="No account is registered with this mobile number.")
+
+    if user.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="login_link_opened",
+            category="auth",
+            user_id=str(user.get("_id")),
+            customer_id=user.get("customer_id"),
+            customer_name=user.get("customer_name") or user.get("name"),
+            email=user.get("email"),
+            metadata={"source": "whatsapp_template_button", "auto_otp": True},
+            ip_address=ip,
+            user_agent=ua,
+        )
+
+    result = {
+        "masked_phone": mask_phone(phone10),
+        "otp_sent": False,
+        "already_sent": False,
+        "detail": "",
+    }
+
+    if _otp_limiter.is_limited(phone10):
+        result["detail"] = "Too many OTP requests. Please wait a few minutes and try again."
+        return result
+
+    if otp_on_cooldown(phone10, "login"):
+        result["already_sent"] = True
+        result["detail"] = "A code was just sent to your WhatsApp."
+        return result
+
+    code = issue_otp(phone10, "login")
+    send_otp_whatsapp(phone10, code)
+    result["otp_sent"] = True
+    result["detail"] = "OTP sent to your WhatsApp."
+    return result
+
+
 def _phone_from_body(phone: Optional[str], token: Optional[str]) -> str:
     """Resolve the target number from an explicit phone or a login-link token."""
     if token:
