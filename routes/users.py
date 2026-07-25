@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
 from bson.objectid import ObjectId
-import os, time, secrets, hashlib, hmac
+import os, re, time, secrets, hashlib, hmac, base64
 from typing import Optional
 from collections import defaultdict
 
@@ -184,6 +184,48 @@ def normalize_phone(raw) -> str:
     return digits[-10:] if len(digits) >= 10 else digits
 
 
+def mask_phone(phone10: str) -> str:
+    """Show only the last 4 digits, e.g. 9876543210 -> ••••••3210."""
+    return f"{'•' * max(len(phone10) - 4, 0)}{phone10[-4:]}"
+
+
+# ── Login-link tokens ─────────────────────────────────────────────────────────
+# A signed, expiring token that stands in for a mobile number so onboarding links
+# ("tap to log in") never carry the number itself. Holding the token only lets you
+# ask for an OTP — the code still goes to the customer's own WhatsApp, so a leaked
+# link grants no access on its own.
+LOGIN_LINK_EXPIRE_DAYS = int(os.getenv("LOGIN_LINK_EXPIRE_DAYS", 30))
+
+
+def _login_link_signature(payload: str) -> str:
+    digest = hmac.new(
+        (SECRET_KEY or "").encode(), payload.encode(), hashlib.sha256
+    ).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")[:22]
+
+
+def make_login_link_token(phone10: str) -> str:
+    payload = f"{phone10}.{int(time.time()) + LOGIN_LINK_EXPIRE_DAYS * 86400}"
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"{encoded}.{_login_link_signature(payload)}"
+
+
+def resolve_login_link_token(token: str) -> Optional[str]:
+    """Return the 10-digit phone for a valid, unexpired token, else None."""
+    try:
+        encoded, signature = str(token).split(".")
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        phone10, expires_at = payload.rsplit(".", 1)
+    except Exception:
+        return None
+
+    if not hmac.compare_digest(signature, _login_link_signature(payload)):
+        return None
+    if int(expires_at) < int(time.time()):
+        return None
+    return phone10
+
+
 def find_user_by_phone(phone10: str) -> Optional[dict]:
     """Find an active account whose stored phone matches these last-10 digits.
     Works for any role (customer / sales_person / admin). `phone` is stored as an
@@ -198,6 +240,63 @@ def find_user_by_phone(phone10: str) -> Optional[dict]:
     # Require an active account — mirrors email/password login (authenticate_user),
     # and keeps pending self-registered users blocked until an admin approves them.
     return db.users.find_one({"phone": {"$in": candidates}, "status": "active"})
+
+
+def find_any_user_by_phone(phone10: str) -> Optional[dict]:
+    """Same as find_user_by_phone but status-agnostic. Used by registration so a
+    pending/inactive account still blocks a second signup on the same number."""
+    if not phone10 or len(phone10) != 10:
+        return None
+    candidates: list = [phone10]
+    try:
+        candidates.append(int(phone10))
+    except ValueError:
+        pass
+    return db.users.find_one({"phone": {"$in": candidates}})
+
+
+def _phone_match_or(fields: list, phone10: str) -> dict:
+    """$or clause matching these fields against the last-10 digits, stored either as
+    a string (possibly with +91 / spaces) or as an int."""
+    rx = {"$regex": re.escape(phone10)}
+    clauses: list = [{f: rx} for f in fields]
+    try:
+        clauses += [{f: int(phone10)} for f in fields]
+    except ValueError:
+        pass
+    return {"$or": clauses}
+
+
+def find_customer_by_phone(phone10: str) -> Optional[dict]:
+    """An existing Zoho customer (created by a salesperson/admin) whose phone or
+    mobile carries these 10 digits. Mirrors the last-10 matching used by the
+    chatbot's is_b2b check. Prefers an active record when several match."""
+    if not phone10 or len(phone10) != 10:
+        return None
+    query = _phone_match_or(["phone", "mobile"], phone10)
+    projection = {
+        "contact_id": 1, "contact_name": 1, "company_name": 1,
+        "customer_name": 1, "email": 1, "status": 1,
+    }
+    matches = [c for c in db.customers.find(query, projection).limit(10) if c.get("contact_id")]
+    if not matches:
+        return None
+    return next((c for c in matches if c.get("status") != "inactive"), matches[0])
+
+
+def find_open_customer_request_by_phone(phone10: str) -> Optional[dict]:
+    """An in-flight customer-creation request for this number — i.e. a salesperson
+    (or the customer themselves) already submitted these details and an admin has
+    yet to create the contact in Zoho. `created_on_zoho` is excluded: those are
+    handled by find_customer_by_phone (the account gets linked instead)."""
+    if not phone10 or len(phone10) != 10:
+        return None
+    return db.customer_creation_requests.find_one(
+        {
+            **_phone_match_or(["whatsapp_no"], phone10),
+            "status": {"$nin": ["rejected", "created_on_zoho"]},
+        }
+    )
 
 
 def capture_b2b_lead(phone10: str) -> None:
@@ -300,14 +399,17 @@ class UserCreate(BaseModel):
 
 
 class OtpRequest(BaseModel):
-    phone: str
+    # Either an explicit number, or a signed login-link token standing in for one.
+    phone: Optional[str] = None
+    token: Optional[str] = None
     # "login"  → must already map to an account
     # "register" → must NOT map to an account (new B2B onboarding)
     purpose: str = "login"
 
 
 class OtpLogin(BaseModel):
-    phone: str
+    phone: Optional[str] = None
+    token: Optional[str] = None
     code: str
 
 
@@ -560,9 +662,34 @@ async def reset_password(confirm: PasswordResetConfirm):
 # self-registration. The number must be reachable on WhatsApp (that is how the
 # code is delivered) and — for login — must already belong to an account.
 
+@router.get("/login-link/{token}")
+async def resolve_login_link(token: str):
+    """
+    Resolve a login-link token for the login page. Returns only the masked number
+    so the full one is never exposed to the browser — the page keeps using the
+    token for /otp/request and /otp/login.
+    """
+    phone10 = resolve_login_link_token(token)
+    if not phone10:
+        raise HTTPException(status_code=400, detail="This login link is invalid or has expired")
+    if not find_user_by_phone(phone10):
+        raise HTTPException(status_code=404, detail="No account is registered with this mobile number.")
+    return {"masked_phone": mask_phone(phone10)}
+
+
+def _phone_from_body(phone: Optional[str], token: Optional[str]) -> str:
+    """Resolve the target number from an explicit phone or a login-link token."""
+    if token:
+        phone10 = resolve_login_link_token(token)
+        if not phone10:
+            raise HTTPException(status_code=400, detail="This login link is invalid or has expired")
+        return phone10
+    return normalize_phone(phone)
+
+
 @router.post("/otp/request")
 async def request_otp(body: OtpRequest):
-    phone10 = normalize_phone(body.phone)
+    phone10 = _phone_from_body(body.phone, body.token)
     if len(phone10) != 10:
         raise HTTPException(status_code=400, detail="Enter a valid 10-digit mobile number")
 
@@ -572,7 +699,8 @@ async def request_otp(body: OtpRequest):
             detail="Too many OTP requests. Please wait a few minutes and try again.",
         )
 
-    purpose = body.purpose if body.purpose in ("login", "register") else "login"
+    # A login-link token is only ever issued for an existing account.
+    purpose = "login" if body.token else (body.purpose if body.purpose in ("login", "register") else "login")
 
     if otp_on_cooldown(phone10, purpose):
         raise HTTPException(
@@ -588,11 +716,26 @@ async def request_otp(body: OtpRequest):
                 detail="No account is registered with this mobile number.",
             )
     else:  # register
-        if find_user_by_phone(phone10):
+        # Status-agnostic: a pending/inactive account still blocks a second signup.
+        if find_any_user_by_phone(phone10):
             raise HTTPException(
                 status_code=409,
                 detail="This mobile number already has an account. Please log in instead.",
             )
+        # Already onboarding through a salesperson — a second self-registration
+        # would land as a duplicate request in /admin/customer_requests.
+        if find_open_customer_request_by_phone(phone10):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "We already have an account request in progress for this mobile "
+                    "number and it is awaiting approval. Please contact your sales "
+                    "representative or write to us instead of registering again."
+                ),
+            )
+        # NOTE: an existing `customers` record does NOT block registration — the new
+        # login is linked to that customer on verification (see /otp/verify) so no
+        # duplicate creation request is raised.
         # Capture the lead immediately so drop-offs (before completing the form)
         # are still recorded under /admin/leads.
         capture_b2b_lead(phone10)
@@ -610,7 +753,7 @@ async def login_with_otp(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
-    phone10 = normalize_phone(body.phone)
+    phone10 = _phone_from_body(body.phone, body.token)
     if not verify_otp(phone10, body.code, "login"):
         raise HTTPException(status_code=401, detail="Invalid or expired OTP")
 
@@ -679,7 +822,7 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
 
     # Create the user account on first verification (idempotent on re-verify).
     # No business details captured here — only the verified mobile number.
-    existing = find_user_by_phone(phone10)
+    existing = find_any_user_by_phone(phone10)
     if not existing:
         users_collection.update_one(
             {"phone": int(phone10)},
@@ -700,6 +843,35 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
             upsert=True,
         )
 
+    # ── Link to an existing customer instead of onboarding them again ─────────
+    # The business may already exist in Zoho (a salesperson created it via
+    # /admin/customer_requests) without ever having a login. Attach the fresh
+    # account to that contact so they can order right away — and so they are
+    # never asked for business details that would raise a duplicate request.
+    linked_customer = None
+    if not existing:
+        linked_customer = find_customer_by_phone(phone10)
+        if linked_customer:
+            shop_name = (
+                linked_customer.get("company_name")
+                or linked_customer.get("customer_name")
+                or linked_customer.get("contact_name")
+                or ""
+            )
+            link_fields = {
+                "customer_id": linked_customer["contact_id"],
+                "customer_name": shop_name,
+                "profile_completed": True,   # nothing left for them to submit
+                "status": "active",
+                "linked_existing_customer": True,
+                "updated_at": now,
+            }
+            if linked_customer.get("contact_name"):
+                link_fields["name"] = linked_customer["contact_name"]
+            if linked_customer.get("email"):
+                link_fields["email"] = linked_customer["email"]
+            users_collection.update_one({"phone": int(phone10)}, {"$set": link_fields})
+
     user = users_collection.find_one({"phone": int(phone10)})
     authenticated = serialize_mongo_document(user)
 
@@ -712,14 +884,29 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
                 ADMIN_NOTIFICATION_EMAILS,
             )
 
+            if linked_customer:
+                notif_title = f"Existing customer signed up: +91 {phone10}"
+                notif_body = (
+                    f"{linked_customer.get('company_name') or linked_customer.get('contact_name') or 'A customer'} "
+                    "verified their mobile number and was linked to their existing "
+                    "customer record — no approval needed."
+                )
+                notif_link = "/admin/active_users"
+            else:
+                notif_title = f"New B2B signup verified: +91 {phone10}"
+                notif_body = (
+                    "A new customer verified their mobile number on the purchase portal. "
+                    "They’ll appear under Leads once they submit their business details."
+                )
+                notif_link = "/admin/leads?tab=b2b"
+
             create_notifications_for_emails(
                 db,
                 ADMIN_NOTIFICATION_EMAILS,
                 "b2b_user_verified",
-                f"New B2B signup verified: +91 {phone10}",
-                "A new customer verified their mobile number on the purchase portal. "
-                "They’ll appear under Leads once they submit their business details.",
-                "/admin/leads?tab=b2b",
+                notif_title,
+                notif_body,
+                notif_link,
             )
         except Exception as e:
             print(f"Failed to notify of B2B verification: {e}")
@@ -734,4 +921,7 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
         "user_id": authenticated["_id"],
         "user": authenticated,
         "access_token": access_token,
+        # True → we recognised the number and attached the existing customer
+        # account; the client can skip the "complete your profile" prompt.
+        "linked_existing_customer": bool(linked_customer),
     }
