@@ -104,7 +104,7 @@ def get_product_counts(response: Response):
         pre_orders_query = {
             "pre_order": True,
             "is_deleted": {"$exists": False},
-            "$nor": [{"upcoming_stock": 0, "stock": {"$gt": 0}}],
+            "upcoming_stock": {"$gt": 0},
         }
         pre_orders_count = db.products.count_documents(pre_orders_query)
         result["Pre Orders"] = {"All Products": pre_orders_count}
@@ -343,11 +343,12 @@ def get_products(
     # Don't filter by brand when pre_order, new_only or clearance is true
     if pre_order:
         query["pre_order"] = True
-        # Hide pre-order products whose incoming stock is fully received
-        # (upcoming_stock == 0) while they still hold on-hand stock — nothing
-        # left to pre-order, so they only belong in their regular brand tab.
-        # `upcoming_stock` is precomputed by purchase_orders_cron.
-        query["$nor"] = [{"upcoming_stock": 0, "stock": {"$gt": 0}}]
+        # Only surface pre-order products that still have incoming stock.
+        # upcoming_stock == 0 (or absent) means the PO is fully received —
+        # there is nothing left to pre-order, so the product belongs only in
+        # its regular brand tab. `upcoming_stock` is precomputed by
+        # purchase_orders_cron.
+        query["upcoming_stock"] = {"$gt": 0}
     elif not new_only and not clearance and brand:
         query["brand"] = brand
 
@@ -1036,13 +1037,13 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
             })
             result["New Arrivals"] = {"All Products": new_count}
 
-            # Pre Orders — products marked pre_order=true (no stock filter),
-            # excluding fully-received items still holding on-hand stock. Must
-            # mirror /products/counts (and the GET /products pre_order filter)
-            # exactly, else the tab badge and the tab's product list disagree.
+            # Pre Orders — products marked pre_order=true with incoming stock
+            # still pending (upcoming_stock > 0). Must mirror /products/counts
+            # (and the GET /products pre_order filter) exactly, else the tab
+            # badge and the tab's product list disagree.
             pre_orders_count = db.products.count_documents({
                 "pre_order": True, "is_deleted": {"$exists": False},
-                "$nor": [{"upcoming_stock": 0, "stock": {"$gt": 0}}],
+                "upcoming_stock": {"$gt": 0},
             })
             result["Pre Orders"] = {"All Products": pre_orders_count}
 

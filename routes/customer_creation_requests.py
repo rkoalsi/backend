@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -11,6 +11,8 @@ from .notifications import (
     create_notifications_for_emails,
     ADMIN_NOTIFICATION_EMAILS,
 )
+from .admin_users import hash_password, generate_password
+from .users import make_login_link_token
 import os
 import requests
 import logging
@@ -32,6 +34,11 @@ S3_REGION = os.getenv("S3_REGION")
 _GSTIN_PATTERN = re.compile(r"^(\d{2})([A-Z]{5}\d{4}[A-Z])(\d)([A-Z])([0-9A-Z])$")
 
 ALLOWED_DOC_TYPES = {"gst_certificate", "pan_card", "aadhar"}
+
+# UTILITY WhatsApp template used to send customers their login instructions.
+CUSTOMER_LOGIN_TEMPLATE_NAME = os.getenv(
+    "CUSTOMER_LOGIN_TEMPLATE_NAME", "customer_account_ready"
+)
 
 
 def validate_gstin_full(gst_number: str) -> dict:
@@ -1243,6 +1250,36 @@ async def get_customer_requests(
             {"$sort": {"created_at": -1}},
             {"$skip": skip},
             {"$limit": limit},
+
+            # Lookup the customer login (users doc) linked to this Zoho customer
+            {
+                "$lookup": {
+                    "from": "users",
+                    "let": {"contact_id": "$zoho_contact_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$ne": ["$$contact_id", None]},
+                                        {"$eq": ["$customer_id", "$$contact_id"]},
+                                        {"$eq": ["$role", "customer"]},
+                                    ]
+                                }
+                            }
+                        },
+                        {"$project": {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "linked_login",
+                }
+            },
+            {
+                "$unwind": {
+                    "path": "$linked_login",
+                    "preserveNullAndEmptyArrays": True,
+                }
+            },
         ]
 
         requests = list(db.customer_creation_requests.aggregate(pipeline))
@@ -1566,6 +1603,200 @@ async def update_request_status(
     except Exception as e:
         logger.error(f"Error updating request status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CustomerLoginCreate(BaseModel):
+    password: str
+    email: Optional[str] = None
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+@router.get("/{request_id}/login")
+async def get_request_login(
+    request_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Return the customer login linked to this request's Zoho customer, if any."""
+    db = get_database()
+
+    request_doc = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    contact_id = request_doc.get("zoho_contact_id")
+    if not contact_id:
+        return {"login": None}
+
+    user = db.users.find_one(
+        {"customer_id": contact_id, "role": "customer"},
+        {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1},
+    )
+    return {"login": serialize_mongo_document(user) if user else None}
+
+
+@router.post("/{request_id}/login")
+async def create_request_login(
+    request_id: str,
+    body: CustomerLoginCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Create a customer login for an approved (created_on_zoho) request and link it
+    to the Zoho customer. The account shows up in /admin/customer_management too.
+    """
+    db = get_database()
+
+    user_data = current_user.get("data", {})
+    if user_data.get("role") not in ("admin", "sales_admin"):
+        raise HTTPException(status_code=403, detail="Not authorised")
+
+    request_doc = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    contact_id = request_doc.get("zoho_contact_id")
+    if request_doc.get("status") != "created_on_zoho" or not contact_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Customer must be created in Zoho before a login can be made",
+        )
+
+    if not body.password or not body.password.strip():
+        raise HTTPException(status_code=400, detail="Password is required")
+
+    email = (body.email or request_doc.get("customer_mail_id") or request_doc.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    name = (body.name or request_doc.get("customer_name") or request_doc.get("shop_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    raw_phone = body.phone if body.phone is not None else request_doc.get("whatsapp_no", "")
+    digits = re.sub(r"\D", "", str(raw_phone or ""))
+    if not digits:
+        raise HTTPException(status_code=400, detail="A valid phone number is required")
+
+    if db.users.find_one({"customer_id": contact_id, "role": "customer"}):
+        raise HTTPException(
+            status_code=409, detail="A login already exists for this customer"
+        )
+
+    if db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    customer = db.customers.find_one({"contact_id": contact_id}, {"company_name": 1, "contact_name": 1})
+    customer_name = (
+        (customer or {}).get("company_name")
+        or (customer or {}).get("contact_name")
+        or request_doc.get("shop_name", "")
+    )
+
+    now = datetime.now()
+    doc = {
+        "name": name,
+        "email": email,
+        "phone": int(digits),
+        "role": "customer",
+        "status": "active",
+        "password": hash_password(body.password),
+        "customer_id": contact_id,
+        "customer_name": customer_name,
+        "created_from_request_id": ObjectId(request_id),
+        "created_at": now,
+        "updated_at": now,
+    }
+    result = db.users.insert_one(doc)
+
+    db.customer_creation_requests.update_one(
+        {"_id": ObjectId(request_id)},
+        {"$set": {"linked_user_id": result.inserted_id, "updated_at": now}},
+    )
+
+    return {
+        "message": "Customer login created successfully",
+        "login": {
+            "_id": str(result.inserted_id),
+            "name": name,
+            "email": email,
+            "phone": int(digits),
+            "status": "active",
+        },
+    }
+
+
+@router.post("/{request_id}/login/send")
+async def send_login_instructions(
+    request_id: str, current_user: dict = Depends(get_current_user)
+):
+    """
+    WhatsApp the customer their login instructions via Plivo.
+
+    The message carries a signed login link — never a password, and never the
+    customer's number in plain text. Uses the UTILITY template named by
+    CUSTOMER_LOGIN_TEMPLATE_NAME: body vars {{1}}=name, {{2}}=shop, plus a URL
+    button whose base is `<login page>?t={{1}}` and whose dynamic suffix is the
+    login-link token.
+
+    The body must read as an account-activation notice, not a code delivery —
+    mentioning OTP/verification/login codes makes Meta reclassify it as
+    AUTHENTICATION, whose locked format cannot carry this URL button at all. The
+    OTP itself is issued later, on our own login page.
+    """
+    db = get_database()
+
+    user_data = current_user.get("data", {})
+    if user_data.get("role") not in ("admin", "sales_admin"):
+        raise HTTPException(status_code=403, detail="Not authorised")
+
+    request_doc = db.customer_creation_requests.find_one({"_id": ObjectId(request_id)})
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    contact_id = request_doc.get("zoho_contact_id")
+    login = (
+        db.users.find_one({"customer_id": contact_id, "role": "customer"})
+        if contact_id
+        else None
+    )
+    if not login:
+        raise HTTPException(
+            status_code=404, detail="No login exists for this customer yet"
+        )
+
+    phone10 = re.sub(r"\D", "", str(login.get("phone", "")))[-10:]
+    if len(phone10) != 10:
+        raise HTTPException(
+            status_code=400,
+            detail="The login has no valid 10-digit mobile number, so OTP login will not work",
+        )
+
+    template = db.templates.find_one({"name": CUSTOMER_LOGIN_TEMPLATE_NAME})
+    if not template:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"WhatsApp template '{CUSTOMER_LOGIN_TEMPLATE_NAME}' not found. "
+                "Create and get it approved in /admin/templates first."
+            ),
+        )
+
+    first_name = (login.get("name") or request_doc.get("customer_name") or "there").split()[0]
+    response = send_whatsapp(
+        phone10,
+        template,
+        {
+            "name": first_name,
+            "shop": login.get("customer_name") or request_doc.get("shop_name", "your shop"),
+            # Dynamic suffix for the template's URL button. WhatsApp appends this to
+            # the button's base URL (…/login?t={{1}}), so pass the token only.
+            "button_url": make_login_link_token(phone10),
+        },
+    )
+    if response is None:
+        raise HTTPException(status_code=502, detail="Failed to send WhatsApp message")
+
+    return {"message": f"Login instructions sent on WhatsApp to {phone10}"}
 
 
 @router.post("/{request_id}/comments")
@@ -1993,6 +2224,7 @@ async def get_my_customer(current_user: dict = Depends(get_current_user)):
 @router.post("/self-service")
 async def submit_self_service_profile(
     body: SelfServiceProfile,
+    response: Response,
     current_user: dict = Depends(get_current_user),
 ):
     """Create/update the caller's onboarding request and mark their profile complete."""
@@ -2011,6 +2243,110 @@ async def submit_self_service_profile(
         result = validate_gstin_full(body.gst_no)
         if not result["valid"]:
             raise HTTPException(status_code=422, detail=f"GSTIN validation failed: {result['error']}")
+
+    # Already linked to a Zoho contact (either approved earlier, or auto-linked at
+    # registration because a salesperson had already created the business) — there
+    # is nothing to onboard, and submitting would raise a duplicate request.
+    user_doc = db.users.find_one({"_id": user_id}, {"customer_id": 1, "phone": 1}) or {}
+    if user_doc.get("customer_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Your account is already linked to an existing customer; contact support to change business details.",
+        )
+
+    # Duplicate guard — the same business may already exist with us, created by a
+    # salesperson through /admin/customer_requests. Match on the verified mobile
+    # number first: if the customer exists in Zoho, link the account instead of
+    # raising a second creation request.
+    from .users import (
+        find_customer_by_phone,
+        find_open_customer_request_by_phone,
+        normalize_phone,
+    )
+
+    phone10 = normalize_phone(user_doc.get("phone"))
+    if len(phone10) == 10:
+        matched_customer = find_customer_by_phone(phone10)
+        if matched_customer:
+            shop = (
+                matched_customer.get("company_name")
+                or matched_customer.get("customer_name")
+                or matched_customer.get("contact_name")
+                or ""
+            )
+            db.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "customer_id": matched_customer["contact_id"],
+                        "customer_name": shop,
+                        "profile_completed": True,
+                        "status": "active",
+                        "linked_existing_customer": True,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+            # Re-issue the session so the JWT carries the new customer_id
+            # (downstream endpoints read it from the token, not the DB).
+            try:
+                from .users import (
+                    create_access_token,
+                    _minimal_payload,
+                    _set_auth_cookie,
+                )
+
+                refreshed = db.users.find_one({"_id": user_id})
+                token = create_access_token(
+                    data={"data": _minimal_payload(serialize_mongo_document(refreshed))}
+                )
+                _set_auth_cookie(response, token)
+            except Exception as e:
+                logger.error(f"Failed to refresh session after customer link: {e}")
+
+            return {
+                "message": (
+                    f"We already have an account for this mobile number ({shop}). "
+                    "Your login has been linked to it — you can start ordering now."
+                ),
+                "linked_existing_customer": True,
+                "request_id": None,
+            }
+
+        # An in-flight request already exists for this number (raised by a
+        # salesperson) — do not queue a second one for the admin.
+        open_request = find_open_customer_request_by_phone(phone10)
+        if open_request and open_request.get("linked_user_id") != user_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "An account request for this mobile number is already awaiting "
+                    "approval. Please contact your sales representative."
+                ),
+            )
+
+    # Same business, different number: a GSTIN can only belong to one account.
+    if has_gst:
+        gst = body.gst_no.strip()
+        gst_rx = {"$regex": f"^{re.escape(gst)}$", "$options": "i"}
+        if db.customers.find_one({"gst_no": gst_rx}, {"_id": 1}):
+            raise HTTPException(
+                status_code=409,
+                detail="This GSTIN is already registered with us. Please contact your sales representative.",
+            )
+        dup_request = db.customer_creation_requests.find_one(
+            {
+                "gst_no": gst_rx,
+                "status": {"$ne": "rejected"},
+                "linked_user_id": {"$ne": user_id},
+            },
+            {"_id": 1},
+        )
+        if dup_request:
+            raise HTTPException(
+                status_code=409,
+                detail="An account request with this GSTIN is already in progress. Please contact your sales representative.",
+            )
 
     # Submit-once, EXCEPT a rejected request can be corrected and resubmitted.
     existing = db.customer_creation_requests.find_one({"linked_user_id": user_id})
