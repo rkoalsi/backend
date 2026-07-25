@@ -94,7 +94,11 @@ def find_user_by_email(email: str) -> bool:
 
 def authenticate_user(email: str, password: str):
     user = db.users.find_one({"email": email, "status": "active"})
-    if not user or not verify_password(password, user["password"]):
+    # OTP-only accounts have no password set at all — fail the same way a wrong
+    # password does rather than blowing up on the missing field.
+    if not user or not user.get("password"):
+        return False
+    if not verify_password(password, user["password"]):
         return False
     return serialize_mongo_document(user)
 
@@ -663,17 +667,44 @@ async def reset_password(confirm: PasswordResetConfirm):
 # code is delivered) and — for login — must already belong to an account.
 
 @router.get("/login-link/{token}")
-async def resolve_login_link(token: str):
+async def resolve_login_link(
+    token: str, request: Request, background_tasks: BackgroundTasks
+):
     """
     Resolve a login-link token for the login page. Returns only the masked number
     so the full one is never exposed to the browser — the page keeps using the
     token for /otp/request and /otp/login.
+
+    This call is also our click tracker: Meta sends no webhook when a template's
+    URL button is tapped, so landing here is the only per-customer signal that the
+    WhatsApp button was used. Logged as `login_link_opened` (an open, not
+    necessarily a completed login — the OTP step follows).
     """
     phone10 = resolve_login_link_token(token)
     if not phone10:
         raise HTTPException(status_code=400, detail="This login link is invalid or has expired")
-    if not find_user_by_phone(phone10):
+
+    user = find_user_by_phone(phone10)
+    if not user:
         raise HTTPException(status_code=404, detail="No account is registered with this mobile number.")
+
+    if user.get("customer_id"):
+        from .customer_activity import log_activity, extract_client_info
+
+        ip, ua = extract_client_info(request)
+        background_tasks.add_task(
+            log_activity,
+            action="login_link_opened",
+            category="auth",
+            user_id=str(user.get("_id")),
+            customer_id=user.get("customer_id"),
+            customer_name=user.get("customer_name") or user.get("name"),
+            email=user.get("email"),
+            metadata={"source": "whatsapp_template_button"},
+            ip_address=ip,
+            user_agent=ua,
+        )
+
     return {"masked_phone": mask_phone(phone10)}
 
 
@@ -783,7 +814,9 @@ async def login_with_otp(
             customer_id=authenticated.get("customer_id"),
             customer_name=customer_name,
             email=authenticated.get("email"),
-            metadata={"method": "otp"},
+            # `via` distinguishes a login that started from a WhatsApp button tap
+            # from one where the customer typed their number in themselves.
+            metadata={"method": "otp", "via": "login_link" if body.token else "manual"},
             ip_address=ip,
             user_agent=ua,
         )
