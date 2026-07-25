@@ -327,23 +327,83 @@ def get_customer_login(contact_id: str):
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    user = db.users.find_one(
-        {"customer_id": contact_id, "role": "customer"},
-        {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1, "password": 1},
+    # A customer can carry more than one login (created by a salesperson, by the
+    # admin, or self-registered), so return all of them rather than an arbitrary
+    # find_one — which one you're looking at matters when sending.
+    users = list(
+        db.users.find(
+            {"customer_id": contact_id, "role": "customer"},
+            {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1, "password": 1,
+             "created_at": 1, "created_by_salesperson_id": 1},
+        ).sort("created_at", 1)
     )
 
-    login = None
-    if user:
-        login = serialize_mongo_document(user)
-        login["has_password"] = bool(login.pop("password", None))
+    logins = []
+    for entry in users:
+        item = serialize_mongo_document(entry)
+        item["has_password"] = bool(item.pop("password", None))
+        item["phone_info"] = normalize_indian_mobile(entry.get("phone"))
+        item["created_by_salesperson"] = bool(item.pop("created_by_salesperson_id", None))
+        logins.append(item)
+
+    # Kept for callers that only care about "is there a login at all".
+    user = users[0] if users else None
+    login = logins[0] if logins else None
 
     # The login's own number wins once it exists; otherwise fall back to whatever
     # the customer record carries.
     raw_phone = (user or {}).get("phone") or customer.get("mobile") or customer.get("phone")
     resolved = normalize_indian_mobile(raw_phone)
 
+    # Surface accounts belonging to SOMEONE ELSE that already claim this number or
+    # email. Creating would be rejected anyway; showing who holds it up front means
+    # the admin can go fix the right record instead of guessing at a 409.
+    conflicts = []
+    if not user:
+        conflict_query = []
+        if resolved["valid"]:
+            conflict_query.append({"phone": int(resolved["phone"])})
+            conflict_query.append({"phone": resolved["phone"]})
+        customer_email = (customer.get("email") or "").strip()
+        if customer_email:
+            conflict_query.append({"email": customer_email})
+
+        if conflict_query:
+            for other in db.users.find(
+                {"$and": [{"$or": conflict_query}, {"customer_id": {"$ne": contact_id}}]},
+                {"_id": 1, "name": 1, "email": 1, "phone": 1, "role": 1,
+                 "status": 1, "customer_id": 1, "customer_name": 1},
+            ).limit(10):
+                other_phone = normalize_indian_mobile(other.get("phone"))["phone"]
+                reasons = []
+                if resolved["valid"] and other_phone == resolved["phone"]:
+                    reasons.append("mobile")
+                if customer_email and (other.get("email") or "").strip().lower() == customer_email.lower():
+                    reasons.append("email")
+
+                linked_name = other.get("customer_name")
+                if not linked_name and other.get("customer_id"):
+                    linked = db.customers.find_one(
+                        {"contact_id": other["customer_id"]},
+                        {"company_name": 1, "contact_name": 1},
+                    )
+                    linked_name = (linked or {}).get("company_name") or (linked or {}).get("contact_name")
+
+                conflicts.append({
+                    "_id": str(other["_id"]),
+                    "name": other.get("name"),
+                    "email": other.get("email"),
+                    "phone": other_phone or str(other.get("phone") or ""),
+                    "role": other.get("role"),
+                    "status": other.get("status"),
+                    "customer_id": other.get("customer_id"),
+                    "customer_name": linked_name,
+                    "conflict_on": reasons,
+                })
+
     return {
         "login": login,
+        "logins": logins,
         "customer": {
             "contact_id": customer.get("contact_id"),
             "name": customer.get("company_name") or customer.get("contact_name"),
@@ -352,6 +412,7 @@ def get_customer_login(contact_id: str):
             "raw_phone": raw_phone,
         },
         "phone": resolved,
+        "conflicts": conflicts,
     }
 
 
@@ -442,16 +503,28 @@ def create_customer_login_for_customer(contact_id: str, payload: dict = Body(...
 
 
 @router.post("/customer-login/{contact_id}/send")
-def send_customer_login_link(contact_id: str):
+def send_customer_login_link(contact_id: str, user_id: Optional[str] = Query(None)):
     """
     WhatsApp the customer their login link (UTILITY template, signed token in the
     button). Never carries a password or the number in plain text.
+
+    `user_id` picks which login to send to when the customer has more than one;
+    without it the oldest is used.
     """
     from ..config.whatsapp import send_whatsapp
     from .users import make_login_link_token
     from .customer_creation_requests import CUSTOMER_LOGIN_TEMPLATE_NAME
 
-    user = db.users.find_one({"customer_id": contact_id, "role": "customer"})
+    if user_id:
+        user = db.users.find_one(
+            {"_id": ObjectId(user_id), "customer_id": contact_id, "role": "customer"}
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="That login does not belong to this customer")
+    else:
+        user = db.users.find_one(
+            {"customer_id": contact_id, "role": "customer"}, sort=[("created_at", 1)]
+        )
     if not user:
         raise HTTPException(status_code=404, detail="No login exists for this customer yet")
 
