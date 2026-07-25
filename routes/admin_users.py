@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, Query, File, UploadFile
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Body
 from fastapi.responses import StreamingResponse
 from ..config.root import get_database, serialize_mongo_document
+from ..config.phone import normalize_indian_mobile
 from bson.objectid import ObjectId
 from passlib.hash import bcrypt
 from datetime import datetime
@@ -306,6 +307,190 @@ def get_user_by_customer(contact_id: str):
         raise HTTPException(status_code=404, detail="No user account found for this customer")
     user = serialize_mongo_document(user)
     return {"user": {"email": user.get("email"), "name": user.get("name"), "_id": user.get("_id")}}
+
+
+# ---------------------------------------------------------------------------
+# Customer logins driven from /admin/customers (mirrors the flow on
+# /admin/customer_requests, but keyed off the customer record itself).
+# ---------------------------------------------------------------------------
+
+@router.get("/customer-login/{contact_id}")
+def get_customer_login(contact_id: str):
+    """
+    Login status for a customer, plus whether their number can take a WhatsApp
+    message — so the UI can warn before anyone tries to create or send.
+    """
+    customer = db.customers.find_one(
+        {"contact_id": contact_id},
+        {"contact_id": 1, "contact_name": 1, "company_name": 1, "email": 1, "phone": 1, "mobile": 1},
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    user = db.users.find_one(
+        {"customer_id": contact_id, "role": "customer"},
+        {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1, "password": 1},
+    )
+
+    login = None
+    if user:
+        login = serialize_mongo_document(user)
+        login["has_password"] = bool(login.pop("password", None))
+
+    # The login's own number wins once it exists; otherwise fall back to whatever
+    # the customer record carries.
+    raw_phone = (user or {}).get("phone") or customer.get("mobile") or customer.get("phone")
+    resolved = normalize_indian_mobile(raw_phone)
+
+    return {
+        "login": login,
+        "customer": {
+            "contact_id": customer.get("contact_id"),
+            "name": customer.get("company_name") or customer.get("contact_name"),
+            "contact_name": customer.get("contact_name"),
+            "email": customer.get("email"),
+            "raw_phone": raw_phone,
+        },
+        "phone": resolved,
+    }
+
+
+@router.post("/customer-login/{contact_id}")
+def create_customer_login_for_customer(contact_id: str, payload: dict = Body(...)):
+    """
+    Create a customer login straight from the customer record. Password is
+    optional — omit it for an OTP-only account.
+    """
+    customer = db.customers.find_one({"contact_id": contact_id})
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    if db.users.find_one({"customer_id": contact_id, "role": "customer"}):
+        raise HTTPException(status_code=409, detail="A login already exists for this customer")
+
+    # The mobile is the only hard requirement: it is what OTP login runs on.
+    # Email and password are both optional — without them the account is
+    # WhatsApp-OTP-only, which is a complete, usable login.
+    raw_phone = payload.get("phone") or customer.get("mobile") or customer.get("phone")
+    resolved = normalize_indian_mobile(raw_phone)
+    if not resolved["valid"]:
+        raise HTTPException(status_code=400, detail=resolved["reason"])
+
+    email = (payload.get("email") or customer.get("email") or "").strip()
+    if email and db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    password = (payload.get("password") or "").strip()
+    if password and not email:
+        raise HTTPException(
+            status_code=400,
+            detail="An email is needed to set a password — leave the password blank for OTP-only login",
+        )
+
+    # A second account on the same number would make OTP login ambiguous.
+    if db.users.find_one({"phone": int(resolved["phone"])}):
+        raise HTTPException(
+            status_code=409,
+            detail="Another account already uses this mobile number",
+        )
+
+    name = (
+        payload.get("name")
+        or customer.get("contact_name")
+        or customer.get("company_name")
+        or ""
+    ).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    now = datetime.utcnow()
+    doc = {
+        "name": name,
+        "phone": int(resolved["phone"]),
+        "role": "customer",
+        "status": "active",
+        "customer_id": contact_id,
+        "customer_name": customer.get("company_name") or customer.get("contact_name") or "",
+        "created_at": now,
+        "updated_at": now,
+    }
+    # Omit rather than store "" — an empty email would collide with every other
+    # emailless account on the duplicate check above.
+    if email:
+        doc["email"] = email
+    if password:
+        doc["password"] = hash_password(password)
+
+    result = db.users.insert_one(doc)
+    has_password = "password" in doc
+
+    return {
+        "message": (
+            "Customer login created successfully"
+            if has_password
+            else "Customer login created — the customer signs in with a WhatsApp OTP"
+        ),
+        "login": {
+            "_id": str(result.inserted_id),
+            "name": name,
+            "email": email,
+            "phone": int(resolved["phone"]),
+            "status": "active",
+            "has_password": has_password,
+        },
+    }
+
+
+@router.post("/customer-login/{contact_id}/send")
+def send_customer_login_link(contact_id: str):
+    """
+    WhatsApp the customer their login link (UTILITY template, signed token in the
+    button). Never carries a password or the number in plain text.
+    """
+    from ..config.whatsapp import send_whatsapp
+    from .users import make_login_link_token
+    from .customer_creation_requests import CUSTOMER_LOGIN_TEMPLATE_NAME
+
+    user = db.users.find_one({"customer_id": contact_id, "role": "customer"})
+    if not user:
+        raise HTTPException(status_code=404, detail="No login exists for this customer yet")
+
+    resolved = normalize_indian_mobile(user.get("phone"))
+    if not resolved["valid"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot send on WhatsApp — {resolved['reason'][0].lower()}{resolved['reason'][1:]}",
+        )
+    phone10 = resolved["phone"]
+
+    template = db.templates.find_one({"name": CUSTOMER_LOGIN_TEMPLATE_NAME})
+    if not template:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"WhatsApp template '{CUSTOMER_LOGIN_TEMPLATE_NAME}' not found. "
+                "Create and get it approved in /admin/templates first."
+            ),
+        )
+
+    customer = db.customers.find_one({"contact_id": contact_id}, {"company_name": 1, "contact_name": 1})
+    first_name = (user.get("name") or "there").split()[0]
+    shop = (
+        user.get("customer_name")
+        or (customer or {}).get("company_name")
+        or (customer or {}).get("contact_name")
+        or "your shop"
+    )
+
+    response = send_whatsapp(
+        phone10,
+        template,
+        {"name": first_name, "shop": shop, "button_url": make_login_link_token(phone10)},
+    )
+    if response is None:
+        raise HTTPException(status_code=502, detail="Failed to send WhatsApp message")
+
+    return {"message": f"Login link sent on WhatsApp to {phone10}"}
 
 
 @router.get("/{user_id}")

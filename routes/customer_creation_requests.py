@@ -13,6 +13,7 @@ from .notifications import (
 )
 from .admin_users import hash_password, generate_password
 from .users import make_login_link_token
+from ..config.phone import normalize_indian_mobile
 import os
 import requests
 import logging
@@ -1682,26 +1683,38 @@ async def create_request_login(
             detail="Customer must be created in Zoho before a login can be made",
         )
 
-    email =(body.email or request_doc.get("customer_mail_id") or request_doc.get("email") or "").strip()
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
+    # The mobile is the only hard requirement — it is what OTP login runs on.
+    # Email and password are optional; without them the account is OTP-only.
+    email = (body.email or request_doc.get("customer_mail_id") or request_doc.get("email") or "").strip()
 
     name = (body.name or request_doc.get("customer_name") or request_doc.get("shop_name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
 
     raw_phone = body.phone if body.phone is not None else request_doc.get("whatsapp_no", "")
-    digits = re.sub(r"\D", "", str(raw_phone or ""))
-    if not digits:
-        raise HTTPException(status_code=400, detail="A valid phone number is required")
+    resolved = normalize_indian_mobile(raw_phone)
+    if not resolved["valid"]:
+        raise HTTPException(status_code=400, detail=resolved["reason"])
+    digits = resolved["phone"]
 
     if db.users.find_one({"customer_id": contact_id, "role": "customer"}):
         raise HTTPException(
             status_code=409, detail="A login already exists for this customer"
         )
 
-    if db.users.find_one({"email": email}):
+    if email and db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already exists")
+
+    if body.password and body.password.strip() and not email:
+        raise HTTPException(
+            status_code=400,
+            detail="An email is needed to set a password — leave the password blank for OTP-only login",
+        )
+
+    if db.users.find_one({"phone": int(digits)}):
+        raise HTTPException(
+            status_code=409, detail="Another account already uses this mobile number"
+        )
 
     customer = db.customers.find_one({"contact_id": contact_id}, {"company_name": 1, "contact_name": 1})
     customer_name = (
@@ -1713,7 +1726,6 @@ async def create_request_login(
     now = datetime.now()
     doc = {
         "name": name,
-        "email": email,
         "phone": int(digits),
         "role": "customer",
         "status": "active",
@@ -1723,6 +1735,10 @@ async def create_request_login(
         "created_at": now,
         "updated_at": now,
     }
+    # Omit rather than store "" — an empty email would collide with every other
+    # emailless account on the duplicate check above.
+    if email:
+        doc["email"] = email
     if body.password and body.password.strip():
         doc["password"] = hash_password(body.password)
 
@@ -1790,12 +1806,13 @@ async def send_login_instructions(
             status_code=404, detail="No login exists for this customer yet"
         )
 
-    phone10 = re.sub(r"\D", "", str(login.get("phone", "")))[-10:]
-    if len(phone10) != 10:
+    resolved = normalize_indian_mobile(login.get("phone"))
+    if not resolved["valid"]:
         raise HTTPException(
             status_code=400,
-            detail="The login has no valid 10-digit mobile number, so OTP login will not work",
+            detail=f"Cannot send on WhatsApp — {resolved['reason'][0].lower()}{resolved['reason'][1:]}",
         )
+    phone10 = resolved["phone"]
 
     template = db.templates.find_one({"name": CUSTOMER_LOGIN_TEMPLATE_NAME})
     if not template:
