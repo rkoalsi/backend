@@ -1268,7 +1268,18 @@ async def get_customer_requests(
                                 }
                             }
                         },
-                        {"$project": {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1}},
+                        {
+                            "$project": {
+                                "_id": 1,
+                                "name": 1,
+                                "email": 1,
+                                "phone": 1,
+                                "status": 1,
+                                "has_password": {
+                                    "$ne": [{"$ifNull": ["$password", ""]}, ""]
+                                },
+                            }
+                        },
                         {"$limit": 1},
                     ],
                     "as": "linked_login",
@@ -1606,7 +1617,8 @@ async def update_request_status(
 
 
 class CustomerLoginCreate(BaseModel):
-    password: str
+    # Optional: omit it and the account is OTP-only (mobile + WhatsApp code).
+    password: Optional[str] = None
     email: Optional[str] = None
     name: Optional[str] = None
     phone: Optional[str] = None
@@ -1629,9 +1641,14 @@ async def get_request_login(
 
     user = db.users.find_one(
         {"customer_id": contact_id, "role": "customer"},
-        {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1},
+        {"_id": 1, "name": 1, "email": 1, "phone": 1, "status": 1, "password": 1},
     )
-    return {"login": serialize_mongo_document(user) if user else None}
+    if not user:
+        return {"login": None}
+
+    login = serialize_mongo_document(user)
+    login["has_password"] = bool(login.pop("password", None))
+    return {"login": login}
 
 
 @router.post("/{request_id}/login")
@@ -1643,6 +1660,10 @@ async def create_request_login(
     """
     Create a customer login for an approved (created_on_zoho) request and link it
     to the Zoho customer. The account shows up in /admin/customer_management too.
+
+    The password is optional: omit it and no `password` field is written at all,
+    leaving an OTP-only account (mobile + WhatsApp code). `authenticate_user`
+    treats a passwordless account as a failed email/password login.
     """
     db = get_database()
 
@@ -1661,10 +1682,7 @@ async def create_request_login(
             detail="Customer must be created in Zoho before a login can be made",
         )
 
-    if not body.password or not body.password.strip():
-        raise HTTPException(status_code=400, detail="Password is required")
-
-    email = (body.email or request_doc.get("customer_mail_id") or request_doc.get("email") or "").strip()
+    email =(body.email or request_doc.get("customer_mail_id") or request_doc.get("email") or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
 
@@ -1699,13 +1717,15 @@ async def create_request_login(
         "phone": int(digits),
         "role": "customer",
         "status": "active",
-        "password": hash_password(body.password),
         "customer_id": contact_id,
         "customer_name": customer_name,
         "created_from_request_id": ObjectId(request_id),
         "created_at": now,
         "updated_at": now,
     }
+    if body.password and body.password.strip():
+        doc["password"] = hash_password(body.password)
+
     result = db.users.insert_one(doc)
 
     db.customer_creation_requests.update_one(
@@ -1713,14 +1733,20 @@ async def create_request_login(
         {"$set": {"linked_user_id": result.inserted_id, "updated_at": now}},
     )
 
+    has_password = "password" in doc
     return {
-        "message": "Customer login created successfully",
+        "message": (
+            "Customer login created successfully"
+            if has_password
+            else "Customer login created — the customer signs in with a WhatsApp OTP"
+        ),
         "login": {
             "_id": str(result.inserted_id),
             "name": name,
             "email": email,
             "phone": int(digits),
             "status": "active",
+            "has_password": has_password,
         },
     }
 
