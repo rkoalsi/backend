@@ -128,7 +128,8 @@ def render_email(
         for label, value in details:
             detail_rows.append(
                 f'<tr><td style="padding:12px 0 11px;font-family:{FONT};font-size:13.5px;'
-                f'color:{MUTED};border-bottom:1px solid {HAIRLINE_SOFT};width:42%;">{esc(label)}</td>'
+                f'color:{MUTED};border-bottom:1px solid {HAIRLINE_SOFT};width:42%;'
+                f'vertical-align:top;">{esc(label)}</td>'
                 f'<td style="padding:12px 0 11px;font-family:{FONT};font-size:13.5px;color:{INK};'
                 f'font-weight:bold;border-bottom:1px solid {HAIRLINE_SOFT};">{esc(value)}</td></tr>'
             )
