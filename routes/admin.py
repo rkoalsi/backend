@@ -3563,11 +3563,26 @@ async def update_brand_secondary_image(file: UploadFile = File(...), brand_name:
 async def update_brand(brand_id: str, payload: dict):
     from bson import ObjectId
 
-    allowed_fields = {"description", "status", "hidden"}
+    allowed_fields = {"description", "status", "hidden", "color"}
     update_data = {k: v for k, v in payload.items() if k in allowed_fields}
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    # `color` drives the brand's accent in the order-form brand rail. Store a
+    # normalised #rrggbb, or None to fall back to the palette derived from the
+    # brand name on the client.
+    if "color" in update_data:
+        color = (update_data["color"] or "").strip()
+        if not color:
+            update_data["color"] = None
+        else:
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Colour must be a 6-digit hex value like #4633B8.",
+                )
+            update_data["color"] = color.lower()
 
     try:
         result = db.brands.update_one(
