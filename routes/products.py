@@ -155,6 +155,7 @@ def get_all_brands(response: Response):
                         "image": brand_doc.get("image_url"),
                         "secondary_image_url": brand_doc.get("secondary_image_url"),
                         "description": brand_doc.get("description"),
+                        "color": brand_doc.get("color"),
                     }
                 else:
                     brand = {
@@ -162,6 +163,7 @@ def get_all_brands(response: Response):
                         "image": None,
                         "secondary_image_url": None,
                         "description": '',
+                        "color": None,
                     }
 
                 brands.append(brand)
@@ -999,9 +1001,10 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
                         "image": brand_doc.get("image_url"),
                         "secondary_image_url": brand_doc.get("secondary_image_url"),
                         "description": brand_doc.get("description"),
+                        "color": brand_doc.get("color"),
                     })
                 else:
-                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": ""})
+                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": "", "color": None})
             return result
 
         def fetch_counts():
