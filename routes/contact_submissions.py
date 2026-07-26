@@ -56,7 +56,7 @@ async def create_contact_submission(request: ContactSubmissionRequest):
                 "new_lead",
                 f"New contact form lead: {request.name}",
                 f"{request.name} ({request.email}) submitted a contact form enquiry.",
-                "/admin/leads",
+                "/admin/leads?tab=contact",
             )
         except Exception as e:
             print(f"Failed to notify of contact lead: {e}")
