@@ -48,6 +48,8 @@ def heartbeat(payload: dict, request: Request, token: str = Depends(JWTBearer())
     current_page = payload.get("current_page")
     if not isinstance(current_page, str):
         current_page = None
+    else:
+        current_page = current_page[:200]
 
     presence_collection.update_one(
         {"user_id": user["_id"]},

@@ -4,7 +4,7 @@ from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import boto3, logging, os, openpyxl, re
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional
 from openpyxl.styles import Font, Alignment, PatternFill
@@ -940,6 +940,206 @@ def build_customer_analytics_pipeline(
     return pipeline
 
 
+# ── Order-form (cart) activity ─────────────────────────────────────────────
+# Tracks how customers actually use the order form: an order row is inserted
+# the moment someone clicks "Create Order", so an order with no products means
+# the user only browsed the catalogue and never added anything to the cart.
+# `orders.customer_id` is the `customers._id` (ObjectId) — the analytics rows
+# expose that as `customerMongoId`.
+
+# Products the user actually put in the cart (quantity or pre-order quantity > 0).
+_CART_LINES = {
+    "$filter": {
+        "input": {"$ifNull": ["$products", []]},
+        "as": "p",
+        "cond": {
+            "$gt": [
+                {
+                    "$add": [
+                        {"$cond": [{"$isNumber": "$$p.quantity"}, "$$p.quantity", 0]},
+                        {
+                            "$cond": [
+                                {"$isNumber": "$$p.pre_order_quantity"},
+                                "$$p.pre_order_quantity",
+                                0,
+                            ]
+                        },
+                    ]
+                },
+                0,
+            ]
+        },
+    }
+}
+
+
+def _num(value) -> float:
+    """Quantities / prices on order line items have mixed types (ints, strings,
+    empty strings) — coerce to a number, 0 on anything unusable."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _cart_engagement(stats: dict) -> str:
+    """Bucket a customer by how far they get in the order form.
+
+    none          — never opened an order on the form
+    browsing_only — created order(s) but never added a single product
+    abandoned     — added products but never turned any order into an estimate
+    converted     — at least one order finalised into a Zoho estimate
+    """
+    if not stats or not stats.get("ordersCreated"):
+        return "none"
+    if not stats.get("ordersWithProducts"):
+        return "browsing_only"
+    if not stats.get("ordersFinalised"):
+        return "abandoned"
+    return "converted"
+
+
+def _cart_activity_map(days: Optional[int] = None) -> dict:
+    """Per-customer order-form usage, keyed by str(customers._id).
+
+    `days` optionally limits the window to the last N days of order creation.
+    """
+    match_stage = {"customer_id": {"$type": "objectId"}, "created_at": {"$type": "date"}}
+    if days:
+        match_stage["created_at"] = {
+            "$type": "date",
+            "$gte": datetime.now() - timedelta(days=days),
+        }
+
+    pipeline = [
+        {"$match": match_stage},
+        {
+            "$addFields": {
+                "_cartLines": _CART_LINES,
+                "_finalised": {
+                    "$or": [
+                        {"$eq": ["$estimate_created", True]},
+                        {"$eq": ["$pre_order_estimate_created", True]},
+                    ]
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "_items": {"$size": "$_cartLines"},
+                "_units": {
+                    "$sum": {
+                        "$map": {
+                            "input": "$_cartLines",
+                            "as": "p",
+                            "in": {
+                                "$add": [
+                                    {
+                                        "$cond": [
+                                            {"$isNumber": "$$p.quantity"},
+                                            "$$p.quantity",
+                                            0,
+                                        ]
+                                    },
+                                    {
+                                        "$cond": [
+                                            {"$isNumber": "$$p.pre_order_quantity"},
+                                            "$$p.pre_order_quantity",
+                                            0,
+                                        ]
+                                    },
+                                ]
+                            },
+                        }
+                    }
+                },
+                "_customerAdded": {
+                    "$size": {
+                        "$filter": {
+                            "input": "$_cartLines",
+                            "as": "p",
+                            "cond": {"$eq": ["$$p.added_by", "customer"]},
+                        }
+                    }
+                },
+            }
+        },
+        {"$addFields": {"_hasCart": {"$gt": ["$_items", 0]}}},
+        {
+            "$group": {
+                "_id": "$customer_id",
+                "ordersCreated": {"$sum": 1},
+                "ordersWithProducts": {"$sum": {"$cond": ["$_hasCart", 1, 0]}},
+                "ordersFinalised": {"$sum": {"$cond": ["$_finalised", 1, 0]}},
+                # Orders where the *customer* (not the salesperson) added the products.
+                "ordersCustomerAdded": {
+                    "$sum": {"$cond": [{"$gt": ["$_customerAdded", 0]}, 1, 0]}
+                },
+                "itemsAdded": {"$sum": "$_items"},
+                "unitsAdded": {"$sum": "$_units"},
+                "lastOrderAt": {"$max": "$created_at"},
+                "lastCartAt": {
+                    "$max": {"$cond": ["$_hasCart", "$created_at", None]}
+                },
+            }
+        },
+    ]
+
+    out = {}
+    for g in db["orders"].aggregate(pipeline, allowDiskUse=True):
+        last_order = g.get("lastOrderAt")
+        last_cart = g.get("lastCartAt")
+        stats = {
+            "ordersCreated": int(g.get("ordersCreated") or 0),
+            "ordersWithProducts": int(g.get("ordersWithProducts") or 0),
+            "ordersFinalised": int(g.get("ordersFinalised") or 0),
+            "ordersCustomerAdded": int(g.get("ordersCustomerAdded") or 0),
+            "itemsAdded": int(g.get("itemsAdded") or 0),
+            "unitsAdded": int(g.get("unitsAdded") or 0),
+            "lastOrderAt": last_order.strftime("%Y-%m-%d") if last_order else None,
+            "lastCartAt": last_cart.strftime("%Y-%m-%d") if last_cart else None,
+        }
+        stats["emptyOrders"] = max(
+            0, stats["ordersCreated"] - stats["ordersWithProducts"]
+        )
+        stats["engagement"] = _cart_engagement(stats)
+        out[str(g["_id"])] = stats
+    return out
+
+
+_EMPTY_CART_ACTIVITY = {
+    "ordersCreated": 0,
+    "ordersWithProducts": 0,
+    "ordersFinalised": 0,
+    "ordersCustomerAdded": 0,
+    "itemsAdded": 0,
+    "unitsAdded": 0,
+    "emptyOrders": 0,
+    "lastOrderAt": None,
+    "lastCartAt": None,
+    "engagement": "none",
+}
+
+
+def _attach_cart_activity(customers, cart_days=None, cart_activity="all"):
+    """Merge order-form usage onto analytics rows and optionally filter by it.
+
+    Analytics rows are per (customer, shipping address), so the same customer's
+    cart stats are repeated on each of their address rows — they're customer-level
+    figures, not address-level.
+    """
+    cart_map = _cart_activity_map(cart_days)
+    for c in customers:
+        c["cartActivity"] = cart_map.get(
+            c.get("customerMongoId") or "", dict(_EMPTY_CART_ACTIVITY)
+        )
+    if cart_activity and cart_activity != "all":
+        customers = [
+            c for c in customers if c["cartActivity"]["engagement"] == cart_activity
+        ]
+    return customers
+
+
 def _get_current_date_info():
     """Compute all date-related info needed by the pipeline."""
     current_date = datetime.now()
@@ -1036,6 +1236,13 @@ def get_admin_customer_analytics(
         description="Filter by last billing activity (all, last_month, last_45_days, last_2_months, last_3_months, not_last_month, not_last_45_days, not_last_2_months, not_last_3_months)",
     ),
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
+    cart_activity: Optional[str] = Query(
+        "all",
+        description="Filter by order-form usage (all, none, browsing_only, abandoned, converted)",
+    ),
+    cart_days: Optional[int] = Query(
+        None, description="Only count order-form activity from the last N days"
+    ),
 ):
     try:
         match_stage, customer_status_match_stage, sort_stage, sales_person_logic = (
@@ -1054,6 +1261,7 @@ def get_admin_customer_analytics(
         )
 
         customers = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
+        customers = _attach_cart_activity(customers, cart_days, cart_activity)
         return serialize_mongo_document(customers)
     except Exception as e:
         logger.error(f"Error in get_customer_analytics: {str(e)}")
@@ -1074,6 +1282,13 @@ def download_customer_analytics_report(
     sort_by: Optional[bool] = Query(True, description="Low to High or High to Low"),
     include_brand_breakdown: Optional[bool] = Query(False, description="Include brand breakdown sheet"),
     brands: Optional[str] = Query(None, description="Comma-separated list of brands to include in brand breakdown (default: all)"),
+    cart_activity: Optional[str] = Query(
+        "all",
+        description="Filter by order-form usage (all, none, browsing_only, abandoned, converted)",
+    ),
+    cart_days: Optional[int] = Query(
+        None, description="Only count order-form activity from the last N days"
+    ),
 ):
     try:
         match_stage, customer_status_match_stage, sort_stage, sales_person_logic = (
@@ -1093,6 +1308,7 @@ def download_customer_analytics_report(
 
         # Execute the aggregation
         customers = list(db.invoices.aggregate(pipeline, allowDiskUse=True))
+        customers = _attach_cart_activity(customers, cart_days, cart_activity)
 
         # Build customer address status lookup.
         # customer_address_details stores (customer_id=MongoDB _id, address_id=Zoho address_id).
@@ -1301,7 +1517,23 @@ def download_customer_analytics_report(
             "Due Payments Count",
             "Not Due Payments Count",
             "Whatsapp Group",
+            # Order-form usage (customer-level, repeated across a customer's address rows)
+            "Order Form Orders Created",
+            "Order Form Orders With Products",
+            "Order Form Empty Orders (Browsed Only)",
+            "Order Form Orders Finalised",
+            "Order Form Items Added",
+            "Order Form Engagement",
+            "Order Form Last Order",
+            "Order Form Last Cart",
         ]
+
+        _ENGAGEMENT_LABELS = {
+            "none": "Never used",
+            "browsing_only": "Browsed only (no cart)",
+            "abandoned": "Added to cart, not finalised",
+            "converted": "Finalised order(s)",
+        }
 
         def _write_analytics_rows(ws, rows):
             for col, header in enumerate(analytics_headers, 1):
@@ -1338,6 +1570,19 @@ def download_customer_analytics_report(
                 ws.cell(row=row_idx, column=22, value=len(customer.get("duePayments", [])))
                 ws.cell(row=row_idx, column=23, value=len(customer.get("notDuePayments", [])))
                 ws.cell(row=row_idx, column=24, value=customer.get("whatsappGroup", ""))
+                cart = customer.get("cartActivity") or _EMPTY_CART_ACTIVITY
+                ws.cell(row=row_idx, column=25, value=cart.get("ordersCreated", 0))
+                ws.cell(row=row_idx, column=26, value=cart.get("ordersWithProducts", 0))
+                ws.cell(row=row_idx, column=27, value=cart.get("emptyOrders", 0))
+                ws.cell(row=row_idx, column=28, value=cart.get("ordersFinalised", 0))
+                ws.cell(row=row_idx, column=29, value=cart.get("itemsAdded", 0))
+                ws.cell(
+                    row=row_idx,
+                    column=30,
+                    value=_ENGAGEMENT_LABELS.get(cart.get("engagement", "none"), ""),
+                )
+                ws.cell(row=row_idx, column=31, value=cart.get("lastOrderAt") or "")
+                ws.cell(row=row_idx, column=32, value=cart.get("lastCartAt") or "")
             for column in ws.columns:
                 max_length = 0
                 column_letter = get_column_letter(column[0].column)
@@ -1871,6 +2116,101 @@ def download_customer_analytics_report(
 
     except Exception as e:
         logger.error(f"Error in download_customer_analytics_report: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@router.get("/cart-orders")
+def get_customer_cart_orders(
+    customer_id: str = Query(..., description="customers._id (Mongo ObjectId)"),
+    limit: int = Query(25, ge=1, le=200, description="How many recent orders to return"),
+):
+    """Recent order-form orders for one customer, showing whether each order had
+    anything added to the cart and who added it. Powers the "Order Form Activity"
+    section of the customer analytics drawer."""
+    try:
+        if not ObjectId.is_valid(customer_id):
+            return JSONResponse(status_code=400, content={"error": "Invalid customer_id"})
+
+        orders = list(
+            db["orders"]
+            .find(
+                {"customer_id": ObjectId(customer_id)},
+                {
+                    "products": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "status": 1,
+                    "total_amount": 1,
+                    "created_by": 1,
+                    "estimate_created": 1,
+                    "pre_order_estimate_created": 1,
+                    "estimate_number": 1,
+                },
+            )
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+
+        creator_ids = [o["created_by"] for o in orders if o.get("created_by")]
+        creators = {
+            u["_id"]: u
+            for u in users_collection.find(
+                {"_id": {"$in": creator_ids}},
+                {"name": 1, "email": 1, "role": 1, "first_name": 1, "last_name": 1},
+            )
+        }
+
+        rows = []
+        for o in orders:
+            lines = [
+                p
+                for p in (o.get("products") or [])
+                if _num(p.get("quantity")) + _num(p.get("pre_order_quantity")) > 0
+            ]
+            units = sum(
+                _num(p.get("quantity")) + _num(p.get("pre_order_quantity")) for p in lines
+            )
+            by_customer = len([p for p in lines if p.get("added_by") == "customer"])
+            u = creators.get(o.get("created_by")) or {}
+            created_at = o.get("created_at")
+            updated_at = o.get("updated_at")
+            rows.append(
+                {
+                    "orderId": str(o["_id"]),
+                    "createdAt": created_at.isoformat() if isinstance(created_at, datetime) else None,
+                    "updatedAt": updated_at.isoformat() if isinstance(updated_at, datetime) else None,
+                    "status": o.get("status", ""),
+                    "totalAmount": _num(o.get("total_amount")),
+                    "items": len(lines),
+                    "units": int(units),
+                    "itemsByCustomer": by_customer,
+                    "itemsBySalesPerson": len(lines) - by_customer,
+                    "addedToCart": len(lines) > 0,
+                    "finalised": bool(
+                        o.get("estimate_created") or o.get("pre_order_estimate_created")
+                    ),
+                    "estimateNumber": o.get("estimate_number", ""),
+                    "createdBy": (
+                        u.get("name")
+                        or f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+                        or u.get("email")
+                        or "Unknown"
+                    ),
+                    "createdByRole": u.get("role", "unknown"),
+                }
+            )
+
+        summary = {
+            "ordersCreated": len(rows),
+            "ordersWithProducts": len([r for r in rows if r["addedToCart"]]),
+            "emptyOrders": len([r for r in rows if not r["addedToCart"]]),
+            "ordersFinalised": len([r for r in rows if r["finalised"]]),
+        }
+        summary["engagement"] = _cart_engagement(summary)
+
+        return {"orders": rows, "summary": summary, "limit": limit}
+    except Exception as e:
+        logger.error(f"Error in get_customer_cart_orders: {str(e)}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
