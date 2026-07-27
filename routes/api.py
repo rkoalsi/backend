@@ -21,6 +21,8 @@ from .return_orders import router as return_orders
 from .targeted_customers import router as targeted_customers
 from .attendance import router as attendance
 from .external_links import router as external_links
+from .promotions import router as promotions
+from .admin_promotions import router as admin_promotions
 from .customer_analytics import router as customer_analytics
 from .permissions import router as permissions_router
 from .customer_creation_requests import router as customer_creation_requests
@@ -132,6 +134,12 @@ router.include_router(
 )
 router.include_router(
     external_links, prefix="/external_links", tags=["External Links"], dependencies=_jwt
+)
+router.include_router(
+    promotions, prefix="/promotions", tags=["Promotions"], dependencies=_jwt
+)
+router.include_router(
+    admin_promotions, prefix="/admin/promotions", tags=["Admin Promotions"], dependencies=_jwt
 )
 router.include_router(
     attendance, prefix="/attendance", tags=["Attendance"]
