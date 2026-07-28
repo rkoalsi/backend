@@ -416,18 +416,75 @@ def get_customer_login(contact_id: str):
     }
 
 
+@router.get("/customer-login/{contact_id}/check-phone")
+def check_customer_login_phone(
+    contact_id: str,
+    phone: str = Query(...),
+    email: Optional[str] = Query(None),
+):
+    """
+    Is this mobile (and optionally email) free to build a login on?
+
+    Customers routinely have more than one number, and the first one is often
+    already claimed by another account. Checking before the POST lets the admin
+    try the customer's second number instead of guessing at a 409.
+    """
+    resolved = normalize_indian_mobile(phone)
+    holders = []
+
+    if resolved["valid"]:
+        clauses = [{"phone": int(resolved["phone"])}, {"phone": resolved["phone"]}]
+        clean_email = (email or "").strip()
+        if clean_email:
+            clauses.append({"email": clean_email})
+
+        for other in db.users.find(
+            {"$or": clauses},
+            {"_id": 1, "name": 1, "email": 1, "phone": 1, "role": 1,
+             "status": 1, "customer_id": 1, "customer_name": 1},
+        ).limit(10):
+            other_phone = normalize_indian_mobile(other.get("phone"))["phone"]
+            reasons = []
+            if other_phone == resolved["phone"]:
+                reasons.append("mobile")
+            if clean_email and (other.get("email") or "").strip().lower() == clean_email.lower():
+                reasons.append("email")
+
+            holders.append({
+                "_id": str(other["_id"]),
+                "name": other.get("name"),
+                "email": other.get("email"),
+                "phone": other_phone or str(other.get("phone") or ""),
+                "role": other.get("role"),
+                "status": other.get("status"),
+                "customer_id": other.get("customer_id"),
+                "customer_name": other.get("customer_name"),
+                # A login already on THIS customer is still a blocker, but it is
+                # a different conversation than someone else's account.
+                "same_customer": other.get("customer_id") == contact_id,
+                "conflict_on": reasons,
+            })
+
+    return {
+        "phone": resolved,
+        "available": resolved["valid"] and not holders,
+        "conflicts": holders,
+    }
+
+
 @router.post("/customer-login/{contact_id}")
 def create_customer_login_for_customer(contact_id: str, payload: dict = Body(...)):
     """
     Create a customer login straight from the customer record. Password is
     optional — omit it for an OTP-only account.
+
+    A customer may hold several logins (one per number/contact person); the only
+    hard rule is that a mobile is never shared between two accounts, since OTP
+    sign-in resolves purely by number.
     """
     customer = db.customers.find_one({"contact_id": contact_id})
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
-
-    if db.users.find_one({"customer_id": contact_id, "role": "customer"}):
-        raise HTTPException(status_code=409, detail="A login already exists for this customer")
 
     # The mobile is the only hard requirement: it is what OTP login runs on.
     # Email and password are both optional — without them the account is
@@ -448,11 +505,27 @@ def create_customer_login_for_customer(contact_id: str, payload: dict = Body(...
             detail="An email is needed to set a password — leave the password blank for OTP-only login",
         )
 
-    # A second account on the same number would make OTP login ambiguous.
-    if db.users.find_one({"phone": int(resolved["phone"])}):
+    # A second account on the same number would make OTP login ambiguous — this
+    # holds even when the other account belongs to this same customer.
+    existing_on_phone = db.users.find_one(
+        {"$or": [{"phone": int(resolved["phone"])}, {"phone": resolved["phone"]}]},
+        {"name": 1, "email": 1, "customer_id": 1, "customer_name": 1},
+    )
+    if existing_on_phone:
+        owner = (
+            existing_on_phone.get("name")
+            or existing_on_phone.get("email")
+            or existing_on_phone.get("customer_name")
+            or "another account"
+        )
+        where = (
+            "already a login on this customer"
+            if existing_on_phone.get("customer_id") == contact_id
+            else "linked to a different account"
+        )
         raise HTTPException(
             status_code=409,
-            detail="Another account already uses this mobile number",
+            detail=f"{resolved['phone']} is {where} ({owner}). Use a different mobile number.",
         )
 
     name = (
