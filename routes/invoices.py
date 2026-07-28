@@ -453,13 +453,22 @@ async def download_pdf_by_zoho_id(zoho_invoice_id: str):
 @router.get("/download_pdf/{invoice_id}")
 async def download_pdf(invoice_id: str = ""):
     try:
-        # Check if the order exists in the database
-        invoice = db.invoices.find_one({"_id": ObjectId(invoice_id)})
-        if invoice is None:
-            raise HTTPException(status_code=404, detail="Invoice Not Found")
+        # Callers pass either the Mongo _id or the Zoho invoice_id (the customer
+        # payments page sends the Zoho id from the payment's invoice list), so
+        # accept both instead of blowing up on ObjectId() with a non-hex string.
+        if ObjectId.is_valid(invoice_id):
+            invoice = db.invoices.find_one({"_id": ObjectId(invoice_id)})
+        else:
+            invoice = db.invoices.find_one({"invoice_id": invoice_id})
 
-        # Get the invoice_id and make the request to Zoho
-        invoice_id = invoice.get("invoice_id", "")
+        if invoice is None:
+            # Not stored locally, but a Zoho-looking id can still be fetched
+            # straight from Zoho.
+            if ObjectId.is_valid(invoice_id):
+                raise HTTPException(status_code=404, detail="Invoice Not Found")
+        else:
+            invoice_id = invoice.get("invoice_id", "") or invoice_id
+
         headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
         response = requests.get(
             url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=invoice_id),
