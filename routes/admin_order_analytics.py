@@ -810,8 +810,9 @@ def _periods_rows(data):
             p["finalisedOrders"],
             p["paidOrders"],
             (
-                round(100 * p["finalisedOrders"] / p["estimateOrders"], 1)
-                if p["estimateOrders"]
+                # Fulfilment is value-based: invoiced amount / estimate amount.
+                round(100 * p["finalisedValue"] / p["estimateValue"], 1)
+                if p["estimateValue"]
                 else 0
             ),
             p["customerCreatedOrders"],
@@ -834,7 +835,7 @@ _PERIODS_HEADERS = [
     "Estimates Created",
     "Finalised (Invoiced)",
     "Paid",
-    "Fulfilment %",
+    "Fulfilment % (value)",
     "Created by Customers",
     "Finalised by Customers",
     "Created by Salespeople",
