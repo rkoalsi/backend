@@ -2864,11 +2864,14 @@ def process_bank_transaction_data(txn: dict, account: dict = None) -> dict:
     if account and not txn.get("account_name"):
         txn["account_name"] = account.get("account_name")
 
-    # `amount` is unsigned; debit_or_credit carries the direction.
+    # `amount` is unsigned; debit_or_credit carries the direction. Zoho follows
+    # the ledger convention where a DEBIT increases a bank account, so a debit
+    # is cash IN (positive) and a credit is cash OUT (negative). Verified
+    # against running_balance: a debit customer_payment moves the balance up.
     try:
         amount = float(txn.get("amount") or 0)
         txn["signed_amount"] = (
-            -amount if txn.get("debit_or_credit") == "debit" else amount
+            amount if txn.get("debit_or_credit") == "debit" else -amount
         )
     except (TypeError, ValueError):
         txn["signed_amount"] = 0.0

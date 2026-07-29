@@ -2441,11 +2441,13 @@ def handle_bank_transaction(data: dict, txn_type: str = ""):
             if isinstance(parsed_dt, datetime.datetime):
                 sorted_data["created_time"] = parsed_dt
 
-        # `amount` is unsigned; debit_or_credit carries the direction.
+        # `amount` is unsigned; debit_or_credit carries the direction. Zoho
+        # follows the ledger convention where a DEBIT increases a bank account,
+        # so a debit is cash IN (positive) and a credit is cash OUT (negative).
         try:
             amount = float(sorted_data.get("amount") or 0)
             sorted_data["signed_amount"] = (
-                -amount if sorted_data.get("debit_or_credit") == "debit" else amount
+                amount if sorted_data.get("debit_or_credit") == "debit" else -amount
             )
         except (TypeError, ValueError):
             sorted_data["signed_amount"] = 0.0
