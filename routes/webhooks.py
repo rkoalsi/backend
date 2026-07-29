@@ -31,6 +31,26 @@ org_id = os.getenv("ORG_ID")
 collection = db["products"]
 
 _access_token_cache = {"token": None, "expires_at": None}
+# Separate cache for the BOOKS token (the one above holds an Inventory token).
+_books_token_cache = {"token": None, "expires_at": None}
+
+
+def get_cached_books_token():
+    """Books access token with a 1h cache.
+
+    Banking lives in Books, and a single bank-transaction webhook makes several
+    Books calls — without this, each one re-authenticates.
+    """
+    global _books_token_cache
+    now = datetime.datetime.utcnow()
+    if (
+        not _books_token_cache["token"]
+        or not _books_token_cache["expires_at"]
+        or _books_token_cache["expires_at"] < now
+    ):
+        _books_token_cache["token"] = get_access_token("books")
+        _books_token_cache["expires_at"] = now + datetime.timedelta(minutes=50)
+    return _books_token_cache["token"]
 
 update_stock_lock = threading.Lock()
 
@@ -2203,13 +2223,12 @@ _BANK_TXN_FOREIGN_ID_FIELDS = {
 def _extract_bank_transaction(data: dict, txn_type: str = ""):
     """Pull the entity and its id out of a Banking webhook body.
 
-    Zoho names BOTH the wrapper key and the id field after the transaction
-    TYPE, not after the module — a Card Payment rule posts
-    {"card_payment": {"card_payment_id": ...}}, so neither name can be
-    hardcoded. When the caller knows the type (it is in the URL path) we use it
-    directly; otherwise we take the single dict-valued wrapper and look for the
-    id as: transaction_id -> <wrapper>_id -> the only remaining non-foreign
-    *_id.
+    Every Banking rule observed live (Card Payment, Transfer Fund) posts
+    {"banktransaction": {... "transaction_id" ...}}, which the first branch
+    below handles. The rest is insurance for unobserved types, in case any of
+    them name the wrapper and id field after the type instead: we take the
+    single dict-valued wrapper and look for the id as
+    transaction_id -> <wrapper>_id -> the only remaining non-foreign *_id.
 
     Returns (entity, candidate_id, wrapper_key).
     """
@@ -2263,9 +2282,7 @@ def _resolve_bank_transaction_id(candidate_id: str):
     Returns (canonical_transaction_id, detail_dict) or (None, None).
     """
     try:
-        # Banking lives in Books — get_cached_access_token() hands back the
-        # INVENTORY token, which 401s here.
-        access_token = get_access_token("books")
+        access_token = get_cached_books_token()
         url = (
             f"https://www.zohoapis.com/books/v3/banktransactions/{candidate_id}"
             f"?organization_id={org_id}"
@@ -2303,7 +2320,7 @@ def _fetch_bank_transaction_row(account_id: str, transaction_id: str, txn_date):
         return None
 
     try:
-        access_token = get_access_token("books")
+        access_token = get_cached_books_token()
         url = (
             f"https://www.zohoapis.com/books/v3/banktransactions"
             f"?account_id={account_id}"
@@ -2328,11 +2345,15 @@ def _fetch_bank_transaction_row(account_id: str, transaction_id: str, txn_date):
 def handle_bank_transaction(data: dict, txn_type: str = ""):
     """Create/update webhook for a Zoho Books bank transaction.
 
-    Zoho only lets ONE transaction type be selected per webhook rule, and each
-    type posts a DIFFERENT payload shape (a Card Payment rule sends
-    {"card_payment": {"card_payment_id": ...}}). Point every rule at
-    /bank_transaction/<type> so the type is known up front; the bare
-    /bank_transaction still works by inferring it.
+    Zoho only lets ONE transaction type be selected per webhook rule, so point
+    one rule per type here. VERIFIED against live Card Payment and Transfer
+    Fund rules: both post the SAME shape — {"banktransaction": {...}} carrying
+    the detail view, with a plain `transaction_id`. The per-type extraction
+    below is kept only as insurance for types not yet observed.
+
+    The payload is the DETAIL view, so it has from_account_id / to_account_id
+    but none of the per-account fields (debit_or_credit, running_balance,
+    status, source) — those are read back per side from the list view.
 
     Types the Banking module cannot webhook at all (customer_payment,
     vendor_payment, expense, journal, opening_balance) are covered by
@@ -2350,22 +2371,28 @@ def handle_bank_transaction(data: dict, txn_type: str = ""):
         )
         return
 
-    # Never key on the webhook's own id field without confirming it belongs to
-    # the banktransactions id space — otherwise we duplicate existing rows.
-    transaction_id, detail = _resolve_bank_transaction_id(candidate_id)
-    if not transaction_id:
-        print(
-            f"Bank transaction id {candidate_id} (wrapper={wrapper_key!r}) did not "
-            f"resolve against the API — skipping write, the daily cron will "
-            f"pick this row up instead"
-        )
-        return
-
-    if detail:
-        # Canonical API row wins; keep any extra webhook-only fields underneath.
-        merged = dict(transaction)
-        merged.update(detail)
-        transaction = merged
+    if transaction.get("transaction_id"):
+        # Observed shape for every real Banking rule so far (card_payment and
+        # transfer_fund both post {"banktransaction": {... "transaction_id" ...}}
+        # carrying the full detail view), so no lookup is needed.
+        transaction_id = str(transaction["transaction_id"])
+    else:
+        # We had to guess the id from a field named after the type. Confirm it
+        # really is a banktransactions id before keying on it, or we would
+        # write a row that duplicates one the backfill already stored.
+        transaction_id, detail = _resolve_bank_transaction_id(candidate_id)
+        if not transaction_id:
+            print(
+                f"Bank transaction id {candidate_id} (wrapper={wrapper_key!r}) did "
+                f"not resolve against the API — skipping write, the daily cron "
+                f"will pick this row up instead"
+            )
+            return
+        if detail:
+            # Canonical API row wins; keep webhook-only fields underneath.
+            merged = dict(transaction)
+            merged.update(detail)
+            transaction = merged
 
     # A transfer between two of your own accounts is ONE transaction_id but TWO
     # ledger entries — one per account, with opposite debit_or_credit and their
