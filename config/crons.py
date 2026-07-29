@@ -6,6 +6,7 @@ from typing import Optional, Dict
 from collections import OrderedDict
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from dateutil.parser import parse as dateutil_parse
+from pymongo import UpdateOne
 
 # Configure logging
 logging.basicConfig(
@@ -2829,6 +2830,385 @@ async def customer_payments_cron():
         )
 
 
+def process_bank_account_data(account_data: dict) -> dict:
+    """Normalise a Zoho bank account before writing it to Mongo."""
+    account_data["account_id"] = str(account_data.get("account_id", ""))
+
+    for field in ("latest_transaction_date", "feeds_last_refresh_date"):
+        if account_data.get(field):
+            parsed = parse_datetime_field(account_data[field])
+            if isinstance(parsed, datetime):
+                account_data[field] = parsed
+
+    return sort_dict_recursively(account_data)
+
+
+def process_bank_transaction_data(txn: dict, account: dict = None) -> dict:
+    """Normalise a Zoho bank transaction before writing it to Mongo."""
+    txn["transaction_id"] = str(txn.get("transaction_id", ""))
+    txn["account_id"] = str(
+        txn.get("account_id", "") or (account or {}).get("account_id", "")
+    )
+
+    # Keep the raw YYYY-MM-DD string AND a real datetime for range queries.
+    if txn.get("date"):
+        parsed = parse_datetime_field(txn["date"])
+        if isinstance(parsed, datetime):
+            txn["transaction_date"] = parsed
+
+    if txn.get("created_time"):
+        parsed = parse_datetime_field(txn["created_time"])
+        if isinstance(parsed, datetime):
+            txn["created_time"] = parsed
+
+    if account and not txn.get("account_name"):
+        txn["account_name"] = account.get("account_name")
+
+    # `amount` is unsigned; debit_or_credit carries the direction.
+    try:
+        amount = float(txn.get("amount") or 0)
+        txn["signed_amount"] = (
+            -amount if txn.get("debit_or_credit") == "debit" else amount
+        )
+    except (TypeError, ValueError):
+        txn["signed_amount"] = 0.0
+
+    return sort_dict_recursively(txn)
+
+
+async def _fetch_all_bank_accounts(api_client) -> list:
+    """Walk every page of /bankaccounts. Returns the raw list-view rows.
+    Zoho returns inactive/archived accounts here too."""
+    accounts = []
+    page = 1
+
+    while True:
+        url = (
+            f"https://www.zohoapis.com/books/v3/bankaccounts?"
+            f"page={page}&per_page=200&organization_id={org_id}"
+        )
+        data = await api_client.make_request(url)
+        if not data or "bankaccounts" not in data:
+            break
+
+        accounts.extend(data["bankaccounts"])
+        if not data.get("page_context", {}).get("has_more_page"):
+            break
+        page += 1
+
+    return accounts
+
+
+async def bank_accounts_cron():
+    """Daily sync of Zoho bank accounts.
+
+    Accounts are few (~16) and cheap to fetch, so we pull every one of them and
+    upsert on account_id. This is what auto-detects a NEW bank account being
+    added in Zoho — bank_transactions_cron then picks up its transactions.
+    """
+    logger.info("🚀 Starting daily bank accounts sync...")
+    start_time = time.time()
+
+    try:
+        db = get_database()
+        collection = db["bank_accounts"]
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            accounts = await _fetch_all_bank_accounts(api_client)
+            if not accounts:
+                logger.warning("No bank accounts returned from Zoho")
+                send_slack_notification(
+                    "Bank Accounts Cron",
+                    success=False,
+                    error_msg="Zoho returned no bank accounts",
+                )
+                return
+
+            logger.info(f"Found {len(accounts)} bank accounts in Zoho")
+
+            known_ids = {
+                doc["account_id"]
+                for doc in collection.find({}, {"account_id": 1, "_id": 0})
+            }
+
+            # Accounts are few, so always enrich with the detail view.
+            detail_urls = [
+                f"https://www.zohoapis.com/books/v3/bankaccounts/"
+                f"{str(a['account_id'])}?organization_id={org_id}"
+                for a in accounts
+            ]
+            details = await asyncio.gather(
+                *[api_client.make_request(u) for u in detail_urls],
+                return_exceptions=True,
+            )
+
+            operations = []
+            new_accounts = []
+            now = datetime.now()
+
+            for account, detail in zip(accounts, details):
+                try:
+                    merged = dict(account)
+                    if isinstance(detail, dict) and "bankaccount" in detail:
+                        merged.update(detail["bankaccount"])
+
+                    doc = process_bank_account_data(merged)
+                    account_id = doc["account_id"]
+                    if not account_id:
+                        continue
+
+                    if account_id not in known_ids:
+                        new_accounts.append(doc.get("account_name", account_id))
+
+                    doc["updated_at"] = now
+                    doc["synced_at"] = now
+
+                    operations.append(
+                        UpdateOne(
+                            {"account_id": account_id},
+                            {"$set": doc, "$setOnInsert": {"created_at": now}},
+                            upsert=True,
+                        )
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error processing bank account {account.get('account_id')}: {e}"
+                    )
+
+            upserted = modified = 0
+            if operations:
+                result = collection.bulk_write(operations, ordered=False)
+                upserted = result.upserted_count
+                modified = result.modified_count
+
+            if new_accounts:
+                logger.info(f"🆕 New bank accounts detected: {new_accounts}")
+
+            # Zoho has NO webhook for bank accounts, so this cron is the only
+            # thing that can notice an account disappearing. We flag rather
+            # than delete — dropping an account would orphan its transactions,
+            # and a transient partial API response must never destroy data.
+            live_ids = {
+                str(a["account_id"]) for a in accounts if a.get("account_id")
+            }
+            vanished = known_ids - live_ids
+            if vanished:
+                logger.warning(
+                    f"⚠️  {len(vanished)} bank account(s) no longer in Zoho: {vanished}"
+                )
+                collection.update_many(
+                    {"account_id": {"$in": list(vanished)}},
+                    {"$set": {"deleted_in_zoho": True, "deleted_detected_at": now}},
+                )
+            # Un-flag anything that came back (e.g. after a partial API run).
+            collection.update_many(
+                {"account_id": {"$in": list(live_ids)}, "deleted_in_zoho": True},
+                {"$unset": {"deleted_in_zoho": "", "deleted_detected_at": ""}},
+            )
+
+            logger.info(
+                f"✅ bank_accounts: {upserted} inserted, {modified} updated, "
+                f"{len(vanished)} flagged deleted"
+            )
+
+        duration = time.time() - start_time
+        send_slack_notification(
+            "Bank Accounts Cron",
+            success=True,
+            details={
+                "total_accounts": len(accounts),
+                "inserted": upserted,
+                "updated": modified,
+                "new_accounts": ", ".join(new_accounts) if new_accounts else "none",
+                "flagged_deleted": len(vanished),
+                "duration": duration,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error in bank accounts sync: {e}")
+        send_slack_notification(
+            "Bank Accounts Cron Error", success=False, error_msg=str(e)
+        )
+
+
+# How far back the daily transaction sync looks. Bank feeds and CSV imports
+# routinely backdate rows, so a single day is not enough.
+BANK_TXN_LOOKBACK_DAYS = 30
+
+
+async def _fetch_bank_txn_window(
+    api_client, account_id: str, window_start, window_end
+) -> dict:
+    """All transactions for an account in a date window, keyed by
+    transaction_id.
+
+    date_start and date_end must be sent TOGETHER or Zoho ignores both — each
+    on its own is silently dropped and you get an unfiltered result.
+    """
+    collected = {}
+    page = 1
+
+    while True:
+        url = (
+            f"https://www.zohoapis.com/books/v3/banktransactions?"
+            f"account_id={account_id}&"
+            f"date_start={window_start}&date_end={window_end}&"
+            f"page={page}&per_page=200&"
+            f"sort_column=date&sort_order=A&"
+            f"organization_id={org_id}"
+        )
+        data = await api_client.make_request(url)
+        if not data or "banktransactions" not in data:
+            break
+
+        for t in data["banktransactions"]:
+            collected[str(t["transaction_id"])] = t
+
+        if not data.get("page_context", {}).get("has_more_page"):
+            break
+        page += 1
+
+    return collected
+
+
+async def bank_transactions_cron():
+    """Daily sync of Zoho bank transactions for every known account.
+
+    Design constraints found in the Zoho API:
+      * /banktransactions has NO `last_modified_time` field and no `total` in
+        page_context, so we cannot do modified-time deltas or precompute pages.
+      * `date_after` / `date_start` alone are SILENTLY IGNORED — only
+        `date_start` AND `date_end` together filter. So we sync a rolling
+        window of the last BANK_TXN_LOOKBACK_DAYS days and upsert on
+        transaction_id, which also repairs rows edited inside the window.
+      * Accounts are discovered from Zoho directly (not from Mongo) so a bank
+        account added since the last run is picked up automatically.
+    """
+    logger.info("🚀 Starting daily bank transactions sync...")
+    start_time = time.time()
+
+    total_fetched = 0
+    total_inserted = 0
+    total_updated = 0
+    total_errors = 0
+    per_account_summary = []
+
+    try:
+        db = get_database()
+        collection = db["bank_transactions"]
+
+        date_end = datetime.now().date()
+        date_start = date_end - timedelta(days=BANK_TXN_LOOKBACK_DAYS)
+        logger.info(f"Window: {date_start} .. {date_end}")
+
+        async with ZohoAPIClient("books") as api_client:
+            if not api_client.access_token:
+                logger.error("Failed to get access token")
+                return
+
+            accounts = await _fetch_all_bank_accounts(api_client)
+            if not accounts:
+                logger.warning("No bank accounts returned from Zoho")
+                return
+
+            logger.info(f"Syncing transactions for {len(accounts)} accounts")
+
+            for account in accounts:
+                account_id = str(account["account_id"])
+                account_name = account.get("account_name", account_id)
+                acc_inserted = 0
+                acc_updated = 0
+
+                collected = await _fetch_bank_txn_window(
+                    api_client, account_id, date_start, date_end
+                )
+                txns = list(collected.values())
+                acc_fetched = len(txns)
+
+                operations = []
+                now = datetime.now()
+
+                for txn in txns:
+                    try:
+                        doc = process_bank_transaction_data(dict(txn), account)
+                        transaction_id = doc["transaction_id"]
+                        if not transaction_id:
+                            total_errors += 1
+                            continue
+
+                        doc["updated_at"] = now
+                        doc["synced_at"] = now
+
+                        # Keyed on BOTH ids: a transfer_fund shares one
+                        # transaction_id across two accounts as two separate
+                        # ledger entries, so account_id is part of its identity.
+                        operations.append(
+                            UpdateOne(
+                                {
+                                    "transaction_id": transaction_id,
+                                    "account_id": doc["account_id"],
+                                },
+                                {"$set": doc, "$setOnInsert": {"created_at": now}},
+                                upsert=True,
+                            )
+                        )
+                    except Exception as e:
+                        logger.error(f"Error processing bank transaction: {e}")
+                        total_errors += 1
+
+                if operations:
+                    try:
+                        result = collection.bulk_write(operations, ordered=False)
+                        acc_inserted += result.upserted_count
+                        acc_updated += result.modified_count
+                    except Exception as e:
+                        logger.error(f"bulk_write failed for {account_name}: {e}")
+                        total_errors += len(operations)
+
+                total_fetched += acc_fetched
+                total_inserted += acc_inserted
+                total_updated += acc_updated
+
+                if acc_fetched:
+                    logger.info(
+                        f"  {account_name}: {acc_fetched} fetched, "
+                        f"{acc_inserted} new, {acc_updated} updated"
+                    )
+                    per_account_summary.append(
+                        f"{account_name}: +{acc_inserted}/~{acc_updated}"
+                    )
+
+        duration = time.time() - start_time
+        logger.info(
+            f"✅ bank_transactions: {total_fetched} fetched, "
+            f"{total_inserted} inserted, {total_updated} updated, "
+            f"{total_errors} errors"
+        )
+
+        send_slack_notification(
+            "Bank Transactions Cron",
+            success=True,
+            details={
+                "window_days": BANK_TXN_LOOKBACK_DAYS,
+                "fetched": total_fetched,
+                "inserted": total_inserted,
+                "updated": total_updated,
+                "errors": total_errors,
+                "accounts": ", ".join(per_account_summary) or "no activity",
+                "duration": duration,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error in bank transactions sync: {e}")
+        send_slack_notification(
+            "Bank Transactions Cron Error", success=False, error_msg=str(e)
+        )
+
+
 def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
     """Setup all cron jobs with the provided scheduler."""
     try:
@@ -2979,6 +3359,34 @@ def setup_cron_jobs(scheduler_instance: AsyncIOScheduler):
             max_instances=1,
         )
         logger.info("Added inventory_adjustments_cron job")
+
+        scheduler_instance.add_job(
+            bank_accounts_cron,
+            "cron",
+            hour=18,
+            minute=0,
+            id="bank_accounts_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added bank_accounts_cron job")
+
+        # Runs after bank_accounts_cron so a newly discovered account already
+        # exists in Mongo by the time its transactions land.
+        scheduler_instance.add_job(
+            bank_transactions_cron,
+            "cron",
+            hour=18,
+            minute=15,
+            id="bank_transactions_cron",
+            replace_existing=True,
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Added bank_transactions_cron job")
 
         logger.info(
             f"✅ {len(scheduler_instance.get_jobs())} cron jobs set up successfully"
