@@ -2094,6 +2094,401 @@ def handle_delete_credit_note(data: dict):
         print("No creditnote_id found in delete webhook")
 
 
+def _unwrap_payload(data: dict, keys: tuple, id_field: str) -> dict:
+    """Pull the entity out of a Zoho webhook body.
+
+    Zoho is inconsistent about the wrapper key across modules, and the Banking
+    module sometimes posts the entity unwrapped at the top level. Try each
+    known wrapper, then fall back to the body itself if it looks like the
+    entity (i.e. it carries the id field).
+    """
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, dict) and value:
+            return value
+
+    if data.get(id_field):
+        return data
+
+    return {}
+
+
+def handle_bank_account(data: dict):
+    """Create/update webhook for a Zoho Books bank account."""
+    bankaccount = _unwrap_payload(
+        data, ("bankaccount", "bank_account", "account"), "account_id"
+    )
+    if not bankaccount:
+        print("No bank account data found in webhook")
+        return
+
+    account_id = str(bankaccount.get("account_id", ""))
+    if not account_id:
+        print("Account ID not found. Bank Account Webhook Received")
+        return
+
+    sorted_data = sort_dict_keys(bankaccount)
+    sorted_data["account_id"] = account_id
+    current_time = datetime.datetime.now()
+
+    for field in ("latest_transaction_date", "feeds_last_refresh_date"):
+        if sorted_data.get(field):
+            parsed_dt = parse_datetime(sorted_data[field])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data[field] = parsed_dt
+
+    sorted_data["updated_at"] = current_time
+
+    result = db.bank_accounts.update_one(
+        {"account_id": account_id},
+        {"$set": sorted_data, "$setOnInsert": {"created_at": current_time}},
+        upsert=True,
+    )
+
+    if result.upserted_id:
+        print(f"Created new bank account with account_id {account_id}")
+    else:
+        print(f"Updated bank account with account_id {account_id}")
+
+
+def handle_delete_bank_account(data: dict):
+    """Delete webhook for a Zoho Books bank account.
+
+    Also removes that account's transactions — Zoho does not fire a per-row
+    delete webhook for the transactions of a deleted account.
+    """
+    bankaccount = _unwrap_payload(
+        data, ("bankaccount", "bank_account", "account"), "account_id"
+    )
+    account_id = str(bankaccount.get("account_id", ""))
+
+    if not account_id:
+        print("No account_id found in delete webhook")
+        return
+
+    result = db.bank_accounts.delete_one({"account_id": account_id})
+    txn_result = db.bank_transactions.delete_many({"account_id": account_id})
+    print(
+        f"Deleted bank account {account_id}: {result.deleted_count} document(s) removed, "
+        f"{txn_result.deleted_count} transaction(s) removed"
+    )
+
+
+# Foreign keys that must never be mistaken for the row's own primary key when
+# we go hunting for the id in an unknown payload shape.
+_BANK_TXN_FOREIGN_ID_FIELDS = {
+    "account_id",
+    "from_account_id",
+    "to_account_id",
+    "offset_account_id",
+    "customer_id",
+    "vendor_id",
+    "contact_id",
+    "currency_id",
+    "branch_id",
+    "from_branch_id",
+    "to_branch_id",
+    "location_id",
+    "from_location_id",
+    "to_location_id",
+    "imported_transaction_id",
+    "rule_id",
+    "tax_id",
+    "user_id",
+    "organization_id",
+    "paid_through_account_id",
+}
+
+
+def _extract_bank_transaction(data: dict, txn_type: str = ""):
+    """Pull the entity and its id out of a Banking webhook body.
+
+    Zoho names BOTH the wrapper key and the id field after the transaction
+    TYPE, not after the module — a Card Payment rule posts
+    {"card_payment": {"card_payment_id": ...}}, so neither name can be
+    hardcoded. When the caller knows the type (it is in the URL path) we use it
+    directly; otherwise we take the single dict-valued wrapper and look for the
+    id as: transaction_id -> <wrapper>_id -> the only remaining non-foreign
+    *_id.
+
+    Returns (entity, candidate_id, wrapper_key).
+    """
+    entity, wrapper_key = None, None
+
+    # The type from the URL is authoritative when the payload agrees with it.
+    if txn_type and isinstance(data.get(txn_type), dict) and data[txn_type]:
+        entity, wrapper_key = data[txn_type], txn_type
+
+    if entity is None:
+        for key, value in data.items():
+            if isinstance(value, dict) and value:
+                entity, wrapper_key = value, key
+                break
+
+    if entity is None:
+        # Possibly posted unwrapped at the top level.
+        if any(k.endswith("_id") for k in data):
+            entity = data
+        else:
+            return {}, "", ""
+
+    if entity.get("transaction_id"):
+        return entity, str(entity["transaction_id"]), wrapper_key or txn_type or ""
+
+    for key in filter(None, (wrapper_key, txn_type)):
+        if entity.get(f"{key}_id"):
+            return entity, str(entity[f"{key}_id"]), key
+
+    candidates = [
+        k
+        for k, v in entity.items()
+        if k.endswith("_id") and k not in _BANK_TXN_FOREIGN_ID_FIELDS and v
+    ]
+    if len(candidates) == 1:
+        return entity, str(entity[candidates[0]]), wrapper_key or ""
+
+    return entity, "", wrapper_key or txn_type or ""
+
+
+def _resolve_bank_transaction_id(candidate_id: str):
+    """Confirm an id really is a banktransaction id, and return the canonical
+    row from the API.
+
+    A Card Payment webhook sends `card_payment_id`. Whether that is the same
+    value as the API's `transaction_id` is NOT documented, and guessing wrong
+    would key a duplicate document alongside the one the backfill stored. So
+    we ask the API: if GET /banktransactions/{id} resolves, the id is genuine
+    and we take the canonical row from the response.
+
+    Returns (canonical_transaction_id, detail_dict) or (None, None).
+    """
+    try:
+        # Banking lives in Books — get_cached_access_token() hands back the
+        # INVENTORY token, which 401s here.
+        access_token = get_access_token("books")
+        url = (
+            f"https://www.zohoapis.com/books/v3/banktransactions/{candidate_id}"
+            f"?organization_id={org_id}"
+        )
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+            timeout=20,
+        )
+        if response.status_code == 200:
+            detail = response.json().get("banktransaction") or {}
+            resolved = str(detail.get("transaction_id") or "")
+            if resolved:
+                return resolved, detail
+        else:
+            print(
+                f"Could not resolve bank transaction {candidate_id}: "
+                f"{response.status_code}"
+            )
+    except Exception as e:
+        print(f"Error resolving bank transaction {candidate_id}: {e}")
+
+    return None, None
+
+
+def _fetch_bank_transaction_row(account_id: str, transaction_id: str, txn_date):
+    """Read one account's LIST-view row for a transaction.
+
+    The detail endpoint has no per-account fields — debit_or_credit,
+    running_balance, status, source and offset_account_name only exist in the
+    list view, and differ for each side of a transfer. date_start and date_end
+    must be sent together or Zoho ignores both.
+    """
+    if not txn_date:
+        return None
+
+    try:
+        access_token = get_access_token("books")
+        url = (
+            f"https://www.zohoapis.com/books/v3/banktransactions"
+            f"?account_id={account_id}"
+            f"&date_start={txn_date}&date_end={txn_date}"
+            f"&per_page=200&organization_id={org_id}"
+        )
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
+            timeout=20,
+        )
+        if response.status_code == 200:
+            for row in response.json().get("banktransactions", []) or []:
+                if str(row.get("transaction_id")) == str(transaction_id):
+                    return row
+    except Exception as e:
+        print(f"Error reading list view for {transaction_id}/{account_id}: {e}")
+
+    return None
+
+
+def handle_bank_transaction(data: dict, txn_type: str = ""):
+    """Create/update webhook for a Zoho Books bank transaction.
+
+    Zoho only lets ONE transaction type be selected per webhook rule, and each
+    type posts a DIFFERENT payload shape (a Card Payment rule sends
+    {"card_payment": {"card_payment_id": ...}}). Point every rule at
+    /bank_transaction/<type> so the type is known up front; the bare
+    /bank_transaction still works by inferring it.
+
+    Types the Banking module cannot webhook at all (customer_payment,
+    vendor_payment, expense, journal, opening_balance) are covered by
+    bank_transactions_cron's rolling window instead.
+    """
+    transaction, candidate_id, wrapper_key = _extract_bank_transaction(data, txn_type)
+    if not transaction:
+        print("No bank transaction data found in webhook")
+        return
+
+    if not candidate_id:
+        print(
+            f"Could not find a transaction id in bank transaction webhook "
+            f"(wrapper={wrapper_key!r}, keys={sorted(transaction)})"
+        )
+        return
+
+    # Never key on the webhook's own id field without confirming it belongs to
+    # the banktransactions id space — otherwise we duplicate existing rows.
+    transaction_id, detail = _resolve_bank_transaction_id(candidate_id)
+    if not transaction_id:
+        print(
+            f"Bank transaction id {candidate_id} (wrapper={wrapper_key!r}) did not "
+            f"resolve against the API — skipping write, the daily cron will "
+            f"pick this row up instead"
+        )
+        return
+
+    if detail:
+        # Canonical API row wins; keep any extra webhook-only fields underneath.
+        merged = dict(transaction)
+        merged.update(detail)
+        transaction = merged
+
+    # A transfer between two of your own accounts is ONE transaction_id but TWO
+    # ledger entries — one per account, with opposite debit_or_credit and their
+    # own running_balance. Re-read each side from the list view so the rows
+    # match exactly what the backfill and the cron would have written.
+    affected_accounts = [
+        str(a)
+        for a in (
+            transaction.get("account_id"),
+            transaction.get("from_account_id"),
+            transaction.get("to_account_id"),
+        )
+        if a
+    ]
+    # dedupe, preserve order
+    affected_accounts = list(dict.fromkeys(affected_accounts))
+
+    if not affected_accounts:
+        print(f"No account could be determined for bank transaction {transaction_id}")
+        return
+
+    written = 0
+    for account_id in affected_accounts:
+        row = _fetch_bank_transaction_row(
+            account_id, transaction_id, transaction.get("date")
+        )
+        # Fall back to the detail payload if the list view can't be read; the
+        # daily cron will fill in the per-side fields within a day.
+        source = dict(transaction)
+        if row:
+            source.update(row)
+
+        sorted_data = sort_dict_keys(source)
+        sorted_data["transaction_id"] = transaction_id
+        sorted_data["account_id"] = account_id
+
+        current_time = datetime.datetime.now()
+
+        if sorted_data.get("date"):
+            parsed_dt = parse_datetime(sorted_data["date"])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data["transaction_date"] = parsed_dt
+
+        if sorted_data.get("created_time"):
+            parsed_dt = parse_datetime(sorted_data["created_time"])
+            if isinstance(parsed_dt, datetime.datetime):
+                sorted_data["created_time"] = parsed_dt
+
+        # `amount` is unsigned; debit_or_credit carries the direction.
+        try:
+            amount = float(sorted_data.get("amount") or 0)
+            sorted_data["signed_amount"] = (
+                -amount if sorted_data.get("debit_or_credit") == "debit" else amount
+            )
+        except (TypeError, ValueError):
+            sorted_data["signed_amount"] = 0.0
+
+        # Denormalise the account name so reports don't need a $lookup.
+        if not sorted_data.get("account_name"):
+            account = db.bank_accounts.find_one(
+                {"account_id": account_id}, {"account_name": 1}
+            )
+            if account:
+                sorted_data["account_name"] = account.get("account_name")
+
+        sorted_data["updated_at"] = current_time
+
+        result = db.bank_transactions.update_one(
+            {"transaction_id": transaction_id, "account_id": account_id},
+            {"$set": sorted_data, "$setOnInsert": {"created_at": current_time}},
+            upsert=True,
+        )
+        written += 1
+        verb = "Created" if result.upserted_id else "Updated"
+        print(
+            f"{verb} bank transaction {transaction_id} "
+            f"for account {sorted_data.get('account_name') or account_id}"
+        )
+
+    if written > 1:
+        print(f"  (transfer — wrote {written} ledger entries for {transaction_id})")
+
+
+def handle_delete_bank_transaction(data: dict, txn_type: str = ""):
+    """Delete webhook for a Zoho Books bank transaction."""
+    transaction, candidate_id, wrapper_key = _extract_bank_transaction(data, txn_type)
+
+    if not candidate_id:
+        print(
+            f"No transaction id found in delete webhook "
+            f"(wrapper={wrapper_key!r}, keys={sorted(transaction)})"
+        )
+        return
+
+    # The row is already gone from Zoho, so we cannot resolve the id against
+    # the API the way the create/update path does — we have to trust it. Match
+    # on imported_transaction_id too, since that is the other id the Banking
+    # module is known to expose for the same row.
+    # delete_MANY: a transfer is stored once per account, so one deletion in
+    # Zoho must remove both ledger entries.
+    result = db.bank_transactions.delete_many(
+        {
+            "$or": [
+                {"transaction_id": candidate_id},
+                {"imported_transaction_id": candidate_id},
+            ]
+        }
+    )
+
+    if result.deleted_count:
+        print(
+            f"Deleted bank transaction {candidate_id}: "
+            f"{result.deleted_count} document(s) removed"
+        )
+    else:
+        # Not an error: the row may predate the backfill window, or the id may
+        # be in a different id space than transaction_id.
+        print(
+            f"Delete webhook for bank transaction {candidate_id} "
+            f"(wrapper={wrapper_key!r}) matched no stored document"
+        )
+
+
 def handle_sales_order(data: dict):
     salesorder = data.get("salesorder")
     if not salesorder:
@@ -2544,6 +2939,87 @@ def delete_customer(data: dict):
 def delete_credit_note(data: dict):
     handle_delete_credit_note(data)
     return "Delete Credit Note Webhook Received Successfully"
+
+
+@router.post("/bank_account")
+def bank_account(data: dict):
+    _dump_bank_payload("bank_account", data)
+    handle_bank_account(data)
+    return "Bank Account Webhook Received Successfully"
+
+
+@router.post("/delete_bank_account")
+def delete_bank_account(data: dict):
+    _dump_bank_payload("delete_bank_account", data)
+    handle_delete_bank_account(data)
+    return "Delete Bank Account Webhook Received Successfully"
+
+
+# The Banking module only allows ONE transaction type per webhook rule, so
+# point each rule at its own typed URL. All 9 share one implementation; the
+# path segment just tells the handler which payload shape to expect.
+#   /bank_transaction/transfer_fund        /bank_transaction/card_payment
+#   /bank_transaction/owner_drawings       /bank_transaction/deposit
+#   /bank_transaction/owner_contribution   /bank_transaction/expense_refund
+#   /bank_transaction/other_income         /bank_transaction/interest_income
+#   /bank_transaction/refund_credit
+# ...and the same list again under /delete_bank_transaction/<type>.
+def _dump_bank_payload(label: str, data: dict):
+    """Print the raw, untouched webhook body.
+
+    Zoho names the wrapper and the id field after the transaction TYPE and the
+    shape differs per rule, so log the whole thing verbatim until every type
+    has been seen at least once.
+    """
+    print("\n" + "=" * 78)
+    print(f"RAW ZOHO BANK WEBHOOK — {label}")
+    print("=" * 78)
+    try:
+        print(json.dumps(data, indent=2, default=str, sort_keys=True))
+    except Exception:
+        print(repr(data))
+
+    # The two things we actually need to know, called out explicitly.
+    if isinstance(data, dict):
+        print("-" * 78)
+        print(f"top-level keys : {sorted(data)}")
+        for key, value in data.items():
+            if isinstance(value, dict):
+                id_fields = {
+                    k: v for k, v in value.items() if k.endswith("_id")
+                }
+                print(f"wrapper key    : {key!r}")
+                print(f"  *_id fields  : {json.dumps(id_fields, default=str)}")
+                print(f"  all keys     : {sorted(value)}")
+    print("=" * 78 + "\n")
+
+
+@router.post("/bank_transaction")
+def bank_transaction(data: dict):
+    _dump_bank_payload("bank_transaction (untyped)", data)
+    handle_bank_transaction(data)
+    return "Bank Transaction Webhook Received Successfully"
+
+
+@router.post("/bank_transaction/{txn_type}")
+def bank_transaction_typed(txn_type: str, data: dict):
+    _dump_bank_payload(f"bank_transaction/{txn_type}", data)
+    handle_bank_transaction(data, txn_type)
+    return f"Bank Transaction ({txn_type}) Webhook Received Successfully"
+
+
+@router.post("/delete_bank_transaction")
+def delete_bank_transaction(data: dict):
+    _dump_bank_payload("delete_bank_transaction (untyped)", data)
+    handle_delete_bank_transaction(data)
+    return "Delete Bank Transaction Webhook Received Successfully"
+
+
+@router.post("/delete_bank_transaction/{txn_type}")
+def delete_bank_transaction_typed(txn_type: str, data: dict):
+    _dump_bank_payload(f"delete_bank_transaction/{txn_type}", data)
+    handle_delete_bank_transaction(data, txn_type)
+    return f"Delete Bank Transaction ({txn_type}) Webhook Received Successfully"
 
 
 @router.post("/sales_order")
