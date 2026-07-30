@@ -2864,7 +2864,7 @@ async def upload_image(file: UploadFile = File(...), product_id: str = Form(...)
         file_extension = os.path.splitext(file.filename)[1]
         timestamp = int(time.time() * 1000)  # milliseconds for uniqueness
         unique_filename = (
-            f"product_images/{product.get('item_id')}_{timestamp}{file_extension}"
+            f"product_images/{product['_id']}_{timestamp}{file_extension}"
         )
 
         # Upload the file to S3
@@ -3070,7 +3070,7 @@ async def upload_multiple_images(
             file_extension = os.path.splitext(file.filename)[1]
             timestamp = int(time.time() * 1000)
             unique_filename = (
-                f"product_images/{product.get('item_id')}_{timestamp}_{file.filename}"
+                f"product_images/{product['_id']}_{timestamp}_{file.filename}"
             )
 
             # Upload to S3
@@ -3152,7 +3152,7 @@ async def upload_video(file: UploadFile = File(...), product_id: str = Form(...)
         file_extension = os.path.splitext(file.filename)[1]
         timestamp = int(time.time() * 1000)
         unique_filename = (
-            f"product_videos/{product.get('item_id')}_{timestamp}{file_extension}"
+            f"product_videos/{product['_id']}_{timestamp}{file_extension}"
         )
 
         # Upload the file to S3
@@ -3302,7 +3302,7 @@ async def upload_multiple_videos(
             file_extension = os.path.splitext(file.filename)[1]
             timestamp = int(time.time() * 1000)
             unique_filename = (
-                f"product_videos/{product.get('item_id')}_{timestamp}{file_extension}"
+                f"product_videos/{product['_id']}_{timestamp}{file_extension}"
             )
 
             try:
@@ -3701,7 +3701,7 @@ async def update_product(
                 file_extension = os.path.splitext(file.filename)[1]
                 timestamp = int(time.time() * 1000)
                 unique_filename = (
-                    f"product_images/{existing_product.get('item_id')}_{timestamp}_{file.filename}"
+                    f"product_images/{existing_product['_id']}_{timestamp}_{file.filename}"
                 )
 
                 try:

@@ -567,9 +567,16 @@ def update_stock():
     """
     Update the stock field in active products based on their name (synchronous).
     """
-    # Fetch active products
+    # Fetch active products.
+    # Distributor-owned products are excluded: they are not in Zoho, their stock
+    # is maintained by the brand, and this function matches on NAME — so a name
+    # collision with a Zoho item would silently overwrite what the brand entered.
     try:
-        active_products = list(collection.find({}, {"_id": 1, "name": 1}))
+        active_products = list(
+            collection.find(
+                {"distributor_id": {"$exists": False}}, {"_id": 1, "name": 1}
+            )
+        )
         print(f"Fetched {len(active_products)} active products from the database.")
     except Exception as e:
         print(f"Failed to fetch active products from the database: {e}")

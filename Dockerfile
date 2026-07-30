@@ -10,6 +10,12 @@ COPY . /app/backend
 # Set PYTHONPATH to the parent of the 'backend' directory
 ENV PYTHONPATH=/app
 
+# WeasyPrint renders the estimate and distributor order PDFs. It binds to
+# cairo/pango at runtime, which pip cannot supply.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 libffi-dev shared-mime-info \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ estimate_number }}</title>
+<style>
+  /* Pupscribe brand book: Pink #D92681, Yellow #EDD100, triangle motif.
+     TODO: embed Prompt as @font-face once we have the .ttf — until then this
+     stack keeps metrics close without a network fetch at render time. */
+  :root {
+    --pink: #D92681;
+    --pink-dark: #A81B62;
+    --pink-tint: #FDF4F9;
+    --yellow: #EDD100;
+    --ink: #17151a;
+    --muted: #7a7580;
+    --faint: #a8a3ae;
+    --rule: #e8e4ec;
+    --band: #f8f6f9;
+  }
+
+  @page {
+    size: A4;
+    margin: 13mm 12mm 16mm 12mm;
+    @bottom-left {
+      content: "{{ seller.name }}  ·  {{ seller.website }}";
+      font-family: Helvetica, Arial, sans-serif;
+      font-size: 7pt;
+      color: #b4b0ba;
+      padding-top: 4mm;
+    }
+    @bottom-right {
+      content: "Page " counter(page) " of " counter(pages);
+      font-family: Helvetica, Arial, sans-serif;
+      font-size: 7pt;
+      color: #b4b0ba;
+      padding-top: 4mm;
+    }
+    /* Continuation pages carry the estimate number so a detached page is
+       still identifiable. Suppressed on page 1, which has the full header. */
+    @top-right {
+      content: string(estnum) "  ·  continued";
+      font-family: Helvetica, Arial, sans-serif;
+      font-size: 7pt;
+      color: var(--faint);
+      padding-bottom: 3mm;
+    }
+  }
+  @page :first {
+    @top-right { content: none; }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 8.4pt;
+    color: var(--ink);
+    margin: 0;
+    line-height: 1.42;
+  }
+  /* Every figure in this document is columnar — tabular figures keep the
+     decimal points aligned down each money column. */
+  .num, td.n, .totals td.v { font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  .head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding-bottom: 9px;
+  }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  /* Wordmark is ~4.5:1, so height drives it and width follows */
+  .brand img { height: 26px; width: auto; }
+  .brand-name {
+    font-size: 12.5pt; font-weight: bold; letter-spacing: -0.25px; white-space: nowrap;
+  }
+  .brand-sub { font-size: 7.2pt; color: var(--muted); letter-spacing: 0.15px; }
+
+  .doc-title { text-align: right; white-space: nowrap; padding-left: 12px; }
+  .doc-title h1 {
+    margin: 0;
+    font-size: 20pt;
+    letter-spacing: 4px;
+    color: var(--pink);
+    font-weight: bold;
+    line-height: 1;
+  }
+  .doc-title .num {
+    string-set: estnum content();
+    font-size: 10.5pt; font-weight: bold; margin-top: 4px; letter-spacing: 0.2px;
+  }
+  .doc-title .date { font-size: 8pt; color: var(--muted); margin-top: 1px; }
+  /* Ties the document back to the order record for support queries. Monospaced
+     because a 24-char ObjectId gets copied by hand. */
+  .doc-title .oref {
+    font-size: 6.3pt; color: var(--faint); margin-top: 3px;
+    text-transform: uppercase; letter-spacing: 0.8px;
+  }
+  .doc-title .oref span {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    text-transform: none; letter-spacing: -0.1px; color: var(--muted);
+  }
+
+  /* Triangle motif from the brand book — a run of pink triangles closed by a
+     single yellow one, used instead of a plain rule. */
+  /* A flat two-tone rule reads better at print size than the triangle motif,
+     which turned to visual noise at 6px. */
+  .rule {
+    display: flex; height: 2.5px; margin-bottom: 2px;
+  }
+  .rule .a { flex: 0 0 62%; background: var(--pink); }
+  .rule .b { flex: 1 1 auto; background: var(--yellow); }
+
+  /* ---------- parties ---------- */
+  .parties { display: flex; gap: 14px; margin-top: 13px; }
+  .party { flex: 1; }
+  .party.seller { flex: 0.95; }
+  .party h2 {
+    margin: 0 0 4px;
+    font-size: 6.5pt;
+    text-transform: uppercase;
+    letter-spacing: 1.1px;
+    color: var(--pink);
+    font-weight: bold;
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .party .who { font-weight: bold; font-size: 9.2pt; margin-bottom: 1px; }
+  .party p { margin: 0; color: #4b4753; }
+  .party .gstin {
+    margin-top: 4px; font-size: 7.3pt; color: var(--muted);
+    letter-spacing: 0.2px;
+  }
+  .party .gstin b { color: var(--ink); letter-spacing: 0.3px; }
+
+  /* ---------- meta strip ---------- */
+  .meta {
+    display: flex;
+    margin-top: 13px;
+    background: var(--pink-tint);
+    border-left: 2.5px solid var(--pink);
+  }
+  .meta div { flex: 1; padding: 6px 11px; }
+  .meta div + div { border-left: 1px solid #f0e2ea; }
+  .meta .k {
+    font-size: 6.2pt; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--muted); margin-bottom: 1px;
+  }
+  .meta .v { font-size: 8.6pt; font-weight: bold; }
+  /* Six cells across A4 is tight — wrapping a label onto two lines makes the
+     strip look broken, so hold everything on one line. */
+  .meta .k, .meta .v { white-space: nowrap; }
+  /* Counts are 2-3 digits; sizing them to content leaves the long cells
+     (place of supply, tax treatment) the room they actually need. */
+  .meta div.narrow { flex: 0 0 auto; }
+
+  /* ---------- line items ---------- */
+  table { width: 100%; border-collapse: collapse; }
+  table.items { margin-top: 13px; }
+  table.items thead { display: table-header-group; }   /* repeat on every page */
+  table.items tr { page-break-inside: avoid; }
+  table.items th {
+    background: var(--pink);
+    color: #fff;
+    font-size: 6.4pt;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    padding: 6px 5px;
+    text-align: right;
+    font-weight: bold;
+  }
+  table.items th:first-child { padding-left: 7px; }
+  table.items th:last-child  { padding-right: 7px; }
+  table.items th.l, table.items td.l { text-align: left; }
+  table.items th.c, table.items td.c { text-align: center; }
+  table.items td {
+    padding: 5.5px 5px;
+    text-align: right;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  table.items td:first-child { padding-left: 7px; }
+  table.items td:last-child  { padding-right: 7px; font-weight: bold; }
+  table.items tbody tr:nth-child(even) td { background: #fbf9fb; }
+  .item-name { font-weight: bold; line-height: 1.3; }
+  .item-sub { font-size: 6.9pt; color: var(--faint); letter-spacing: 0.2px; margin-top: 1px; }
+  .disc {
+    display: inline-block; background: var(--pink-tint); color: var(--pink-dark);
+    font-weight: bold; font-size: 7.4pt; padding: 1px 4px; border-radius: 2px;
+  }
+  .tag {
+    display: inline-block; background: var(--yellow); color: #4a4200;
+    font-size: 5.8pt; font-weight: bold; padding: 0.5px 3px;
+    border-radius: 2px; letter-spacing: 0.5px; vertical-align: 1px;
+  }
+
+  /* ---------- summary ---------- */
+  .summary { display: flex; gap: 14px; margin-top: 14px; page-break-inside: avoid; }
+  .summary .left { flex: 1.1; }
+  .summary .right { flex: 1; }
+
+  /* Matches the .party h2 treatment so every section label on the page reads
+     as the same element. */
+  h3.sec {
+    margin: 0 0 5px; font-size: 6.5pt; text-transform: uppercase;
+    letter-spacing: 1.1px; color: var(--pink); font-weight: bold;
+    padding-bottom: 3px; border-bottom: 1px solid var(--rule);
+  }
+
+  table.hsn th, table.hsn td {
+    padding: 4px 7px; text-align: right; font-size: 7.4pt;
+    border-bottom: 1px solid var(--rule);
+  }
+  table.hsn th {
+    background: var(--band); color: var(--muted); font-weight: bold;
+    font-size: 6.4pt; text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  table.hsn th.l, table.hsn td.l { text-align: left; }
+  table.hsn tr:last-child td { border-bottom: none; }
+
+  table.totals td { padding: 4.5px 11px; }
+  table.totals td.k { color: var(--muted); }
+  table.totals td.v { text-align: right; }
+  table.totals tr.discount td { color: var(--pink-dark); }
+  table.totals td.k span {
+    font-size: 6.9pt; color: var(--faint); font-weight: normal;
+  }
+  table.totals tr.sub td {
+    border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    font-weight: bold;
+  }
+  table.totals tr.grand td {
+    background: var(--pink); color: #fff; font-weight: bold;
+    font-size: 12pt; padding: 9px 11px;
+  }
+  table.totals tr.grand td.k { letter-spacing: 0.5px; }
+
+  .words {
+    margin-top: 8px; padding: 7px 10px;
+    background: var(--band); border-left: 3px solid var(--yellow);
+  }
+  .words .k {
+    font-size: 6.2pt; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--muted);
+  }
+  .words .v { font-weight: bold; font-size: 8pt; margin-top: 1px; }
+
+  .notes { margin-top: 7px; padding: 0 2px; font-size: 7.4pt; color: #4b4753; }
+  .notes .k {
+    font-size: 6.2pt; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--muted); margin-right: 4px;
+  }
+
+  /* Closes out the line-item table, so it reads as a footer row of that table:
+     no top border (the last row already has one) and no gap above it. */
+  .tally {
+    margin-top: 0; padding: 6px 10px;
+    background: var(--band); border-bottom: 1px solid var(--rule);
+    font-size: 7.8pt; color: var(--muted); text-align: center;
+    letter-spacing: 0.2px; page-break-inside: avoid;
+  }
+  .tally b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* ---------- terms ---------- */
+  .terms {
+    margin-top: 16px; padding-top: 9px; border-top: 1px solid var(--rule);
+    font-size: 6.8pt; color: var(--muted); page-break-inside: avoid;
+  }
+  /* Seventeen clauses in one column would push a page; two keeps them tight. */
+  /* The rule sits centred in the gap, and list markers hang into the second
+     column's padding — so the gap needs to be wide enough to clear both. */
+  .terms ol {
+    margin: 0; padding-left: 11px;
+    column-count: 2; column-gap: 42px; column-rule: 1px solid var(--rule);
+  }
+  .terms li { margin-bottom: 2.5px; break-inside: avoid; line-height: 1.35; }
+  .terms ol.sub {
+    /* WeasyPrint ignores the legacy type="a" attribute — set it in CSS. */
+    list-style-type: lower-alpha;
+    column-count: 1; column-rule: none;
+    margin: 2px 0 3px; padding-left: 12px;
+  }
+  .terms ol.sub li { margin-bottom: 1.5px; }
+</style>
+</head>
+<body>
+
+  <div class="head">
+    <div class="brand">
+      {% if logo %}<img src="{{ logo }}" alt="">{% endif %}
+      <div>
+        <div class="brand-name">{{ seller.name }}</div>
+        <div class="brand-sub">{{ seller.website }} &nbsp;·&nbsp; {{ seller.email }}</div>
+      </div>
+    </div>
+    <div class="doc-title">
+      <h1>ESTIMATE</h1>
+      <div class="num">{{ estimate_number }}</div>
+      <div class="date">{{ estimate_date }}</div>
+      <div class="oref">Order Ref <span>{{ order_id }}</span></div>
+    </div>
+  </div>
+
+  <div class="rule"><span class="a"></span><span class="b"></span></div>
+
+  <div class="parties">
+    <div class="party seller">
+      <h2>From</h2>
+      <div class="who">{{ seller.name }}</div>
+      {% for line in seller.address_lines %}<p>{{ line }}</p>{% endfor %}
+      <p>{{ seller.phone }}</p>
+      <div class="gstin">GSTIN &nbsp;<b>{{ seller.gstin }}</b></div>
+    </div>
+
+    <div class="party">
+      <h2>Bill To</h2>
+      <div class="who">{{ customer_name }}</div>
+      {% if billing.attention and billing.attention != customer_name %}
+        <p>{{ billing.attention }}</p>
+      {% endif %}
+      {% for line in billing.lines %}<p>{{ line }}</p>{% endfor %}
+      {% if billing.phone %}<p>{{ billing.phone }}</p>{% endif %}
+      {% if customer_gstin %}<div class="gstin">GSTIN &nbsp;<b>{{ customer_gstin }}</b></div>{% endif %}
+    </div>
+
+    <div class="party">
+      <h2>Ship To</h2>
+      <div class="who">{{ shipping.attention or customer_name }}</div>
+      {% for line in shipping.lines %}<p>{{ line }}</p>{% endfor %}
+      {% if shipping.phone %}<p>{{ shipping.phone }}</p>{% endif %}
+    </div>
+  </div>
+
+  <div class="meta">
+    <div><div class="k">Estimate No.</div><div class="v">{{ estimate_number }}</div></div>
+    <div><div class="k">Date</div><div class="v">{{ estimate_date }}</div></div>
+    <div><div class="k">Place of Supply</div><div class="v">{{ place_of_supply }}</div></div>
+    <div><div class="k">Tax Treatment</div><div class="v">{{ gst_type }} of GST</div></div>
+    <div class="narrow"><div class="k">Items</div><div class="v">{{ lines | length }}</div></div>
+    <div class="narrow"><div class="k">Total Qty</div><div class="v">{{ total_qty }}</div></div>
+  </div>
+
+  <table class="items">
+    <thead>
+      <tr>
+        <th class="c" style="width:3.5%">#</th>
+        <th class="l" style="width:27%">Item</th>
+        <th class="c" style="width:8.5%">HSN</th>
+        <th style="width:5%">Qty</th>
+        <th style="width:9.5%">List Rate</th>
+        <th class="c" style="width:6.5%">Disc.</th>
+        <th style="width:9.5%">Net Rate</th>
+        <th style="width:10.5%">Taxable</th>
+        <th class="c" style="width:5.5%">GST</th>
+        <th style="width:11%">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td class="c">{{ line.sr }}</td>
+        <td class="l">
+          <div class="item-name">{{ line.name }}</div>
+          <div class="item-sub">
+            {% if line.sku %}{{ line.sku }}{% endif %}
+            {% if line.is_pre_order %} <span class="tag">PRE-ORDER</span>{% endif %}
+          </div>
+        </td>
+        <td class="c n">{{ line.hsn }}</td>
+        <td class="n">{{ line.qty }}</td>
+        <td class="n">{{ line.rate | money }}</td>
+        <td class="c"><span class="disc">{{ line.margin }}</span></td>
+        <td class="n">{{ line.selling | money }}</td>
+        <td class="n">{{ line.taxable | money }}</td>
+        <td class="c n">{{ "%.0f"|format(line.tax_pct) }}%</td>
+        <td class="n">{{ line.total | money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="tally">
+    Total items <b>{{ lines | length }}</b>
+    &nbsp;·&nbsp;
+    Total quantity <b>{{ total_qty }}</b> units
+  </div>
+
+  <div class="summary">
+    <div class="left">
+      <h3 class="sec">HSN / SAC Summary</h3>
+      <table class="hsn">
+        <thead>
+          <tr>
+            <th class="l">HSN</th>
+            <th>Taxable Value</th>
+            <th>Rate</th>
+            <th>Tax Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in hsn_summary %}
+          <tr>
+            <td class="l n">{{ h.hsn or '—' }}</td>
+            <td class="n">{{ h.taxable | money }}</td>
+            <td class="n">{{ "%.0f"|format(h.tax_pct) }}%</td>
+            <td class="n">{{ h.tax | money }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="words">
+        <div class="k">Total in words</div>
+        <div class="v">{{ amount_in_words }}</div>
+      </div>
+
+      {% if notes %}
+      <div class="notes">
+        <span class="k">Notes</span> {{ notes }}
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="right">
+      <table class="totals">
+        <tr>
+          <td class="k">List Value</td>
+          <td class="v">{{ total_list | money }}</td>
+        </tr>
+        <tr class="discount">
+          <td class="k">Trade Discount <span>({{ "%.1f"|format(discount_pct) }}%)</span></td>
+          <td class="v">− {{ total_discount | money }}</td>
+        </tr>
+        <tr class="sub">
+          <td class="k">Sub Total <span>({{ sub_total_note }})</span></td>
+          <td class="v">{{ sub_total | money }}</td>
+        </tr>
+        {% for t in tax_rows %}
+        <tr>
+          <td class="k">{{ t.label }} <span>({{ "%g"|format(t.pct) }}%)</span></td>
+          <td class="v">{{ t.amount | money }}</td>
+        </tr>
+        {% endfor %}
+        {% if round_off %}
+        <tr>
+          <td class="k">Rounding</td>
+          <td class="v">{{ round_off | money }}</td>
+        </tr>
+        {% endif %}
+        <tr class="grand">
+          <td class="k">Total</td>
+          <td class="v">&#8377; {{ grand_total | money }}</td>
+        </tr>
+      </table>
+
+    </div>
+  </div>
+
+  <div class="terms">
+    <h3 class="sec">Terms &amp; Conditions</h3>
+    <ol>
+      {% for t in terms %}
+      <li>
+        {{ t.text }}
+        {% if t.subs %}
+        <ol class="sub" type="a">
+          {% for s in t.subs %}<li>{{ s }}</li>{% endfor %}
+        </ol>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+
+</body>
+</html>

@@ -107,7 +107,7 @@ def authenticate_user(email: str, password: str):
 def _minimal_payload(user: dict) -> dict:
     """Issue 6: store only what downstream code actually needs.
     Keeps the existing {"data": {...}} envelope so permissions.py stays compatible."""
-    return {
+    payload = {
         "_id": str(user["_id"]),
         "email": user.get("email", ""),
         "role": user.get("role", ""),
@@ -115,6 +115,13 @@ def _minimal_payload(user: dict) -> dict:
         "name": user.get("name", ""),
         "code": user.get("code", ""),
     }
+    # Only distributors carry this. It is the scoping key the distributor portal
+    # reads to decide which brand's rows the caller may see, so it must come
+    # from the token and never from a request parameter. Added conditionally to
+    # keep the payload minimal for every other role.
+    if user.get("distributor_id"):
+        payload["distributor_id"] = str(user["distributor_id"])
+    return payload
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:

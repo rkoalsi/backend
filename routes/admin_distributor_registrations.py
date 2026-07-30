@@ -6,7 +6,11 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 from bson import ObjectId
+from passlib.hash import bcrypt
+import secrets
+import string
 from ..config.root import get_database, serialize_mongo_document
 from dotenv import load_dotenv
 
@@ -21,6 +25,27 @@ STATUSES = ("not_contacted", "contacted", "onboarded", "declined")
 class UpdateDistributorRegistrationRequest(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
+
+
+class CreateDistributorLoginRequest(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
+def _generate_password(length: int = 12) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _login_summary(user: dict) -> dict:
+    """Shape returned to the admin UI. Never includes the password hash."""
+    return {
+        "user_id": str(user["_id"]),
+        "email": user.get("email", ""),
+        "name": user.get("name", ""),
+        "status": user.get("status", "active"),
+        "created_at": user.get("created_at"),
+    }
 
 
 @router.get("")
@@ -109,3 +134,143 @@ def update_distributor_registration(
         raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Distributor logins
+#
+# The registration flow captures an application but never creates an account.
+# These endpoints are what turn an approved application into a login for the
+# distributor portal. A login is deliberately its own step rather than a side
+# effect of status="onboarded", so nobody gets portal access by a mis-click on
+# a status dropdown.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{registration_id}/login")
+def get_distributor_login(registration_id: str):
+    """Whether this registration already has a portal login."""
+    if not ObjectId.is_valid(registration_id):
+        raise HTTPException(status_code=400, detail="Invalid registration id")
+
+    user = db.users.find_one(
+        {"role": "distributor", "distributor_id": ObjectId(registration_id)}
+    )
+    return {"login": _login_summary(user) if user else None}
+
+
+@router.post("/{registration_id}/login")
+def create_distributor_login(
+    registration_id: str, body: CreateDistributorLoginRequest
+):
+    """Create the portal login for an approved distributor.
+
+    Returns the password in plain text exactly once — it is stored hashed and
+    cannot be read back afterwards, so the admin must hand it over now or use
+    the reset endpoint later.
+    """
+    if not ObjectId.is_valid(registration_id):
+        raise HTTPException(status_code=400, detail="Invalid registration id")
+
+    registration = distributor_registrations_collection.find_one(
+        {"_id": ObjectId(registration_id)}
+    )
+    if not registration:
+        raise HTTPException(status_code=404, detail="Registration not found")
+
+    existing = db.users.find_one(
+        {"role": "distributor", "distributor_id": ObjectId(registration_id)}
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="This distributor already has a login. Reset the password instead.",
+        )
+
+    email = (body.email or registration.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="No email on the application — provide one to create the login",
+        )
+
+    # Guard across every role, not just distributors: `users.email` is the
+    # login key, so a collision with a customer or staff account would let one
+    # person's password authenticate into the other's record.
+    if db.users.find_one({"email": email}):
+        raise HTTPException(
+            status_code=409, detail=f"A user with the email {email} already exists"
+        )
+
+    password = body.password or _generate_password()
+
+    doc = {
+        "name": registration.get("contact_person_name")
+        or registration.get("company_name", ""),
+        "email": email,
+        "phone": registration.get("phone", ""),
+        "role": "distributor",
+        "status": "active",
+        "password": bcrypt.hash(password),
+        # The scoping key. `_distributor_scope` in the portal router reads this
+        # off the JWT to decide which brand's rows the caller may see.
+        "distributor_id": ObjectId(registration_id),
+        "company_name": registration.get("company_name", ""),
+        "brand_name": registration.get("brand_name", ""),
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    result = db.users.insert_one(doc)
+
+    distributor_registrations_collection.update_one(
+        {"_id": ObjectId(registration_id)},
+        {"$set": {"login_user_id": result.inserted_id, "login_created_at": datetime.utcnow()}},
+    )
+
+    return {
+        "success": True,
+        "user_id": str(result.inserted_id),
+        "email": email,
+        # Shown once; not recoverable afterwards.
+        "password": password,
+    }
+
+
+@router.post("/{registration_id}/login/reset-password")
+def reset_distributor_password(
+    registration_id: str, body: CreateDistributorLoginRequest
+):
+    """Issue a new password. Returned in plain text once, as above."""
+    if not ObjectId.is_valid(registration_id):
+        raise HTTPException(status_code=400, detail="Invalid registration id")
+
+    user = db.users.find_one(
+        {"role": "distributor", "distributor_id": ObjectId(registration_id)}
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="No login exists for this distributor")
+
+    password = body.password or _generate_password()
+    db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password": bcrypt.hash(password), "updated_at": datetime.utcnow()}},
+    )
+    return {"success": True, "email": user.get("email", ""), "password": password}
+
+
+@router.patch("/{registration_id}/login/status")
+def set_distributor_login_status(registration_id: str, body: dict):
+    """Enable or disable portal access without deleting the account."""
+    status_value = (body or {}).get("status")
+    if status_value not in ("active", "inactive"):
+        raise HTTPException(status_code=400, detail="status must be active or inactive")
+    if not ObjectId.is_valid(registration_id):
+        raise HTTPException(status_code=400, detail="Invalid registration id")
+
+    result = db.users.update_one(
+        {"role": "distributor", "distributor_id": ObjectId(registration_id)},
+        {"$set": {"status": status_value, "updated_at": datetime.utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="No login exists for this distributor")
+    return {"success": True, "status": status_value}

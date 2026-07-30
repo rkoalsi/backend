@@ -47,6 +47,7 @@ from .business_cards import router as business_cards
 from .payments import router as payments
 from .tracking import router as tracking
 from .presence import router as presence
+from .distributor_portal import router as distributor_portal
 from ..config.auth import JWTBearer
 
 router = APIRouter()
@@ -96,6 +97,15 @@ _jwt = [Depends(JWTBearer())]
 
 router.include_router(
     admin, prefix="/admin", tags=["Admin"], dependencies=_jwt
+)
+# Router-level JWT proves the caller is signed in; every handler additionally
+# depends on _distributor_scope, which enforces role == "distributor" and pins
+# the query to their own registration.
+router.include_router(
+    distributor_portal,
+    prefix="/distributor_portal",
+    tags=["Distributor Portal"],
+    dependencies=_jwt,
 )
 router.include_router(
     admin_blog_posts, prefix="/admin/blog", tags=["Admin Blog"], dependencies=_jwt

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ order.reference }} — {{ brand_name }}</title>
+<style>
+  :root {
+    --pink: #D92681;
+    --yellow: #EDD100;
+    --ink: #17151a;
+    --muted: #7a7580;
+    --faint: #a8a3ae;
+    --rule: #e8e4ec;
+    --band: #f8f6f9;
+  }
+
+  @page {
+    size: A4;
+    margin: 14mm 12mm 16mm 12mm;
+    @bottom-left {
+      content: "{{ seller_name }}  ·  Distributor order sheet";
+      font-family: Helvetica, Arial, sans-serif; font-size: 7pt; color: #b4b0ba;
+      padding-top: 4mm;
+    }
+    @bottom-right {
+      content: "Page " counter(page) " of " counter(pages);
+      font-family: Helvetica, Arial, sans-serif; font-size: 7pt; color: #b4b0ba;
+      padding-top: 4mm;
+    }
+    @top-right {
+      content: string(refhdr) "  ·  continued";
+      font-family: Helvetica, Arial, sans-serif; font-size: 7pt; color: var(--faint);
+      padding-bottom: 3mm;
+    }
+  }
+  @page :first { @top-right { content: none; } }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 8.4pt; color: var(--ink); margin: 0; line-height: 1.42;
+  }
+  .n { font-variant-numeric: tabular-nums; }
+
+  .head { display: flex; align-items: flex-start; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand img { height: 26px; width: auto; }
+  .brand-name { font-size: 12.5pt; font-weight: bold; letter-spacing: -0.25px; white-space: nowrap; }
+  .brand-sub { font-size: 7.2pt; color: var(--muted); }
+
+  .doc-title { text-align: right; white-space: nowrap; padding-left: 12px; }
+  .doc-title h1 {
+    margin: 0; font-size: 18pt; letter-spacing: 3.5px; color: var(--pink);
+    font-weight: bold; line-height: 1;
+  }
+  .doc-title .ref {
+    font-size: 10.5pt; font-weight: bold; margin-top: 4px;
+    string-set: refhdr content();
+  }
+  .doc-title .ref.noest { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  .doc-title .sub { font-size: 7pt; color: var(--faint); }
+
+  .rule { display: flex; height: 2.5px; margin: 9px 0 0; }
+  .rule .a { flex: 0 0 62%; background: var(--pink); }
+  .rule .b { flex: 1 1 auto; background: var(--yellow); }
+
+  .meta { display: flex; margin-top: 13px; background: #FDF4F9; border-left: 2.5px solid var(--pink); }
+  .meta div { flex: 1; padding: 6px 11px; }
+  .meta div + div { border-left: 1px solid #f0e2ea; }
+  .meta .k {
+    font-size: 6.2pt; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--muted); white-space: nowrap;
+  }
+  .meta .v { font-size: 8.6pt; font-weight: bold; }
+
+  /* Driven by the order's own status value, so an unstyled status still
+     renders — it just falls back to the neutral pill. */
+  .status {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    font-size: 7.6pt; font-weight: bold; text-transform: capitalize;
+    background: #eceaf0; color: #55505c;
+  }
+  .status.draft    { background: #eceaf0; color: #55505c; }
+  .status.sent     { background: #dbeafe; color: #1e40af; }
+  .status.accepted { background: #dcfce7; color: #166534; }
+  .status.invoiced { background: #ede9fe; color: #5b21b6; }
+  .status.declined { background: #fee2e2; color: #991b1b; }
+  .status.deleted  { background: #fee2e2; color: #991b1b; }
+
+  .party { margin-top: 13px; }
+  .party h2 {
+    margin: 0 0 4px; font-size: 6.5pt; text-transform: uppercase; letter-spacing: 1.1px;
+    color: var(--pink); font-weight: bold; padding-bottom: 3px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .party .who { font-weight: bold; font-size: 9.2pt; }
+  .party p { margin: 0; color: #4b4753; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 13px; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  th {
+    background: var(--pink); color: #fff; font-size: 6.4pt; text-transform: uppercase;
+    letter-spacing: 0.7px; padding: 6px 5px; text-align: left; font-weight: bold;
+  }
+  th.r, td.r { text-align: right; }
+  th.c, td.c { text-align: center; }
+  th:first-child, td:first-child { padding-left: 7px; }
+  th:last-child, td:last-child { padding-right: 7px; }
+  td { padding: 5.5px 5px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  tbody tr:nth-child(even) td { background: #fbf9fb; }
+  .item-name { font-weight: bold; }
+
+  .tally {
+    margin-top: 0; padding: 7px 10px; background: var(--band);
+    border-bottom: 1px solid var(--rule); font-size: 8pt; color: var(--muted);
+    text-align: center; page-break-inside: avoid;
+  }
+  .tally b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .note {
+    margin-top: 14px; padding-top: 9px; border-top: 1px solid var(--rule);
+    font-size: 7pt; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+  <div class="head">
+    <div class="brand">
+      {% if logo %}<img src="{{ logo }}" alt="">{% endif %}
+      <div>
+        <div class="brand-name">{{ brand_name }}</div>
+        <div class="brand-sub">{{ company_name }}</div>
+      </div>
+    </div>
+    <div class="doc-title">
+      <h1>ORDER</h1>
+      <div class="ref{% if not order.estimate_number %} noest{% endif %}">{{ order.reference }}</div>
+      {% if not order.estimate_number %}<div class="sub">No estimate raised yet</div>{% endif %}
+    </div>
+  </div>
+  <div class="rule"><span class="a"></span><span class="b"></span></div>
+
+  <div class="meta">
+    <div><div class="k">Order Date</div><div class="v">{{ order.date }}</div></div>
+    <div><div class="k">Status</div><div class="v"><span class="status {{ order.status }}">{{ order.status or '—' }}</span></div></div>
+    <div><div class="k">State</div><div class="v">{{ order.state or '—' }}</div></div>
+    <div><div class="k">Lines / Units</div><div class="v">{{ order.line_count }} / {{ order.units }}</div></div>
+  </div>
+
+  <div class="party">
+    <h2>Retailer</h2>
+    <div class="who">{{ order.customer_name or '—' }}</div>
+    {% if order.state %}<p>{{ order.state }}</p>{% endif %}
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="c" style="width:6%">#</th>
+        <th style="width:60%">Item</th>
+        <th style="width:22%">SKU</th>
+        <th class="r" style="width:12%">Qty</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in order.products %}
+      <tr>
+        <td class="c n">{{ loop.index }}</td>
+        <td><span class="item-name">{{ p.name }}</span></td>
+        <td class="n">{{ p.product_code or '—' }}</td>
+        <td class="r n">{{ p.quantity }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="tally">
+    Total items <b>{{ order.line_count }}</b>
+    &nbsp;·&nbsp;
+    Total quantity <b>{{ order.units }}</b> units
+  </div>
+
+  <div class="note">
+    This sheet lists only the {{ brand_name }} items on this order. Other brands on the
+    same order are not shown. Generated {{ generated_at }}.
+  </div>
+
+</body>
+</html>

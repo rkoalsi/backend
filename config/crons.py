@@ -2244,8 +2244,15 @@ def refresh_preorder_upcoming_stock():
     Runs after each stock/PO sync. Pre-order products with no matching PO have
     these three fields cleared so stale values never linger."""
     db = get_database()
+    # Distributor products are excluded: their upcoming_stock is entered by the
+    # brand, not derived from a Zoho PO, and the else-branch below would $unset
+    # it on every run since they have no matching purchase order.
     pre_order_prods = list(db.products.find(
-        {"pre_order": True, "is_deleted": {"$exists": False}},
+        {
+            "pre_order": True,
+            "is_deleted": {"$exists": False},
+            "distributor_id": {"$exists": False},
+        },
         {"item_id": 1, "brand": 1},
     ))
     if not pre_order_prods:
