@@ -7,7 +7,7 @@ from bson import ObjectId
 import re, uuid, boto3, os, requests, json
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
-from .helpers import get_access_token, fetch_overdue_invoices, fetch_associated_credit_notes
+from .helpers import get_access_token, zoho_get, fetch_overdue_invoices, fetch_associated_credit_notes
 
 router = APIRouter()
 
@@ -424,10 +424,8 @@ async def delete_invoice_note_image(
 async def download_pdf_by_zoho_id(zoho_invoice_id: str):
     """Download invoice PDF directly from Zoho Books using Zoho's invoice_id."""
     try:
-        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
-        response = requests.get(
-            url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=zoho_invoice_id),
-            headers=headers,
+        response = zoho_get(
+            INVOICE_PDF_URL.format(org_id=org_id, invoice_id=zoho_invoice_id),
             allow_redirects=False,
         )
         if response.status_code == 200:
@@ -469,10 +467,8 @@ async def download_pdf(invoice_id: str = ""):
         else:
             invoice_id = invoice.get("invoice_id", "") or invoice_id
 
-        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
-        response = requests.get(
-            url=INVOICE_PDF_URL.format(org_id=org_id, invoice_id=invoice_id),
-            headers=headers,
+        response = zoho_get(
+            INVOICE_PDF_URL.format(org_id=org_id, invoice_id=invoice_id),
             allow_redirects=False,  # Prevent automatic redirects
         )
 

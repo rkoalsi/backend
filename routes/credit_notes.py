@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Response
 from ..config.root import get_database
 from bson import ObjectId
 import os, requests
-from .helpers import get_access_token
+from .helpers import get_access_token, zoho_get
 
 router = APIRouter()
 
@@ -22,10 +22,8 @@ async def download_pdf(credit_note_id: str = ""):
 
         # Get the creditnote_id and make the request to Zoho
         zoho_creditnote_id = credit_note.get("creditnote_id", "")
-        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
-        response = requests.get(
-            url=CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=zoho_creditnote_id),
-            headers=headers,
+        response = zoho_get(
+            CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=zoho_creditnote_id),
             allow_redirects=False,
         )
 
