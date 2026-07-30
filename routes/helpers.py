@@ -1,10 +1,12 @@
-import io, requests, os, base64
+import io, requests, os, base64, threading, time
 import pandas as pd
+from fastapi import HTTPException
 from functools import lru_cache
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from dotenv import load_dotenv
 from datetime import date, datetime
+from ..config.root import get_database
 from ..config.whatsapp import send_whatsapp
 from ..config.email import send_email
 
@@ -82,33 +84,118 @@ def send_email_with_attachments_in_memory(workbook, subject, body, filename, ema
     )
 
 
-def get_access_token(tkn: str):
-    r = None
-    access_token = ""
+# Zoho access tokens are valid for an hour, but every refresh-token grant counts
+# against a tight per-app throttle. Minting a fresh token on every request trips
+# that limit ("Access Denied: too many requests"), which used to leave us with an
+# empty token and a confusing Zoho error 14 downstream. Cache per token type, in
+# process and in Mongo so restarts and the cron process reuse the same token.
+_TOKEN_CACHE: dict = {}
+_TOKEN_LOCK = threading.Lock()
+_TOKEN_SKEW = 300  # refresh 5 minutes before Zoho expires the token
+
+
+def _load_shared_token(tkn: str):
+    try:
+        return get_database().zoho_tokens.find_one({"_id": tkn})
+    except Exception as e:
+        print(f"Could not read shared {tkn} token: {e}")
+        return None
+
+
+def _store_shared_token(tkn: str, access_token: str, expires_at: float):
+    try:
+        get_database().zoho_tokens.update_one(
+            {"_id": tkn},
+            {"$set": {"access_token": access_token, "expires_at": expires_at}},
+            upsert=True,
+        )
+    except Exception as e:
+        print(f"Could not store shared {tkn} token: {e}")
+
+
+def get_access_token(tkn: str, force_refresh: bool = False):
     if tkn == "inventory":
-        r = requests.post(
-            INVENTORY_URL.format(
-                clientId=clientId,
-                clientSecret=clientSecret,
-                grantType=grantType,
-                inventory_refresh_token=inventory_refresh_token,
-            )
+        url = INVENTORY_URL.format(
+            clientId=clientId,
+            clientSecret=clientSecret,
+            grantType=grantType,
+            inventory_refresh_token=inventory_refresh_token,
         )
     elif tkn == "books":
-        r = requests.post(
-            BOOKS_URL.format(
-                clientId=clientId,
-                clientSecret=clientSecret,
-                grantType=grantType,
-                books_refresh_token=books_refresh_token,
-            )
+        url = BOOKS_URL.format(
+            clientId=clientId,
+            clientSecret=clientSecret,
+            grantType=grantType,
+            books_refresh_token=books_refresh_token,
         )
     else:
         print("missing token type")
         return
-    access_token = str(r.json().get("access_token", ""))
-    print(f"Got {tkn.capitalize()} Access Token: {access_token[-4:]}")
-    return access_token
+
+    now = time.time()
+    with _TOKEN_LOCK:
+        cached = _TOKEN_CACHE.get(tkn)
+        if not cached or cached["expires_at"] <= now:
+            shared = _load_shared_token(tkn)
+            if shared and shared.get("access_token"):
+                cached = {
+                    "access_token": shared["access_token"],
+                    "expires_at": float(shared.get("expires_at") or 0),
+                }
+                _TOKEN_CACHE[tkn] = cached
+
+        if cached and not force_refresh and cached["expires_at"] > now:
+            return cached["access_token"]
+
+        data = {}
+        for attempt in range(2):
+            try:
+                data = requests.post(url, timeout=30).json()
+            except Exception as e:
+                data = {}
+                print(f"Error fetching {tkn} access token: {e}")
+            if data.get("access_token"):
+                break
+            if attempt == 0:
+                # Usually Zoho's grant throttle; a short pause clears it.
+                time.sleep(3)
+
+        access_token = str(data.get("access_token", ""))
+        if access_token:
+            expires_in = int(data.get("expires_in") or 3600)
+            expires_at = now + max(expires_in - _TOKEN_SKEW, 60)
+            _TOKEN_CACHE[tkn] = {
+                "access_token": access_token,
+                "expires_at": expires_at,
+            }
+            _store_shared_token(tkn, access_token, expires_at)
+            print(f"Got {tkn.capitalize()} Access Token: {access_token[-4:]}")
+            return access_token
+
+        # Refresh failed (usually Zoho throttling). Fall back to the cached token
+        # if it might still be valid rather than returning an empty string.
+        print(f"Failed to get {tkn} access token: {data}")
+        if cached and cached["expires_at"] + _TOKEN_SKEW > now:
+            return cached["access_token"]
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not authenticate with Zoho ({tkn}). Please retry in a minute.",
+        )
+
+
+def zoho_get(url: str, tkn: str = "books", **kwargs):
+    """GET a Zoho endpoint with a cached access token, retrying once with a
+    freshly minted token if Zoho rejects the cached one."""
+    token = get_access_token(tkn)
+    response = requests.get(
+        url, headers={"Authorization": f"Zoho-oauthtoken {token}"}, **kwargs
+    )
+    if response.status_code == 401:
+        token = get_access_token(tkn, force_refresh=True)
+        response = requests.get(
+            url, headers={"Authorization": f"Zoho-oauthtoken {token}"}, **kwargs
+        )
+    return response
 
 
 company_name = "Pettingzoo"

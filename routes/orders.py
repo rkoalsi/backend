@@ -2,7 +2,7 @@ from types import NoneType
 from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
-from .helpers import get_access_token
+from .helpers import get_access_token, zoho_get
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
@@ -2702,10 +2702,8 @@ async def download_pdf(order_id: str = "", estimate_type: str = Query("stock", a
             if order is None:
                 return {"status": "error", "message": "Draft Estimate Not Created"}
             estimate_id = order.get("estimate_id", "")
-        headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
-        response = requests.get(
-            url=PDF_URL.format(org_id=org_id, estimate_id=estimate_id),
-            headers=headers,
+        response = zoho_get(
+            PDF_URL.format(org_id=org_id, estimate_id=estimate_id),
             allow_redirects=False,  # Prevent automatic redirects
         )
 
@@ -2836,8 +2834,7 @@ def order_documents(order_id: str):
 
 def _fetch_zoho_pdf(url: str, filename: str) -> Response:
     """Fetch a PDF from Zoho Books and return it as an attachment Response."""
-    headers = {"Authorization": f"Zoho-oauthtoken {get_access_token('books')}"}
-    response = requests.get(url=url, headers=headers, allow_redirects=False)
+    response = zoho_get(url, allow_redirects=False)
     if response.status_code == 200:
         return Response(
             content=response.content,

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
 from ..config.whatsapp import send_whatsapp
-from .helpers import get_access_token
+from .helpers import get_access_token, zoho_get
 from .notifications import create_notification
 import os
 import boto3
@@ -696,14 +696,8 @@ async def download_creditnote_pdf(
                 detail="No credit note exists for this return order",
             )
 
-        access_token = get_access_token("books")
-        if not access_token:
-            raise HTTPException(status_code=500, detail="Failed to get Zoho Books access token")
-
-        headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-        response = requests.get(
-            url=CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=creditnote_id),
-            headers=headers,
+        response = zoho_get(
+            CREDITNOTE_PDF_URL.format(org_id=org_id, creditnote_id=creditnote_id),
             allow_redirects=False,
         )
 
