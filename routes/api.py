@@ -65,6 +65,8 @@ router.include_router(catalogue_leads, prefix="/catalogue_leads", tags=["Catalog
 router.include_router(brand_leads, prefix="/brand_leads", tags=["Brand Leads"])
 router.include_router(careers, prefix="/careers", tags=["Careers"])
 router.include_router(contact_submissions, prefix="/contact_submissions", tags=["Contact Submissions"])
+# distributor onboarding: not public — every endpoint is scoped to an invite
+# token minted in /admin/distributor_invites, which is the only way in
 router.include_router(distributor_registrations, prefix="/distributor_registrations", tags=["Distributor Registrations"])
 router.include_router(customer_creation_requests, prefix="/customer_creation_requests", tags=["Customer Creation Requests"])
 # public blog

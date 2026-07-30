@@ -1,21 +1,33 @@
-"""Public distributor / brand onboarding form (`/distributors` on both the
-marketplace and pupscribe.in).
+"""Invite-only distributor / brand onboarding form.
 
-The phone number is verified over WhatsApp before the application is accepted:
+There is no public distributor sign-up any more. An admin creates an invite in
+/admin/distributor_invites, which mints a single unguessable token, and sends the
+resulting link to the brand. Every endpoint below is scoped to that token — the
+link *is* the authorisation, so nothing here is reachable without one.
 
-  1. POST /otp/request  — the number is checked for WhatsApp reachability, then a
-                          6-digit code is sent to it.
-  2. GET  /otp/status   — polled while the code is in flight; reports back when
-                          Meta tells us the number is not on WhatsApp.
-  3. POST /otp/verify   — exchanges a correct code for a short-lived signed token.
-  4. POST ""            — the application itself, which only saves when it carries
-                          a valid token for the phone number on the form.
+The phone number on the form is still verified over WhatsApp before the
+application is accepted:
+
+  1. POST /{token}/otp/request  — the number is checked for WhatsApp
+                                  reachability, then a 6-digit code is sent.
+  2. GET  /{token}/otp/status   — polled while the code is in flight; reports
+                                  back when Meta tells us the number is not on
+                                  WhatsApp.
+  3. POST /{token}/otp/verify   — exchanges a correct code for a short-lived
+                                  signed token.
+  4. POST /{token}              — the application itself, which only saves when
+                                  it carries a valid token for the phone number
+                                  on the form.
 
 There is no way to check WhatsApp registration synchronously through Plivo, so
 reachability is established in two stages: a cheap local gate that rejects
 landlines and malformed numbers up front, and the asynchronous delivery report
 for the OTP message, which is where a genuinely non-WhatsApp number shows up as
 `failed`/`undelivered`.
+
+An invite stays usable until an admin revokes it, so a brand can come back to
+the same link and correct what they submitted — the resubmission updates the
+existing application rather than creating a second one.
 """
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, validator
@@ -45,11 +57,10 @@ VERIFIED_TOKEN_EXPIRE_SECONDS = 45 * 60
 
 OTP_PURPOSE = "distributor"
 
-# Kept in sync with the CATEGORIES list on the two /distributors pages
-# (order_form_frontend and the pupscribe.in site). A brand whose category is not
-# on the list can type their own — see the categories validator, which keeps a
-# known value verbatim (so the admin filters keep working) and otherwise accepts
-# the free text as-is.
+# Kept in sync with the CATEGORIES list on the invite form. A brand whose
+# category is not on the list can type their own — see the categories validator,
+# which keeps a known value verbatim (so the admin filters keep working) and
+# otherwise accepts the free text as-is.
 CATEGORIES = [
     "Pet Food (Dog & Cat)",
     "Dog Food",
@@ -105,49 +116,9 @@ INDIAN_STATES = [
 _STATE_LOOKUP = {s.lower(): s for s in INDIAN_STATES}
 _CATEGORY_LOOKUP = {c.lower(): c for c in CATEGORIES}
 
-# Icon keys the two /distributors pages know how to render. Admins pick one per
-# card rather than uploading artwork.
-CARD_ICONS = [
-    "pets",
-    "food",
-    "litter",
-    "grooming",
-    "treats",
-    "toys",
-    "health",
-    "accessories",
-    "shipping",
-    "store",
-]
-CARD_ACCENTS = ["indigo", "magenta", "green"]
-
-# Shown until an admin configures their own set in /admin/leads.
-DEFAULT_CARDS = [
-    {
-        "title": "Pet food distributors",
-        "text": "Dog food and cat food distributors — dry, wet, kitten and therapeutic diets.",
-        "icon": "food",
-        "accent": "indigo",
-    },
-    {
-        "title": "Cat litter distributors",
-        "text": "Clumping, silica, tofu and natural litter brands looking for national reach.",
-        "icon": "litter",
-        "accent": "magenta",
-    },
-    {
-        "title": "Grooming distributors",
-        "text": "Dog and cat shampoo, conditioners, coat care and grooming tools.",
-        "icon": "grooming",
-        "accent": "green",
-    },
-    {
-        "title": "Treats, toys & accessories",
-        "text": "Treats and chews, toys, collars, leashes, harnesses and everyday goods.",
-        "icon": "treats",
-        "accent": "indigo",
-    },
-]
+# Mirrors STEPS on pages/distributor_registration/[token].tsx. Kept here so the
+# admin table and the form agree on what "step 3" means.
+STEP_LABELS = ["Verify mobile", "Company", "Addresses", "Brand"]
 
 # Delivery states that mean the number is not on WhatsApp (Meta error 131026,
 # "message undeliverable") or the send was refused outright.
@@ -162,10 +133,140 @@ def _db():
     return get_database()
 
 
+# ── Invite lookup ─────────────────────────────────────────────────────────────
+
+
+def resolve_invite(token: str) -> dict:
+    """Return the invite for `token`, or raise the reason it is unusable.
+
+    Every endpoint on this router funnels through here, so a revoked link stops
+    working mid-form rather than only at submit time.
+    """
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(status_code=404, detail="This registration link is not valid")
+
+    invite = _db().distributor_invites.find_one({"token": token})
+    if not invite:
+        raise HTTPException(
+            status_code=404,
+            detail="This registration link is not valid. Please ask your Pupscribe contact for a new one.",
+        )
+    if invite.get("status") == "revoked":
+        raise HTTPException(
+            status_code=410,
+            detail="This registration link has been closed. Please ask your Pupscribe contact for a new one.",
+        )
+    return invite
+
+
+# ── Draft progress ────────────────────────────────────────────────────────────
+# The form saves what has been typed after every step, so /admin/distributor_invites
+# can show how far a brand got and the brand can close the tab and come back.
+#
+# A draft is partial by definition, so it deliberately does NOT go through
+# DistributorRegistrationRequest — half a form would never pass those
+# validators. It is instead whitelisted and length-capped here, and only becomes
+# a real application through POST /{token}, which does validate in full.
+
+_DRAFT_TEXT_FIELDS = (
+    "companyName",
+    "gstNumber",
+    "panNumber",
+    "email",
+    "contactPersonName",
+    "brandName",
+    "margin",
+    "phone",
+)
+_DRAFT_ADDRESS_FIELDS = ("billingAddress", "shipFromAddress")
+_DRAFT_LIST_FIELDS = ("categories", "distributionStates")
+_ADDRESS_KEYS = (
+    "address",
+    "street2",
+    "city",
+    "state",
+    "zip",
+    "phone",
+    "attention",
+    "country",
+)
+
+_DRAFT_MAX_TEXT = 200
+_DRAFT_MAX_LIST = 40
+
+
+def _draft_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()[:_DRAFT_MAX_TEXT]
+
+
+def sanitize_draft(data) -> dict:
+    """Whitelist and cap an in-progress form payload.
+
+    Anything unrecognised is dropped rather than rejected — a draft save must
+    never fail loudly and cost the brand what they have typed.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    cleaned: dict = {}
+    for key in _DRAFT_TEXT_FIELDS:
+        if key in data:
+            cleaned[key] = _draft_text(data.get(key))
+    for key in _DRAFT_ADDRESS_FIELDS:
+        raw = data.get(key)
+        if isinstance(raw, dict):
+            cleaned[key] = {k: _draft_text(raw.get(k)) for k in _ADDRESS_KEYS}
+    for key in _DRAFT_LIST_FIELDS:
+        raw = data.get(key)
+        if isinstance(raw, list):
+            cleaned[key] = [
+                _draft_text(item) for item in raw[:_DRAFT_MAX_LIST] if _draft_text(item)
+            ]
+    return cleaned
+
+
+def invite_progress(invite: dict) -> dict:
+    """How far this brand has got, as one object both the admin table and the
+    form read.
+
+    `step` is the furthest step saved, and survives a submission — a brand that
+    comes back to correct something is "filled in, currently editing step 2",
+    not back to square one.
+    """
+    draft_step = invite.get("draft_step")
+    step = draft_step if isinstance(draft_step, int) else None
+
+    if invite.get("registration_id"):
+        stage = "submitted"
+    elif step is not None:
+        stage = "in_progress"
+    elif invite.get("phone_verified_at"):
+        stage = "verified"
+    elif invite.get("opened_at"):
+        stage = "opened"
+    else:
+        stage = "not_opened"
+
+    return {
+        "stage": stage,
+        "step": step,
+        "step_label": STEP_LABELS[step] if step is not None and 0 <= step < len(STEP_LABELS) else "",
+        "total_steps": len(STEP_LABELS),
+        "opened_at": invite.get("opened_at"),
+        "last_opened_at": invite.get("last_opened_at"),
+        "phone_verified_at": invite.get("phone_verified_at"),
+        "draft_updated_at": invite.get("draft_updated_at"),
+    }
+
+
 # ── Verified-phone token ──────────────────────────────────────────────────────
 # Same construction as the login-link token in users.py: an opaque, signed,
 # expiring stand-in for a phone number. Holding one proves only that whoever has
-# it answered an OTP on that number a few minutes ago.
+# it answered an OTP on that number a few minutes ago. The invite token is baked
+# into the signature so a code verified on one invite cannot submit another.
 
 
 def _token_signature(payload: str) -> str:
@@ -175,21 +276,26 @@ def _token_signature(payload: str) -> str:
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")[:22]
 
 
-def make_verified_phone_token(phone10: str) -> str:
-    payload = f"{phone10}.{int(time.time()) + VERIFIED_TOKEN_EXPIRE_SECONDS}"
+def make_verified_phone_token(phone10: str, invite_token: str) -> str:
+    payload = (
+        f"{phone10}.{invite_token}.{int(time.time()) + VERIFIED_TOKEN_EXPIRE_SECONDS}"
+    )
     encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     return f"{encoded}.{_token_signature(payload)}"
 
 
-def resolve_verified_phone_token(token: str) -> Optional[str]:
-    """Return the 10-digit phone for a valid, unexpired token, else None."""
+def resolve_verified_phone_token(token: str, invite_token: str) -> Optional[str]:
+    """Return the 10-digit phone for a valid, unexpired token that was issued
+    against `invite_token`, else None."""
     try:
         encoded, signature = str(token).split(".")
         payload = base64.urlsafe_b64decode(
             encoded + "=" * (-len(encoded) % 4)
         ).decode()
-        phone10, expires_at = payload.rsplit(".", 1)
+        phone10, token_invite, expires_at = payload.split(".")
         if not hmac.compare_digest(signature, _token_signature(payload)):
+            return None
+        if not hmac.compare_digest(token_invite, invite_token):
             return None
         if int(expires_at) < int(time.time()):
             return None
@@ -278,6 +384,24 @@ class OtpRequestBody(BaseModel):
     phone: str
 
 
+class DraftBody(BaseModel):
+    """An in-progress form: the step the brand is on, plus whatever they have
+    typed so far. Both are best-effort — see sanitize_draft."""
+
+    step: int = 0
+    data: dict = {}
+
+    @validator("step")
+    def validate_step(cls, v):
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid step")
+        if not 0 <= v < len(STEP_LABELS):
+            raise ValueError("Invalid step")
+        return v
+
+
 class OtpVerifyBody(BaseModel):
     phone: str
     code: str
@@ -338,7 +462,7 @@ class DistributorRegistrationRequest(BaseModel):
     categories: List[str] = []
     distributionStates: List[str] = []
     margin: str = ""
-    # Proof that `phone` answered an OTP (from /otp/verify)
+    # Proof that `phone` answered an OTP (from /{token}/otp/verify)
     verificationToken: str
 
     @validator("companyName", "contactPersonName", "brandName")
@@ -400,42 +524,95 @@ class DistributorRegistrationRequest(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/options")
-async def get_options():
-    """Dropdown options for the public /distributors form, so the two frontends
-    (marketplace + pupscribe.in) never drift from the server-side validator."""
-    return {"categories": CATEGORIES, "states": INDIAN_STATES}
+@router.get("/{token}")
+async def get_invite(token: str):
+    """Everything the invite form needs in one request: whether the link is
+    live, what the admin pre-filled, the dropdown options (so the frontend can
+    never drift from the server-side validator) and — on a return visit — what
+    was submitted last time, so the brand edits rather than retypes.
+    """
+    invite = resolve_invite(token)
+    db = _db()
 
+    # First open is what tells the admin the link actually reached someone;
+    # `opened_at` is never overwritten, so it stays the first-contact timestamp.
+    # `None` matches a missing field in Mongo, so this sets it exactly once.
+    db.distributor_invites.update_one(
+        {"_id": invite["_id"], "opened_at": None},
+        {"$set": {"opened_at": now_ist()}},
+    )
+    db.distributor_invites.update_one(
+        {"_id": invite["_id"]}, {"$set": {"last_opened_at": now_ist()}}
+    )
 
-@router.get("/cards")
-async def get_cards():
-    """The "who we are looking for" cards on /distributors, managed from
-    /admin/leads. Falls back to the defaults below when nothing has been
-    configured, so the page is never blank on a fresh database."""
-    try:
-        cursor = (
-            _db()
-            .distributor_page_cards.find({"active": {"$ne": False}})
-            .sort("order", 1)
-        )
-        cards = [
-            {
-                "title": c.get("title", ""),
-                "text": c.get("text", ""),
-                "icon": c.get("icon", "pets"),
-                "accent": c.get("accent", "indigo"),
+    submission = None
+    registration_id = invite.get("registration_id")
+    if registration_id:
+        doc = _db().distributor_registrations.find_one({"_id": registration_id})
+        if doc:
+            submission = {
+                "companyName": doc.get("company_name", ""),
+                "gstNumber": doc.get("gst_number", ""),
+                "panNumber": doc.get("pan_number", ""),
+                "billingAddress": doc.get("billing_address") or {},
+                "shipFromAddress": doc.get("ship_from_address") or {},
+                "phone": doc.get("phone", ""),
+                "email": doc.get("email", ""),
+                "contactPersonName": doc.get("contact_person_name", ""),
+                "brandName": doc.get("brand_name", ""),
+                "categories": doc.get("categories") or [],
+                "distributionStates": doc.get("distribution_states") or [],
+                "margin": doc.get("margin", ""),
             }
-            for c in cursor
-        ]
-    except Exception as e:
-        print(f"Failed to load distributor page cards: {e}")
-        cards = []
 
-    return {"cards": cards or DEFAULT_CARDS}
+    return {
+        "valid": True,
+        "note": invite.get("note", "") or "",
+        "prefill": {
+            "companyName": invite.get("company_name") or "",
+            "brandName": invite.get("brand_name") or "",
+            "contactPersonName": invite.get("contact_person_name") or "",
+            "email": invite.get("email") or "",
+            "phone": invite.get("phone") or "",
+        },
+        "submission": submission,
+        # What they had typed when they last closed the tab, and where they were
+        # — the form restores both once the phone is verified again.
+        "draft": invite.get("draft") or None,
+        "draftStep": invite.get("draft_step"),
+        # Populated once the agreement upload lands; the form shows a download
+        # link when it is set and simply omits the section while it is empty.
+        "agreementUrl": invite.get("agreement_url") or "",
+        "categories": CATEGORIES,
+        "states": INDIAN_STATES,
+    }
 
 
-@router.post("/otp/request")
-async def request_otp(body: OtpRequestBody):
+@router.put("/{token}/draft")
+async def save_draft(token: str, body: DraftBody):
+    """Autosaved by the form as the brand moves through it.
+
+    Losing a draft save is not worth an error the brand has to act on, so this
+    stays deliberately permissive: unknown fields are dropped, nothing is
+    validated for completeness, and the reply carries no state the form needs.
+    """
+    invite = resolve_invite(token)
+
+    _db().distributor_invites.update_one(
+        {"_id": invite["_id"]},
+        {
+            "$set": {
+                "draft": sanitize_draft(body.data),
+                "draft_step": body.step,
+                "draft_updated_at": now_ist(),
+            }
+        },
+    )
+    return {"success": True}
+
+
+@router.post("/{token}/otp/request")
+async def request_otp(token: str, body: OtpRequestBody):
     """Send a WhatsApp OTP to the applicant's mobile number.
 
     The number is gated locally first: `normalize_indian_mobile` rejects
@@ -443,6 +620,8 @@ async def request_otp(body: OtpRequestBody):
     receive a WhatsApp message. Numbers that pass but are simply not registered
     on WhatsApp surface through /otp/status once Meta reports back.
     """
+    resolve_invite(token)
+
     resolved = normalize_indian_mobile(body.phone)
     if not resolved["valid"]:
         raise HTTPException(
@@ -509,19 +688,23 @@ async def request_otp(body: OtpRequestBody):
     }
 
 
-@router.get("/otp/status")
-async def otp_status(phone: str = Query(...)):
+@router.get("/{token}/otp/status")
+async def otp_status(token: str, phone: str = Query(...)):
     """Polled while the code is in flight — reports a number that turned out not
     to be on WhatsApp, so the form can ask for a different one."""
+    resolve_invite(token)
+
     resolved = normalize_indian_mobile(phone)
     if not resolved["valid"]:
         raise HTTPException(status_code=400, detail="Enter a valid Indian mobile number")
     return _resolve_reachability(resolved["phone"])
 
 
-@router.post("/otp/verify")
-async def verify_otp(body: OtpVerifyBody):
+@router.post("/{token}/otp/verify")
+async def verify_otp(token: str, body: OtpVerifyBody):
     """Exchange a correct code for a short-lived token proving phone ownership."""
+    invite = resolve_invite(token)
+
     resolved = normalize_indian_mobile(body.phone)
     if not resolved["valid"]:
         raise HTTPException(status_code=400, detail="Enter a valid Indian mobile number")
@@ -553,20 +736,33 @@ async def verify_otp(body: OtpVerifyBody):
     # the delivery report said.
     _record_send(phone10, (db.whatsapp_reachability.find_one({"phone": phone10}) or {}).get("message_uuid"), "delivered")
 
+    # Reaching this point is the first hard signal that a real person is behind
+    # the link, so it shows in /admin/distributor_invites even if they go no
+    # further.
+    db.distributor_invites.update_one(
+        {"_id": invite["_id"]},
+        {"$set": {"phone_verified_at": now_ist(), "verified_phone": phone10}},
+    )
+
     return {
         "success": True,
         "verified": True,
         "phone": phone10,
-        "verificationToken": make_verified_phone_token(phone10),
+        "verificationToken": make_verified_phone_token(phone10, invite["token"]),
     }
 
 
-@router.post("")
-async def create_distributor_registration(request: DistributorRegistrationRequest):
+@router.post("/{token}")
+async def create_distributor_registration(
+    token: str, request: DistributorRegistrationRequest
+):
     try:
         db = _db()
+        invite = resolve_invite(token)
 
-        verified_phone = resolve_verified_phone_token(request.verificationToken)
+        verified_phone = resolve_verified_phone_token(
+            request.verificationToken, invite["token"]
+        )
         if not verified_phone:
             raise HTTPException(
                 status_code=401,
@@ -599,12 +795,46 @@ async def create_distributor_registration(request: DistributorRegistrationReques
             "categories": request.categories,
             "distribution_states": request.distributionStates,
             "margin": request.margin.strip(),
-            "status": "not_contacted",
-            "notes": "",
-            "created_at": now_ist(),
+            "invite_id": invite["_id"],
+            "updated_at": now_ist(),
         }
 
-        result = db.distributor_registrations.insert_one(registration)
+        # The link stays live until an admin revokes it, so a brand can come back
+        # and fix a typo. Keying the upsert on the invite makes a return visit
+        # update their application instead of filing a duplicate for the sales
+        # team to reconcile.
+        existing = db.distributor_registrations.find_one(
+            {"invite_id": invite["_id"]}, {"_id": 1}
+        )
+        result = db.distributor_registrations.update_one(
+            {"invite_id": invite["_id"]},
+            {
+                "$set": registration,
+                "$setOnInsert": {
+                    "status": "not_contacted",
+                    "notes": "",
+                    "created_at": now_ist(),
+                },
+            },
+            upsert=True,
+        )
+        is_update = existing is not None
+        registration_id = existing["_id"] if is_update else result.upserted_id
+
+        # The draft is scaffolding for an unfinished form; once it has been
+        # submitted the application itself is the record, and a leftover
+        # draft_step would read as "still on step 3" in the admin table.
+        db.distributor_invites.update_one(
+            {"_id": invite["_id"]},
+            {
+                "$set": {
+                    "registration_id": registration_id,
+                    "last_submitted_at": now_ist(),
+                },
+                "$inc": {"submission_count": 1},
+                "$unset": {"draft": "", "draft_step": "", "draft_updated_at": ""},
+            },
+        )
 
         # Notify the leads admin of the new distributor application
         try:
@@ -617,9 +847,10 @@ async def create_distributor_registration(request: DistributorRegistrationReques
                 db,
                 LEAD_NOTIFICATION_EMAILS,
                 "new_lead",
-                f"New distributor application: {request.brandName}",
-                f"{request.companyName} applied to distribute {request.brandName} "
-                f"({', '.join(request.categories)}) across "
+                f"Distributor application {'updated' if is_update else 'received'}: {request.brandName}",
+                f"{request.companyName} "
+                f"{'updated their application to distribute' if is_update else 'applied to distribute'} "
+                f"{request.brandName} ({', '.join(request.categories)}) across "
                 f"{len(request.distributionStates)} state(s).",
                 "/admin/leads?tab=distributors",
             )
@@ -629,7 +860,8 @@ async def create_distributor_registration(request: DistributorRegistrationReques
         return {
             "success": True,
             "message": "Distributor registration saved successfully",
-            "id": str(result.inserted_id),
+            "id": str(registration_id),
+            "updated": is_update,
         }
 
     except HTTPException:

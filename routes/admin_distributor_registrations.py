@@ -8,14 +8,12 @@ from pydantic import BaseModel
 from typing import Optional
 from bson import ObjectId
 from ..config.root import get_database, serialize_mongo_document
-from .distributor_registrations import CARD_ICONS, CARD_ACCENTS, DEFAULT_CARDS
 from dotenv import load_dotenv
 
 load_dotenv()
 router = APIRouter()
 db = get_database()
 distributor_registrations_collection = db["distributor_registrations"]
-page_cards_collection = db["distributor_page_cards"]
 
 STATUSES = ("not_contacted", "contacted", "onboarded", "declined")
 
@@ -80,126 +78,6 @@ def get_distributor_registrations(
         raise
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-# ── Page cards ────────────────────────────────────────────────────────────────
-# The "who we are looking for" tiles on the public /distributors page. Kept in
-# the database so the categories we are recruiting for can change without a
-# deploy — both the marketplace and pupscribe.in read them from
-# GET /api/distributor_registrations/cards.
-#
-# Routed under /cards before the /{registration_id} handlers so "cards" is never
-# swallowed as an ObjectId.
-
-
-class PageCardRequest(BaseModel):
-    title: str
-    text: str = ""
-    icon: str = "pets"
-    accent: str = "indigo"
-    order: Optional[int] = None
-    active: bool = True
-
-
-def _validate_card(body: PageCardRequest):
-    if not body.title.strip():
-        raise HTTPException(status_code=400, detail="Title is required")
-    if body.icon not in CARD_ICONS:
-        raise HTTPException(status_code=400, detail=f"Icon must be one of: {', '.join(CARD_ICONS)}")
-    if body.accent not in CARD_ACCENTS:
-        raise HTTPException(status_code=400, detail=f"Accent must be one of: {', '.join(CARD_ACCENTS)}")
-
-
-@router.get("/cards")
-def list_page_cards():
-    try:
-        cursor = page_cards_collection.find({}).sort("order", 1)
-        cards = [serialize_mongo_document(doc) for doc in cursor]
-        return {"cards": cards, "icons": CARD_ICONS, "accents": CARD_ACCENTS}
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/cards/seed")
-def seed_page_cards():
-    """Copy the built-in defaults into the collection so an admin has something
-    to edit instead of starting from a blank list. No-op once cards exist."""
-    try:
-        if page_cards_collection.count_documents({}, limit=1):
-            raise HTTPException(status_code=400, detail="Cards already configured")
-        page_cards_collection.insert_many(
-            [{**card, "order": i, "active": True} for i, card in enumerate(DEFAULT_CARDS)]
-        )
-        return {"success": True, "inserted": len(DEFAULT_CARDS)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/cards")
-def create_page_card(body: PageCardRequest):
-    try:
-        _validate_card(body)
-        order = body.order
-        if order is None:
-            last = page_cards_collection.find_one(sort=[("order", -1)])
-            order = (last.get("order", -1) + 1) if last else 0
-        doc = {
-            "title": body.title.strip(),
-            "text": body.text.strip(),
-            "icon": body.icon,
-            "accent": body.accent,
-            "order": order,
-            "active": body.active,
-        }
-        result = page_cards_collection.insert_one(doc)
-        return {"success": True, "id": str(result.inserted_id)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.put("/cards/{card_id}")
-def update_page_card(card_id: str, body: PageCardRequest):
-    try:
-        _validate_card(body)
-        update = {
-            "title": body.title.strip(),
-            "text": body.text.strip(),
-            "icon": body.icon,
-            "accent": body.accent,
-            "active": body.active,
-        }
-        if body.order is not None:
-            update["order"] = body.order
-        result = page_cards_collection.update_one(
-            {"_id": ObjectId(card_id)}, {"$set": update}
-        )
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Card not found")
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.delete("/cards/{card_id}")
-def delete_page_card(card_id: str):
-    try:
-        result = page_cards_collection.delete_one({"_id": ObjectId(card_id)})
-        if result.deleted_count == 0:
-            raise HTTPException(status_code=404, detail="Card not found")
-        return {"success": True}
-    except HTTPException:
-        raise
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-# ── Applications ──────────────────────────────────────────────────────────────
 
 
 @router.patch("/{registration_id}")
