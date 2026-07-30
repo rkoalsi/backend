@@ -33,6 +33,7 @@ from .customer_portal import router as customer_portal
 from .credit_notes import router as credit_notes
 from .careers import router as careers
 from .contact_submissions import router as contact_submissions
+from .distributor_registrations import router as distributor_registrations
 from .blog import router as blog
 from .customer_activity import router as customer_activity
 from .customer_address_details import router as customer_address_details
@@ -65,6 +66,9 @@ router.include_router(catalogue_leads, prefix="/catalogue_leads", tags=["Catalog
 router.include_router(brand_leads, prefix="/brand_leads", tags=["Brand Leads"])
 router.include_router(careers, prefix="/careers", tags=["Careers"])
 router.include_router(contact_submissions, prefix="/contact_submissions", tags=["Contact Submissions"])
+# distributor onboarding: not public — every endpoint is scoped to an invite
+# token minted in /admin/distributor_invites, which is the only way in
+router.include_router(distributor_registrations, prefix="/distributor_registrations", tags=["Distributor Registrations"])
 router.include_router(customer_creation_requests, prefix="/customer_creation_requests", tags=["Customer Creation Requests"])
 # public blog
 router.include_router(blog, prefix="/blog", tags=["Blog"])

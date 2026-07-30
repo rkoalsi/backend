@@ -47,6 +47,10 @@ from .admin_users import router as admin_users_router
 from .admin_careers import router as admin_careers_router
 from .admin_career_applications import router as admin_career_applications_router
 from .admin_contact_leads import router as admin_contact_submissions_router
+from .admin_distributor_registrations import (
+    router as admin_distributor_registrations_router,
+)
+from .admin_distributor_invites import router as admin_distributor_invites_router
 from .admin_chats import router as admin_chats_router
 from .admin_chats import contacts_router as admin_chatbot_customers_router
 from .admin_templates import router as admin_templates_router
@@ -3943,6 +3947,18 @@ router.include_router(
     admin_contact_submissions_router,
     prefix="/contact_submissions",
     tags=["Admin Contact Submissions"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_distributor_registrations_router,
+    prefix="/distributor_registrations",
+    tags=["Admin Distributor Registrations"],
+    dependencies=[Depends(JWTBearer())],
+)
+router.include_router(
+    admin_distributor_invites_router,
+    prefix="/distributor_invites",
+    tags=["Admin Distributor Invites"],
     dependencies=[Depends(JWTBearer())],
 )
 router.include_router(
