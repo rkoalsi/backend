@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException, Query, Depends
 from ..config.root import get_database, serialize_mongo_document
-from ..config.auth import JWTBearer
+from ..config.auth import JWTBearer, get_current_user
 from datetime import datetime
 from typing import Optional
 from bson import ObjectId
@@ -21,6 +21,14 @@ except Exception:
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
+
+# Internal/test accounts excluded from activity stats — kept in sync with the
+# EXCLUDED_EMAILS set on the /admin/customer_activity frontend so counts match.
+EXCLUDED_ACTIVITY_EMAILS = [
+    "rkoalsi2000@gmail.com",
+    "rkoalsi2175@gmail.com",
+    "rkoalsi2@gmail.com",
+]
 
 
 def log_activity(
@@ -313,3 +321,53 @@ def activity_summary(_=Depends(JWTBearer())):
         }))
 
     return {"summary": summaries, "total_customers": len(summaries)}
+
+
+@router.get("/self_serve_stats")
+def self_serve_stats(current_user: dict = Depends(get_current_user)):
+    """
+    How many customers finalised an order themselves on the platform, and how
+    many such orders there are. Same source and test-account exclusion as the
+    "Customers w/ Orders" / "Orders Finalized" cards on /admin/customer_activity,
+    so the numbers match exactly.
+
+    Admins see every customer; a salesperson sees only the customers mapped to
+    their code. `customer_activity_logs.customer_id` holds the Zoho contact_id,
+    so scoping goes through `customers.contact_id`.
+    """
+    user_id = (current_user.get("data") or {}).get("_id") or current_user.get("_id")
+    user = db["users"].find_one({"_id": ObjectId(user_id)}, {"role": 1, "code": 1}) if user_id else None
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+
+    match: dict = {
+        "action": "finalize_order",
+        "email": {"$nin": EXCLUDED_ACTIVITY_EMAILS},
+    }
+
+    if "admin" not in (user.get("role") or ""):
+        code = user.get("code") or ""
+        if not code:
+            return {"customers_with_orders": 0, "orders_finalized": 0}
+        # Imported here to avoid a circular import at module load.
+        from .customers import build_salesperson_customer_or_conditions
+
+        contact_ids = [
+            c["contact_id"]
+            for c in db["customers"].find(
+                {"status": "active", "$or": build_salesperson_customer_or_conditions(code)},
+                {"contact_id": 1},
+            )
+            if c.get("contact_id")
+        ]
+        if not contact_ids:
+            return {"customers_with_orders": 0, "orders_finalized": 0}
+        match["customer_id"] = {"$in": contact_ids}
+
+    customers = [c for c in activity_collection.distinct("customer_id", match) if c]
+    orders = [o for o in activity_collection.distinct("metadata.order_id", match) if o]
+
+    return {
+        "customers_with_orders": len(customers),
+        "orders_finalized": len(orders),
+    }
