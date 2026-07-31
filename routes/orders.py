@@ -63,6 +63,39 @@ except Exception as e:
 
 router = APIRouter()
 
+# Staff roles allowed to keep editing an order the customer has already
+# confirmed (paid / COD). Everyone else — customers and shared-link guests —
+# is locked out once payment is committed.
+ORDER_EDIT_OVERRIDE_ROLES = ("admin", "sales_admin", "sales_person")
+
+
+def _optional_user(request: Request) -> dict:
+    """Decode the caller's JWT if one is present, else return {}.
+
+    This router is mounted publicly (shared order-form links have no token),
+    so auth here is best-effort: a missing/!invalid token simply means "not
+    staff", never an error.
+    """
+    token = request.cookies.get("access_token")
+    if not token:
+        header = request.headers.get("Authorization") or ""
+        if header.startswith("Bearer "):
+            token = header[7:]
+    if not token:
+        return {}
+    try:
+        from jose import jwt as _jwt
+
+        payload = _jwt.decode(
+            token,
+            os.getenv("SECRET_KEY"),
+            algorithms=[os.getenv("ALGORITHM", "HS256")],
+        )
+        return payload.get("data") or {}
+    except Exception:
+        return {}
+
+
 timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0)
 # Rate limiting to prevent API quota exhaustion
 class APIRateLimiter:
@@ -2096,18 +2129,27 @@ def read_all_orders(
 
 # Update an order
 @router.put("/{order_id}")
-def update_existing_order(order_id: str, order_update: dict):
+def update_existing_order(order_id: str, order_update: dict, request: Request):
     """
     Update an existing order with raw dictionary data.
     """
-    # Paid and COD orders are locked — the customer has committed to the order
-    # (instant gratification: what they confirmed is what gets fulfilled).
+    # Paid and COD orders are locked for the customer — what they confirmed is
+    # what gets fulfilled.
+    #
+    # A paid order also runs the Zoho chain, which accepts the estimate and
+    # moves the order to 'accepted' — nobody edits it after that, staff
+    # included. A COD order stays in draft, so staff (admin / sales) can still
+    # amend it, e.g. adjusting quantities before dispatch.
     existing = orders_collection.find_one({"_id": ObjectId(order_id)}, {"payment.status": 1})
-    if existing and (existing.get("payment") or {}).get("status") in ("paid", "cod"):
-        raise HTTPException(
-            status_code=400,
-            detail="This order has been confirmed and can no longer be edited",
-        )
+    payment_status = (existing or {}).get("payment", {}).get("status")
+    if payment_status in ("paid", "cod"):
+        role = str(_optional_user(request).get("role") or "")
+        is_staff = any(r in role for r in ORDER_EDIT_OVERRIDE_ROLES)
+        if not (payment_status == "cod" and is_staff):
+            raise HTTPException(
+                status_code=400,
+                detail="This order has been confirmed and can no longer be edited",
+            )
     update_order(order_id, order_update, orders_collection, customers_collection)
     updated_order = get_order(order_id, orders_collection)
     if not updated_order:
