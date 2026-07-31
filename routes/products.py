@@ -14,7 +14,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import Optional
 from pydantic import BaseModel
-import os, json
+import ast, os, json, re
 
 router = APIRouter()
 
@@ -1251,6 +1251,66 @@ def get_notify_requests(
         raise HTTPException(
             status_code=500, detail="Failed to fetch notification requests"
         )
+
+
+@router.get("/brand-site")
+def get_brand_site_products(
+    response: Response,
+    brand: str = Query(..., description="Brand name, e.g. 'Jolly Pawps'"),
+):
+    """
+    Marketing-safe product feed for a brand's own website (thegoodtreatcompany.com).
+
+    Public and read-only: it returns pack imagery and shelf details, never stock,
+    cost or Zoho internals. Unlike /products it does not filter on stock — a brand
+    site lists its range regardless of what happens to be in the warehouse today.
+    """
+    response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
+
+    docs = products_collection.find(
+        {
+            "brand": brand,
+            "status": "active",
+            "is_deleted": {"$exists": False},
+        }
+    ).sort("cf_sku_code", ASCENDING)
+
+    products = []
+    for doc in docs:
+        images = doc.get("images")
+        # Legacy rows store the list as its Python repr — normalise to a real list.
+        if isinstance(images, str):
+            try:
+                images = ast.literal_eval(images)
+            except (ValueError, SyntaxError):
+                images = [images]
+        if not isinstance(images, list):
+            images = []
+        images = [i for i in images if isinstance(i, str) and i.strip()]
+        if not images and doc.get("image_url"):
+            images = [doc["image_url"]]
+
+        name = doc.get("name", "")
+        weight_match = re.search(r"(\d+\s*g)\s*$", name)
+
+        products.append(
+            {
+                "name": name,
+                "display_name": re.sub(
+                    r"\s*-\s*\d+\s*g\s*$", "", re.sub(r"^%s\s+" % re.escape(brand), "", name)
+                ).strip(),
+                "sku": doc.get("cf_sku_code") or doc.get("sku"),
+                "barcode": doc.get("upc_code"),
+                "weight": weight_match.group(1).replace(" ", "") if weight_match else None,
+                "price": float(doc.get("rate") or 0),
+                "category": doc.get("category"),
+                "sub_category": doc.get("sub_category"),
+                "series": doc.get("series"),
+                "images": images,
+            }
+        )
+
+    return {"brand": brand, "count": len(products), "products": products}
 
 
 @router.get("/{product_id}")

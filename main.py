@@ -35,6 +35,10 @@ origins = [
     "http://pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
     "https://www.pupscribe.in",  # WWW subdomain
     "http://www.pupscribe.in",   # HTTP fallback (will redirect to HTTPS)
+    "https://thegoodtreatcompany.com",  # Jolly Pawps brand site
+    "http://thegoodtreatcompany.com",   # HTTP fallback
+    "https://www.thegoodtreatcompany.com",
+    "http://www.thegoodtreatcompany.com",
     "https://blog.barkbutler.in",  # Barkbutler blog
     "http://blog.barkbutler.in",   # HTTP fallback
     "https://barkbutler.in",       # Barkbutler main

@@ -27,6 +27,10 @@ RATE_LIMIT = 1.0
 MAX_CONCURRENT_REQUESTS = 2
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2
+# Zoho throttles refresh-token grants; a throttled grant comes back as HTTP 200
+# with no access_token, and a short pause is usually enough to clear it.
+TOKEN_GRANT_ATTEMPTS = 3
+TOKEN_GRANT_RETRY_DELAY = 5
 
 # API URLs
 INVENTORY_URL = os.getenv("INVENTORY_URL")
@@ -197,32 +201,45 @@ class ZohoAPIClient:
             logger.error("Missing token type")
             return None
 
-        try:
-            async with self.session.post(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    access_token = data.get("access_token", "")
-                    logger.info(
-                        f"Got {tkn.capitalize()} Access Token: ...{access_token[-4:]}"
-                    )
-                    return access_token
-                else:
-                    text = await response.text()
-                    logger.error(
-                        f"Failed to get access token: {response.status} - {text}"
-                    )
-                    return None
-        except Exception as e:
-            logger.error(f"Error getting access token: {e}")
-            return None
+        # Zoho throttles refresh-token grants and answers a throttled grant with
+        # HTTP 200 and no access_token, so retry briefly before giving up.
+        for attempt in range(TOKEN_GRANT_ATTEMPTS):
+            try:
+                async with self.session.post(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        access_token = data.get("access_token", "")
+                        if access_token:
+                            logger.info(
+                                f"Got {tkn.capitalize()} Access Token: "
+                                f"...{access_token[-4:]}"
+                            )
+                            return access_token
+                        logger.warning(
+                            f"Token grant returned no access_token "
+                            f"(attempt {attempt + 1}/{TOKEN_GRANT_ATTEMPTS}): {data}"
+                        )
+                    else:
+                        text = await response.text()
+                        logger.error(
+                            f"Failed to get access token: {response.status} - {text}"
+                        )
+            except Exception as e:
+                logger.error(f"Error getting access token: {e}")
+
+            if attempt < TOKEN_GRANT_ATTEMPTS - 1:
+                await asyncio.sleep(TOKEN_GRANT_RETRY_DELAY)
+
+        return None
 
     async def make_request(
         self, url: str, max_retries: int = RETRY_ATTEMPTS
     ) -> Optional[Dict]:
         """Make a rate-limited request with retries."""
-        headers = {"Authorization": f"Zoho-oauthtoken {self.access_token}"}
+        refreshed = False
 
         for attempt in range(max_retries):
+            headers = {"Authorization": f"Zoho-oauthtoken {self.access_token}"}
             try:
                 await self.rate_limiter.acquire()
 
@@ -230,6 +247,19 @@ class ZohoAPIClient:
                     async with self.session.get(url, headers=headers) as response:
                         if response.status == 200:
                             return await response.json()
+                        elif response.status == 401 and not refreshed:
+                            # A throttled grant can hand back a token Zoho then
+                            # rejects; mint a new one and retry once.
+                            logger.warning("Got 401, refreshing access token")
+                            refreshed = True
+                            await asyncio.sleep(RETRY_DELAY)
+                            self.access_token = await self.get_access_token(
+                                self.service_type
+                            )
+                            if not self.access_token:
+                                logger.error("Token refresh after 401 failed")
+                                return None
+                            continue
                         elif response.status == 429:
                             retry_after = int(
                                 response.headers.get("Retry-After", RETRY_DELAY)
@@ -2881,7 +2911,11 @@ def process_bank_transaction_data(txn: dict, account: dict = None) -> dict:
 
 async def _fetch_all_bank_accounts(api_client) -> list:
     """Walk every page of /bankaccounts. Returns the raw list-view rows.
-    Zoho returns inactive/archived accounts here too."""
+    Zoho returns inactive/archived accounts here too.
+
+    Raises on an API failure instead of returning [] — an empty list has to mean
+    "Zoho has no bank accounts", never "the request died".
+    """
     accounts = []
     page = 1
 
@@ -2891,8 +2925,11 @@ async def _fetch_all_bank_accounts(api_client) -> list:
             f"page={page}&per_page=200&organization_id={org_id}"
         )
         data = await api_client.make_request(url)
-        if not data or "bankaccounts" not in data:
-            break
+        if data is None or "bankaccounts" not in data:
+            raise RuntimeError(
+                f"/bankaccounts request failed on page {page} "
+                f"(response: {str(data)[:200]})"
+            )
 
         accounts.extend(data["bankaccounts"])
         if not data.get("page_context", {}).get("has_more_page"):
@@ -2919,6 +2956,11 @@ async def bank_accounts_cron():
         async with ZohoAPIClient("books") as api_client:
             if not api_client.access_token:
                 logger.error("Failed to get access token")
+                send_slack_notification(
+                    "Bank Accounts Cron",
+                    success=False,
+                    error_msg="Could not get a Zoho Books access token",
+                )
                 return
 
             accounts = await _fetch_all_bank_accounts(api_client)
@@ -3051,6 +3093,9 @@ async def _fetch_bank_txn_window(
 
     date_start and date_end must be sent TOGETHER or Zoho ignores both — each
     on its own is silently dropped and you get an unfiltered result.
+
+    Raises on an API failure so a dead request can never be mistaken for an
+    account with no activity in the window.
     """
     collected = {}
     page = 1
@@ -3065,8 +3110,11 @@ async def _fetch_bank_txn_window(
             f"organization_id={org_id}"
         )
         data = await api_client.make_request(url)
-        if not data or "banktransactions" not in data:
-            break
+        if data is None or "banktransactions" not in data:
+            raise RuntimeError(
+                f"/banktransactions request failed for account {account_id} "
+                f"on page {page} (response: {str(data)[:200]})"
+            )
 
         for t in data["banktransactions"]:
             collected[str(t["transaction_id"])] = t
@@ -3099,6 +3147,7 @@ async def bank_transactions_cron():
     total_updated = 0
     total_errors = 0
     per_account_summary = []
+    failed_accounts = []
 
     try:
         db = get_database()
@@ -3111,11 +3160,21 @@ async def bank_transactions_cron():
         async with ZohoAPIClient("books") as api_client:
             if not api_client.access_token:
                 logger.error("Failed to get access token")
+                send_slack_notification(
+                    "Bank Transactions Cron",
+                    success=False,
+                    error_msg="Could not get a Zoho Books access token",
+                )
                 return
 
             accounts = await _fetch_all_bank_accounts(api_client)
             if not accounts:
                 logger.warning("No bank accounts returned from Zoho")
+                send_slack_notification(
+                    "Bank Transactions Cron",
+                    success=False,
+                    error_msg="Zoho returned no bank accounts",
+                )
                 return
 
             logger.info(f"Syncing transactions for {len(accounts)} accounts")
@@ -3126,9 +3185,18 @@ async def bank_transactions_cron():
                 acc_inserted = 0
                 acc_updated = 0
 
-                collected = await _fetch_bank_txn_window(
-                    api_client, account_id, date_start, date_end
-                )
+                # One unreachable account must not cost us every other account's
+                # sync, so failures are counted and the loop carries on.
+                try:
+                    collected = await _fetch_bank_txn_window(
+                        api_client, account_id, date_start, date_end
+                    )
+                except Exception as e:
+                    logger.error(f"Fetch failed for {account_name}: {e}")
+                    total_errors += 1
+                    failed_accounts.append(account_name)
+                    continue
+
                 txns = list(collected.values())
                 acc_fetched = len(txns)
 
@@ -3194,7 +3262,16 @@ async def bank_transactions_cron():
 
         send_slack_notification(
             "Bank Transactions Cron",
-            success=True,
+            success=not failed_accounts,
+            # details only render on success, so the counts go in the error text
+            # too — a partial run still needs to say what it did manage to sync.
+            error_msg=(
+                f"Failed to fetch: {', '.join(failed_accounts)}\n"
+                f"Synced anyway: {total_fetched} fetched, "
+                f"{total_inserted} inserted, {total_updated} updated"
+                if failed_accounts
+                else None
+            ),
             details={
                 "window_days": BANK_TXN_LOOKBACK_DAYS,
                 "fetched": total_fetched,
