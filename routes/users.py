@@ -966,7 +966,7 @@ async def verify_registration_otp(body: OtpVerify, response: Response):
                     "verified their mobile number and was linked to their existing "
                     "customer record — no approval needed."
                 )
-                notif_link = "/admin/active_users"
+                notif_link = "/admin/leads?tab=b2b"
             else:
                 notif_title = f"New B2B signup verified: +91 {phone10}"
                 notif_body = (

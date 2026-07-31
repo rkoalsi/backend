@@ -3,7 +3,8 @@ from pymongo.collection import Collection
 from datetime import datetime
 from typing import List, Dict, Tuple
 from .helpers import get_access_token, zoho_get
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query, Depends
+from ..config.auth import get_current_user
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 import time, os, httpx, requests, asyncio, ssl, socket, re, io
@@ -1884,20 +1885,36 @@ def get_my_performance(user_id: str):
 
 
 @router.get("/by_salesperson")
-def get_orders_by_salesperson_customers(code: str = "", status: str = ""):
+def get_orders_by_salesperson_customers(
+    code: str = "",
+    status: str = "",
+    current_user: dict = Depends(get_current_user),
+):
     """
     Orders grouped by customer for every customer mapped to the given
     salesperson `code` (same mapping as the customer search bar). Customers are
     returned latest-first by their most recent order date, each with the list of
     their orders (newest first). Used by the salesperson "Customer Orders" page.
-    """
-    if not code:
-        return []
 
-    customer_query = {
-        "status": "active",
-        "$or": build_salesperson_customer_or_conditions(code),
-    }
+    Admins have no salesperson `code`, so for them an empty `code` means "every
+    active customer"; they can still pass a code to narrow to one salesperson.
+    Non-admins are always scoped to their own code, whatever they pass.
+    """
+    user_id = (current_user.get("data") or {}).get("_id") or current_user.get("_id")
+    user = users_collection.find_one({"_id": ObjectId(user_id)}, {"role": 1, "code": 1}) if user_id else None
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+
+    role = user.get("role", "") or ""
+    is_admin = "admin" in role
+    if not is_admin:
+        code = user.get("code") or ""
+        if not code:
+            return []
+
+    customer_query: dict = {"status": "active"}
+    if code:
+        customer_query["$or"] = build_salesperson_customer_or_conditions(code)
     customer_ids = [c["_id"] for c in customers_collection.find(customer_query, {"_id": 1})]
     if not customer_ids:
         return []

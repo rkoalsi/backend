@@ -62,6 +62,11 @@ LEAD_NOTIFICATION_EMAILS = [
     "barksaleskonark@gmail.com",
 ]
 
+# Roles that may NOT opt in to broadcast notification types. These are external
+# accounts — letting them subscribe to e.g. `order_placed` would surface other
+# customers' orders in their bell feed.
+SUBSCRIPTION_EXCLUDED_ROLES = {"customer", "distributor"}
+
 
 def get_user_disabled_types(db, recipient_id: str) -> set:
     """Return the set of notification types the user has muted."""
@@ -72,6 +77,49 @@ def get_user_disabled_types(db, recipient_id: str) -> set:
     except Exception:
         pass
     return set()
+
+
+def get_subscriber_ids(db, notification_type: str) -> list:
+    """
+    User ids that explicitly opted in to `notification_type` on
+    /admin/notification_preferences.
+
+    Routing rules (hardcoded admin emails, role fan-outs, assigned salespeople)
+    decide the *default* recipients of a notification. Preferences on their own
+    can only mute — so an admin who is not a default recipient never receives
+    the type no matter what their toggles say. An explicit subscription is what
+    adds them, and this helper is unioned into every fan-out below.
+    """
+    try:
+        prefs = db.notification_preferences.find(
+            {"subscribed_types": notification_type}, {"user_id": 1}
+        )
+        user_ids = [p["user_id"] for p in prefs if p.get("user_id")]
+        if not user_ids:
+            return []
+        users = db.users.find(
+            {
+                "_id": {"$in": user_ids},
+                "status": "active",
+                "role": {"$nin": list(SUBSCRIPTION_EXCLUDED_ROLES)},
+            },
+            {"_id": 1},
+        )
+        return [str(u["_id"]) for u in users]
+    except Exception as e:
+        print(f"[notifications] Failed to resolve subscribers for {notification_type}: {e}")
+        return []
+
+
+def _fanout(db, recipient_ids, notification_type, title, body, link, extra=None):
+    """Send one notification to a de-duplicated set of recipients."""
+    seen = set()
+    for rid in recipient_ids:
+        rid = str(rid)
+        if rid in seen:
+            continue
+        seen.add(rid)
+        create_notification(db, rid, notification_type, title, body, link, extra)
 
 
 def create_notification(
@@ -129,13 +177,14 @@ def create_notifications_for_role(
     extra: dict = None,
     extra_query: dict = None,
 ):
-    """Send the same notification to every active user with the given role."""
+    """Send the same notification to every active user with the given role,
+    plus anyone who explicitly subscribed to this type."""
     query = {"role": role, "status": "active"}
     if extra_query:
         query.update(extra_query)
     users = db.users.find(query, {"_id": 1})
-    for user in users:
-        create_notification(db, str(user["_id"]), notification_type, title, body, link, extra)
+    recipients = [str(u["_id"]) for u in users] + get_subscriber_ids(db, notification_type)
+    _fanout(db, recipients, notification_type, title, body, link, extra)
 
 
 def create_notifications_for_roles(
@@ -147,10 +196,11 @@ def create_notifications_for_roles(
     link: str,
     extra: dict = None,
 ):
-    """Send the same notification to every active user belonging to any of the given roles."""
+    """Send the same notification to every active user belonging to any of the given
+    roles, plus anyone who explicitly subscribed to this type."""
     users = db.users.find({"role": {"$in": roles}, "status": "active"}, {"_id": 1})
-    for user in users:
-        create_notification(db, str(user["_id"]), notification_type, title, body, link, extra)
+    recipients = [str(u["_id"]) for u in users] + get_subscriber_ids(db, notification_type)
+    _fanout(db, recipients, notification_type, title, body, link, extra)
 
 
 def create_notifications_for_emails(
@@ -162,12 +212,11 @@ def create_notifications_for_emails(
     link: str,
     extra: dict = None,
 ):
-    """Send the same notification to every user matched by the given list of emails."""
-    if not emails:
-        return
-    users = db.users.find({"email": {"$in": emails}}, {"_id": 1})
-    for user in users:
-        create_notification(db, str(user["_id"]), notification_type, title, body, link, extra)
+    """Send the same notification to every user matched by the given list of emails,
+    plus anyone who explicitly subscribed to this type."""
+    users = db.users.find({"email": {"$in": emails}}, {"_id": 1}) if emails else []
+    recipients = [str(u["_id"]) for u in users] + get_subscriber_ids(db, notification_type)
+    _fanout(db, recipients, notification_type, title, body, link, extra)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -280,29 +329,56 @@ def mark_all_read(current_user: dict = Depends(get_current_user)):
 
 @router.get("/preferences")
 def get_preferences(current_user: dict = Depends(get_current_user)):
-    """Return the user's notification preferences (which types are disabled)."""
+    """
+    Return the user's notification preferences.
+
+    Three states per type:
+      • default   → neither list; normal routing rules decide
+      • subscribed→ always receive, even when not a default recipient
+      • disabled  → never receive, even when a default recipient
+    """
     db = get_database()
     user_id = current_user.get("data", {}).get("_id") or current_user.get("_id")
     prefs = db.notification_preferences.find_one({"user_id": ObjectId(user_id)})
-    disabled = prefs.get("disabled_types", []) if prefs else []
+    role = (current_user.get("data", {}) or {}).get("role") or current_user.get("role")
     return {
         "all_types": NOTIFICATION_TYPES,
-        "disabled_types": disabled,
+        "disabled_types": prefs.get("disabled_types", []) if prefs else [],
+        "subscribed_types": prefs.get("subscribed_types", []) if prefs else [],
+        "can_subscribe": role not in SUBSCRIPTION_EXCLUDED_ROLES,
     }
 
 
 @router.put("/preferences")
 async def update_preferences(request: Request, current_user: dict = Depends(get_current_user)):
-    """Update which notification types the user has muted."""
+    """Update which notification types the user has muted / subscribed to."""
     db = get_database()
     user_id = current_user.get("data", {}).get("_id") or current_user.get("_id")
+    role = (current_user.get("data", {}) or {}).get("role") or current_user.get("role")
     body = await request.json()
-    disabled_types = body.get("disabled_types", [])
+
     # Validate — only known types accepted
-    disabled_types = [t for t in disabled_types if t in NOTIFICATION_TYPES]
+    disabled_types = [t for t in body.get("disabled_types", []) if t in NOTIFICATION_TYPES]
+    subscribed_types = [t for t in body.get("subscribed_types", []) if t in NOTIFICATION_TYPES]
+    # External roles can mute but never opt in to broadcast types.
+    if role in SUBSCRIPTION_EXCLUDED_ROLES:
+        subscribed_types = []
+    # A type can't be both — an explicit mute wins.
+    subscribed_types = [t for t in subscribed_types if t not in disabled_types]
+
     db.notification_preferences.update_one(
         {"user_id": ObjectId(user_id)},
-        {"$set": {"user_id": ObjectId(user_id), "disabled_types": disabled_types}},
+        {
+            "$set": {
+                "user_id": ObjectId(user_id),
+                "disabled_types": disabled_types,
+                "subscribed_types": subscribed_types,
+            }
+        },
         upsert=True,
     )
-    return {"ok": True, "disabled_types": disabled_types}
+    return {
+        "ok": True,
+        "disabled_types": disabled_types,
+        "subscribed_types": subscribed_types,
+    }
