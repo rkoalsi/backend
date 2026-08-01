@@ -1536,7 +1536,14 @@ def download_customer_analytics_report(
         }
 
         def _write_analytics_rows(ws, rows):
-            for col, header in enumerate(analytics_headers, 1):
+            # Per-brand last-month sales columns are appended after the base headers
+            # (only when the brand breakdown was requested).
+            brand_last_month_headers = (
+                [f"{brand} ({last_month_label})" for brand in all_brands]
+                if include_brand_breakdown
+                else []
+            )
+            for col, header in enumerate(analytics_headers + brand_last_month_headers, 1):
                 cell = ws.cell(row=1, column=col, value=header)
                 cell.font = header_font
                 cell.fill = header_fill
@@ -1583,6 +1590,23 @@ def download_customer_analytics_report(
                 )
                 ws.cell(row=row_idx, column=31, value=cart.get("lastOrderAt") or "")
                 ws.cell(row=row_idx, column=32, value=cart.get("lastCartAt") or "")
+                if brand_last_month_headers and brand_totals is not None:
+                    composite_key = (
+                        customer.get("customerId", ""),
+                        (
+                            customer.get("addressCity", ""),
+                            customer.get("addressState", ""),
+                            customer.get("addressZip", ""),
+                            customer.get("addressStreet", ""),
+                        ),
+                    )
+                    row_brands = brand_totals.get(composite_key, {})
+                    for brand_idx, brand in enumerate(all_brands):
+                        ws.cell(
+                            row=row_idx,
+                            column=len(analytics_headers) + 1 + brand_idx,
+                            value=round(row_brands.get(brand, {}).get("lastMonth", 0), 2),
+                        )
             for column in ws.columns:
                 max_length = 0
                 column_letter = get_column_letter(column[0].column)
@@ -1596,15 +1620,10 @@ def download_customer_analytics_report(
 
         # Split customers: Sheet 1 = address exists in customers collection,
         # Sheet 2 = invoice address not present in customers.addresses array
+        # (the sheets themselves are written further below, once the brand
+        # breakdown totals are available — they carry per-brand last-month columns)
         registered_customers = [c for c in customers if c.get("_addrFoundInCustomers", False)]
         unregistered_customers = [c for c in customers if not c.get("_addrFoundInCustomers", False)]
-
-        worksheet = workbook.active
-        worksheet.title = "Registered Addresses"
-        _write_analytics_rows(worksheet, registered_customers)
-
-        unregistered_ws = workbook.create_sheet("Unregistered Addresses")
-        _write_analytics_rows(unregistered_ws, unregistered_customers)
 
         # Add Customer Address Summary sheet — fuzzy-group same customer/similar address rows
         def _normalize_addr(addr):
@@ -1722,7 +1741,7 @@ def download_customer_analytics_report(
         # Compute brand breakdown data if requested (before building the combined sheet)
         brand_totals = None
         all_brands = []
-        current_fy_label = last_fy_label = previous_fy_label = ""
+        current_fy_label = last_fy_label = previous_fy_label = last_month_label = ""
         if include_brand_breakdown:
             current_fy_start_year = current_date_info["current_fy_start_year"]
             last_fy_start_year = current_date_info["last_fy_start_year"]
@@ -1731,6 +1750,13 @@ def download_customer_analytics_report(
             current_fy_label = f"FY {current_fy_start_year}-{str(current_fy_start_year + 1)[2:]}"
             last_fy_label = f"FY {last_fy_start_year}-{str(last_fy_start_year + 1)[2:]}"
             previous_fy_label = f"FY {previous_fy_start_year}-{str(previous_fy_start_year + 1)[2:]}"
+
+            # Previous complete calendar month (e.g. on 02-Aug-2026 this is Jul 2026)
+            _cur_year = current_date_info["current_year"]
+            _cur_month = current_date_info["current_month"]
+            last_month_num = 12 if _cur_month == 1 else _cur_month - 1
+            last_month_year = _cur_year - 1 if _cur_month == 1 else _cur_year
+            last_month_label = datetime(last_month_year, last_month_num, 1).strftime("%b %Y")
 
             # Pre-fetch product item_id -> brand map
             brand_map = {}
@@ -1883,6 +1909,12 @@ def download_customer_analytics_report(
                                 },
                             ]
                         },
+                        "isLastMonth": {
+                            "$and": [
+                                {"$eq": ["$invoiceYear", last_month_year]},
+                                {"$eq": ["$invoiceMonth", last_month_num]},
+                            ]
+                        },
                     }
                 },
                 {"$unwind": {"path": "$line_items", "preserveNullAndEmptyArrays": False}},
@@ -1924,14 +1956,27 @@ def download_customer_analytics_report(
                                 ]
                             }
                         },
+                        "lastMonth": {
+                            "$sum": {
+                                "$cond": [
+                                    "$isLastMonth",
+                                    {"$ifNull": ["$line_items.item_total", 0]},
+                                    0,
+                                ]
+                            }
+                        },
                     }
                 },
             ]
 
-            # brand_totals[(cid, city, state, zip, street)][brand] = {currentFY, lastFY, previousFY}
+            # brand_totals[(cid, city, state, zip, street)][brand] = {currentFY, lastFY, previousFY, lastMonth}
             # Keying by (customer_id + address) ensures different locations of the same
             # customer (same customer_id) get separate totals.
-            brand_totals = defaultdict(lambda: defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0}))
+            brand_totals = defaultdict(
+                lambda: defaultdict(
+                    lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0, "lastMonth": 0}
+                )
+            )
             for row in db.invoices.aggregate(brand_pipeline, allowDiskUse=True):
                 cid = row["_id"]["customer_id"]
                 addr_key = (
@@ -1946,6 +1991,7 @@ def download_customer_analytics_report(
                 brand_totals[composite_key][brand]["currentFY"] += row.get("currentFY", 0)
                 brand_totals[composite_key][brand]["lastFY"] += row.get("lastFY", 0)
                 brand_totals[composite_key][brand]["previousFY"] += row.get("previousFY", 0)
+                brand_totals[composite_key][brand]["lastMonth"] += row.get("lastMonth", 0)
 
             all_brands_set = {brand for cid_brands in brand_totals.values() for brand in cid_brands}
             if brands:
@@ -1963,8 +2009,16 @@ def download_customer_analytics_report(
                 ),
             )
 
+        # Write the two per-address analytics sheets (now that brand totals exist)
+        worksheet = workbook.active
+        worksheet.title = "Registered Addresses"
+        _write_analytics_rows(worksheet, registered_customers)
+
+        unregistered_ws = workbook.create_sheet("Unregistered Addresses")
+        _write_analytics_rows(unregistered_ws, unregistered_customers)
+
         # Build combined Address & Brand Breakdown sheet
-        COLS_PER_BRAND = 5
+        COLS_PER_BRAND = 6
         addr_base_headers = [
             "Customer ID",
             "Customer Name",
@@ -1996,6 +2050,7 @@ def download_customer_analytics_report(
                 brand_col_headers.append(f"{brand} YoY% ({previous_fy_label}→{last_fy_label})")
                 brand_col_headers.append(f"{brand} ({current_fy_label})")
                 brand_col_headers.append(f"{brand} YoY% ({last_fy_label}→{current_fy_label})")
+                brand_col_headers.append(f"{brand} ({last_month_label})")
 
         combined_headers = addr_base_headers + brand_col_headers
 
@@ -2065,7 +2120,9 @@ def download_customer_analytics_report(
             if include_brand_breakdown and brand_totals is not None:
                 # Aggregate brand totals per (customer_id, address) key so that
                 # multiple locations of the same customer_id are kept separate.
-                row_brand_totals = defaultdict(lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0})
+                row_brand_totals = defaultdict(
+                    lambda: {"currentFY": 0, "lastFY": 0, "previousFY": 0, "lastMonth": 0}
+                )
                 for cid, addr_key in merged.get("customerAddressKeys", []):
                     composite_key = (cid, addr_key)
                     if composite_key in brand_totals:
@@ -2074,18 +2131,23 @@ def download_customer_analytics_report(
                                 row_brand_totals[brand]["currentFY"] += totals["currentFY"]
                                 row_brand_totals[brand]["lastFY"] += totals["lastFY"]
                                 row_brand_totals[brand]["previousFY"] += totals["previousFY"]
+                                row_brand_totals[brand]["lastMonth"] += totals["lastMonth"]
 
                 for brand_idx, brand in enumerate(all_brands):
                     base_col = len(addr_base_headers) + 1 + brand_idx * COLS_PER_BRAND
-                    totals = row_brand_totals.get(brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0})
+                    totals = row_brand_totals.get(
+                        brand, {"previousFY": 0, "lastFY": 0, "currentFY": 0, "lastMonth": 0}
+                    )
                     prev_val = round(totals["previousFY"], 2)
                     last_val = round(totals["lastFY"], 2)
                     curr_val = round(totals["currentFY"], 2)
+                    last_month_val = round(totals["lastMonth"], 2)
                     addr_ws.cell(row=row_idx, column=base_col, value=prev_val)
                     addr_ws.cell(row=row_idx, column=base_col + 1, value=last_val)
                     _write_growth(addr_ws, row_idx, base_col + 2, _yoy_pct(last_val, prev_val))
                     addr_ws.cell(row=row_idx, column=base_col + 3, value=curr_val)
                     _write_growth(addr_ws, row_idx, base_col + 4, _yoy_pct(curr_val, last_val))
+                    addr_ws.cell(row=row_idx, column=base_col + 5, value=last_month_val)
 
         for column in addr_ws.columns:
             max_length = 0
