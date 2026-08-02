@@ -16,7 +16,25 @@ db = get_database()
 @router.get("")
 def get_catalogues():
     try:
-        catalogues = list(db.catalogues.find({"is_active": True}))
+        catalogues = list(
+            db.catalogues.aggregate(
+                [
+                    {"$match": {"is_active": True, "is_deleted": {"$ne": True}}},
+                    {"$sort": {"name": 1}},
+                    {
+                        "$lookup": {
+                            "from": "brands",
+                            "let": {"ids": {"$ifNull": ["$brand_ids", []]}},
+                            "pipeline": [
+                                {"$match": {"$expr": {"$in": ["$_id", "$$ids"]}}},
+                                {"$project": {"name": 1, "image_url": 1}},
+                            ],
+                            "as": "brand_details",
+                        }
+                    },
+                ]
+            )
+        )
         return serialize_mongo_document(catalogues)
     except Exception as e:
         return e

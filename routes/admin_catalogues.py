@@ -36,17 +36,62 @@ s3_client = boto3.client(
 )
 
 
+def brand_lookup_stages():
+    """Attach the linked brand documents (logo + name) to each catalogue."""
+    return [
+        {
+            "$lookup": {
+                "from": "brands",
+                "let": {"ids": {"$ifNull": ["$brand_ids", []]}},
+                "pipeline": [
+                    {"$match": {"$expr": {"$in": ["$_id", "$$ids"]}}},
+                    {"$project": {"name": 1, "image_url": 1}},
+                ],
+                "as": "brand_details",
+            }
+        }
+    ]
+
+
+def normalise_brand_ids(payload: dict) -> dict:
+    """Convert incoming brand_ids (list of hex strings) into ObjectIds."""
+    if "brand_ids" not in payload:
+        return payload
+    raw = payload.get("brand_ids") or []
+    ids = []
+    for value in raw:
+        if isinstance(value, ObjectId):
+            ids.append(value)
+            continue
+        try:
+            ids.append(ObjectId(str(value)))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid brand id: {value}")
+    payload["brand_ids"] = ids
+    return payload
+
+
 @router.get("")
 def get_catalogues(
     page: int = Query(0, ge=0, description="0-based page index"),
     limit: int = Query(10, ge=1, description="Number of items per page"),
+    search: str = Query(None, description="Filter by catalogue name"),
+    status: str = Query(None, description="active | inactive"),
 ):
     try:
         match_statement = {"is_deleted": {"$ne": True}}
+        if search:
+            match_statement["name"] = {"$regex": search.strip(), "$options": "i"}
+        if status == "active":
+            match_statement["is_active"] = True
+        elif status == "inactive":
+            match_statement["is_active"] = {"$ne": True}
         pipeline = [
             {"$match": match_statement},
+            {"$sort": {"name": 1}},
             {"$skip": page * limit},
             {"$limit": limit},
+            *brand_lookup_stages(),
         ]
         total_count = db.catalogues.count_documents(match_statement)
         cursor = db.catalogues.aggregate(pipeline)
@@ -121,6 +166,7 @@ def create_catalouge(catalogue: dict):
         update_data = {k: v for k, v in catalogue.items() if v is not None}
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
+        update_data = normalise_brand_ids(update_data)
 
         result = db.catalogues.insert_one({**update_data})
 
@@ -147,20 +193,18 @@ def update_catalogue(catalogue_id: str, catalogue: dict):
         update_data = {k: v for k, v in catalogue.items() if v is not None}
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
+        update_data = normalise_brand_ids(update_data)
 
         result = db.catalogues.update_one(
             {"_id": ObjectId(catalogue_id)}, {"$set": update_data}
         )
 
-        if result.modified_count == 1:
+        if result.matched_count == 1:
             # Fetch and return the updated document.
             updated_catalogue = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
             return serialize_mongo_document(updated_catalogue)
         else:
-            # It’s possible that the document was not found or that no changes were made.
-            raise HTTPException(
-                status_code=404, detail="Catalogue not found or no changes applied"
-            )
+            raise HTTPException(status_code=404, detail="Catalogue not found")
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
