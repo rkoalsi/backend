@@ -7,6 +7,7 @@ from .orders import router as orders
 from .util import router as util
 from .admin import router as admin
 from .admin_blog_posts import router as admin_blog_posts
+from .admin_brand_site import router as admin_brand_site
 from .catalogues import router as catalogues
 from .trainings import router as trainings
 from .daily_visits import router as daily_visits
@@ -100,6 +101,12 @@ router.include_router(
 )
 router.include_router(
     admin_blog_posts, prefix="/admin/blog", tags=["Admin Blog"], dependencies=_jwt
+)
+router.include_router(
+    admin_brand_site,
+    prefix="/admin/brand-site",
+    tags=["Admin Brand Site"],
+    dependencies=_jwt,
 )
 router.include_router(
     customers, prefix="/customers", tags=["Customer"], dependencies=_jwt

@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 # win on slow networks without risking meaningfully stale data.
 _CATALOGUE_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300"
 from ..config.root import get_database, serialize_mongo_document
+from .admin_brand_site import get_brand_settings
 from bson.objectid import ObjectId
 from pymongo.collection import Collection
 from pymongo import ASCENDING, DESCENDING
@@ -1264,8 +1265,14 @@ def get_brand_site_products(
     Public and read-only: it returns pack imagery and shelf details, never stock,
     cost or Zoho internals. Unlike /products it does not filter on stock — a brand
     site lists its range regardless of what happens to be in the warehouse today.
+
+    Lab report and buy-now links come from `brand_site_settings`, maintained by
+    admins at /admin/brand_site — see routes/admin_brand_site.py.
     """
     response.headers["Cache-Control"] = _CATALOGUE_CACHE_CONTROL
+
+    settings = get_brand_settings(brand)
+    link_overrides = settings["products"]
 
     docs = products_collection.find(
         {
@@ -1292,6 +1299,8 @@ def get_brand_site_products(
 
         name = doc.get("name", "")
         weight_match = re.search(r"(\d+\s*g)\s*$", name)
+        sku = doc.get("cf_sku_code") or doc.get("sku")
+        links = link_overrides.get(sku) or {}
 
         products.append(
             {
@@ -1299,7 +1308,7 @@ def get_brand_site_products(
                 "display_name": re.sub(
                     r"\s*-\s*\d+\s*g\s*$", "", re.sub(r"^%s\s+" % re.escape(brand), "", name)
                 ).strip(),
-                "sku": doc.get("cf_sku_code") or doc.get("sku"),
+                "sku": sku,
                 "barcode": doc.get("upc_code"),
                 "weight": weight_match.group(1).replace(" ", "") if weight_match else None,
                 "price": float(doc.get("rate") or 0),
@@ -1307,10 +1316,20 @@ def get_brand_site_products(
                 "sub_category": doc.get("sub_category"),
                 "series": doc.get("series"),
                 "images": images,
+                "lab_report_url": links.get("lab_report_url") or "",
+                "shop_url": links.get("shop_url") or "",
             }
         )
 
-    return {"brand": brand, "count": len(products), "products": products}
+    return {
+        "brand": brand,
+        "count": len(products),
+        "products": products,
+        "settings": {
+            "shop_url": settings["shop_url"],
+            "lab_report_url": settings["lab_report_url"],
+        },
+    }
 
 
 @router.get("/{product_id}")
