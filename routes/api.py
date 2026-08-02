@@ -140,9 +140,13 @@ router.include_router(
 router.include_router(
     external_links, prefix="/external_links", tags=["External Links"], dependencies=_jwt
 )
-router.include_router(
-    promotions, prefix="/promotions", tags=["Promotions"], dependencies=_jwt
-)
+# No router-level JWT: the public catalogue at /catalogues/all_products renders
+# these placements for logged-out visitors. Both endpoints were already written
+# for anonymous callers — `_viewer()` returns {} when there is no token rather
+# than raising, so an unattributed impression is still recorded. Nothing here
+# reads or writes customer data; the read returns merchandising artwork and the
+# write only increments counters on `promotions`.
+router.include_router(promotions, prefix="/promotions", tags=["Promotions"])
 router.include_router(
     admin_promotions, prefix="/admin/promotions", tags=["Admin Promotions"], dependencies=_jwt
 )
