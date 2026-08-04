@@ -25,6 +25,7 @@ from .customers import (
     build_salesperson_customer_or_conditions,
     get_salesperson_user_ids_for_customer,
 )
+from .motivation import build_motivation, build_celebration
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
@@ -1831,6 +1832,11 @@ def get_my_performance(user_id: str):
     """
     Return order performance stats for the given user for this month vs. last month.
     Includes order count, total value, and breakdown by status.
+
+    Also carries the homepage's daily motivation line and, when one has been
+    earned and not yet dismissed, a one-off celebration. Both are folded into
+    this response on purpose — the homepage already calls it, so the motivation
+    strip costs no extra round trip.
     """
     import datetime as dt
     from dateutil.relativedelta import relativedelta
@@ -1845,13 +1851,11 @@ def get_my_performance(user_id: str):
     last_month_start = this_month_start - relativedelta(months=1)
     last_month_end = this_month_start
 
+    base_match = {"created_by": user_oid, "status": {"$ne": "deleted"}}
+
     def bucket_stats(start, end):
         pipeline = [
-            {"$match": {
-                "created_by": user_oid,
-                "status": {"$ne": "deleted"},
-                "created_at": {"$gte": start, "$lt": end},
-            }},
+            {"$match": {**base_match, "created_at": {"$gte": start, "$lt": end}}},
             {"$group": {
                 "_id": "$status",
                 "count": {"$sum": 1},
@@ -1867,21 +1871,146 @@ def get_my_performance(user_id: str):
     this_month = bucket_stats(this_month_start, now)
     last_month = bucket_stats(last_month_start, last_month_end)
 
+    # Like-for-like comparison: the same slice of last month that has elapsed of
+    # this one. Comparing three days of August against all of July made every
+    # rep "down 80%" at the start of a month, which is both meaningless and a
+    # miserable thing to open the app to. The full previous month is still
+    # returned for the status breakdown on /orders/performance.
+    elapsed = now - this_month_start
+    last_month_to_date_end = min(last_month_start + elapsed, last_month_end)
+    last_month_to_date = bucket_stats(last_month_start, last_month_to_date_end)
+
     def pct_change(current, previous):
         if previous == 0:
             return None
         return round((current - previous) / previous * 100, 1)
 
-    return {
+    stats = {
         "this_month": this_month,
         "last_month": last_month,
-        "count_change_pct": pct_change(this_month["total_count"], last_month["total_count"]),
-        "value_change_pct": pct_change(this_month["total_value"], last_month["total_value"]),
+        "last_month_to_date": last_month_to_date,
+        "count_change_pct": pct_change(
+            this_month["total_count"], last_month_to_date["total_count"]
+        ),
+        "value_change_pct": pct_change(
+            this_month["total_value"], last_month_to_date["total_value"]
+        ),
         "period": {
             "this_month_label": this_month_start.strftime("%B %Y"),
             "last_month_label": last_month_start.strftime("%B %Y"),
+            "comparison_label": "same time last month",
         },
     }
+
+    # Everything below only feeds the motivation/celebration engine. It must
+    # never be able to break the numbers above, which the performance card and
+    # /orders/performance both depend on.
+    try:
+        stats.update(_motivation_signals(base_match, this_month_start, now))
+        user_doc = users_collection.find_one(
+            {"_id": user_oid}, {"first_name": 1, "celebrations_seen": 1}
+        ) or {}
+        stats["motivation"] = build_motivation(
+            str(user_id), user_doc.get("first_name") or "", stats, now=now
+        )
+        stats["celebration"] = build_celebration(
+            stats, user_doc.get("celebrations_seen") or [], now=now
+        )
+    except Exception as exc:  # pragma: no cover - decorative, never fatal
+        print(f"my-performance motivation failed for {user_id}: {exc}")
+        stats.setdefault("motivation", None)
+        stats.setdefault("celebration", None)
+
+    # Internal signals — the frontend only needs the rendered line.
+    for key in ("monthly_history", "best_customers_month"):
+        stats.pop(key, None)
+
+    return stats
+
+
+def _motivation_signals(base_match: dict, this_month_start, now) -> dict:
+    """
+    The extra history the rule engine needs: 12 months of totals (excluding the
+    current one), distinct customers this month vs. the best previous month, and
+    the current run of consecutive days with at least one order.
+    """
+    import datetime as dt
+    from dateutil.relativedelta import relativedelta
+
+    history_start = this_month_start - relativedelta(months=12)
+
+    monthly = list(orders_collection.aggregate([
+        {"$match": {**base_match, "created_at": {"$gte": history_start, "$lt": this_month_start}}},
+        {"$group": {
+            "_id": {"y": {"$year": "$created_at"}, "m": {"$month": "$created_at"}},
+            "count": {"$sum": 1},
+            "value": {"$sum": {"$toDouble": {"$ifNull": ["$total_amount", 0]}}},
+            "customers": {"$addToSet": "$customer_id"},
+        }},
+        {"$sort": {"_id.y": 1, "_id.m": 1}},
+    ]))
+
+    monthly_history = [
+        {
+            "key": f"{r['_id']['y']}-{r['_id']['m']:02d}",
+            "count": r["count"],
+            "value": r["value"],
+        }
+        for r in monthly
+    ]
+    best_customers_month = max((len(r.get("customers") or []) for r in monthly), default=0)
+
+    current = list(orders_collection.aggregate([
+        {"$match": {**base_match, "created_at": {"$gte": this_month_start, "$lte": now}}},
+        {"$group": {"_id": None, "customers": {"$addToSet": "$customer_id"}}},
+    ]))
+    customers_this_month = len(current[0]["customers"]) if current else 0
+
+    # Streak: distinct order days over the last 45 days, walked backwards from
+    # today. Today not having an order yet doesn't break a streak — we start
+    # from yesterday in that case, so the line reads as "keep it alive" rather
+    # than resetting to zero every morning.
+    streak_start = now - dt.timedelta(days=45)
+    day_rows = orders_collection.aggregate([
+        {"$match": {**base_match, "created_at": {"$gte": streak_start, "$lte": now}}},
+        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}}}},
+    ])
+    order_days = {r["_id"] for r in day_rows}
+
+    today = now.date()
+    cursor = today if today.isoformat() in order_days else today - dt.timedelta(days=1)
+    streak_days = 0
+    while cursor.isoformat() in order_days and streak_days < 45:
+        streak_days += 1
+        cursor -= dt.timedelta(days=1)
+
+    return {
+        "monthly_history": monthly_history,
+        "customers_this_month": customers_this_month,
+        "best_customers_month": best_customers_month,
+        "streak_days": streak_days,
+    }
+
+
+@router.post("/my-performance/celebration_seen")
+def mark_celebration_seen(payload: dict, current_user: dict = Depends(get_current_user)):
+    """
+    Record that a celebration has been shown, so it never fires again. Keys are
+    month-scoped (see routes/motivation.py), so the same achievement can be
+    earned afresh next month.
+    """
+    key = (payload or {}).get("key")
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+
+    user_id = (current_user.get("data") or {}).get("_id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
+
+    users_collection.update_one(
+        {"_id": ObjectId(user_id)}, {"$addToSet": {"celebrations_seen": key}}
+    )
+    return {"status": "ok"}
 
 
 @router.get("/by_salesperson")
