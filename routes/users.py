@@ -612,6 +612,57 @@ async def mark_tour_seen(body: TourSeenUpdate, token: str = Depends(JWTBearer())
     return {"message": "Tour marked as seen"}
 
 
+@router.post("/nav-usage/sync")
+async def sync_nav_usage(body: dict, token: str = Depends(JWTBearer())):
+    """
+    Merge this device's unsent navigation counts into the user's stored totals
+    and hand back the merged map.
+
+    The homepage's "Frequently used" row is per-user, not per-device: a rep who
+    lives on their phone and a sales admin on two laptops should both see one
+    consistent set of shortcuts. The client keeps a local snapshot so the row
+    renders instantly with no network wait, and posts only the *delta* since its
+    last sync — so counts add up across devices instead of one device's
+    cumulative total repeatedly overwriting the other's.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user_data = payload.get("data", {})
+    user_id = user_data.get("_id") if isinstance(user_data, dict) else None
+    try:
+        obj_id = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication")
+
+    deltas = (body or {}).get("deltas") or {}
+    updates: dict = {}
+    maxes: dict = {}
+    # Ids are menu action names / route paths. Dots and dollars are illegal in
+    # Mongo field names, and the cap stops a bad client bloating the document.
+    for raw_id, entry in list(deltas.items())[:100]:
+        key = re.sub(r"[.$]", "_", str(raw_id))[:120]
+        if not key or not isinstance(entry, dict):
+            continue
+        try:
+            count = int(entry.get("count") or 0)
+            last_at = int(entry.get("lastAt") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        updates[f"nav_usage.{key}.count"] = min(count, 500)
+        maxes[f"nav_usage.{key}.lastAt"] = last_at
+
+    if updates:
+        users_collection.update_one({"_id": obj_id}, {"$inc": updates, "$max": maxes})
+
+    user = users_collection.find_one({"_id": obj_id}, {"nav_usage": 1}) or {}
+    return {"usage": user.get("nav_usage") or {}}
+
+
 @router.post("/reset_password")
 async def reset_password(confirm: PasswordResetConfirm):
     try:

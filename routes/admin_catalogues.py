@@ -256,7 +256,11 @@ async def notify():
             "new_catalogue",
             "New catalogue available",
             "A new product catalogue has been published for you.",
-            "/",
+            # Not "/" — the homepage's catalogue section sits below the action
+            # grid, so a customer tapping the notification landed at the top of
+            # the page with no idea where the catalogue was. /catalogues is
+            # public, so this works for logged-out taps too.
+            "/catalogues",
         )
     except Exception as e:
         # Log the exception as needed
