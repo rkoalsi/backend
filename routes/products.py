@@ -15,7 +15,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from typing import Optional
 from pydantic import BaseModel
-import ast, os, json, re
+import ast, os, json, re, time
 
 router = APIRouter()
 
@@ -128,6 +128,64 @@ def get_product_counts(response: Response):
         raise HTTPException(status_code=400, detail="Failed to get product counts")
 
 
+# How long a brand stays flagged as new on the order form. Deliberately the same
+# window the "New Arrivals" collection uses, so the two never disagree about what
+# counts as new.
+NEW_BRAND_MONTHS = 3
+
+# The answer moves at the speed of a product launch, but the query it takes is a
+# group over every product and it sits on the catalogue-init hot path. Cached for
+# the same 60s the HTTP responses carrying it are.
+_NEW_BRANDS_TTL_SECONDS = 60
+_new_brands_cache: dict = {"at": 0.0, "value": set()}
+
+
+def get_new_brand_names() -> set:
+    """
+    Brands we started stocking within the last NEW_BRAND_MONTHS — i.e. every one
+    of the brand's products was added inside that window. A brand with even one
+    older product has been on the form a while and is not new, so the flag clears
+    itself once the brand's first products age out; nothing to switch off by hand.
+
+    Products missing `created_at` count as old: a document that predates the
+    field cannot be evidence of a recent launch.
+    """
+    now = time.time()
+    if now - _new_brands_cache["at"] < _NEW_BRANDS_TTL_SECONDS:
+        return _new_brands_cache["value"]
+
+    cutoff = datetime.now() - relativedelta(months=NEW_BRAND_MONTHS)
+    try:
+        rows = db.products.aggregate(
+            [
+                {
+                    "$match": {
+                        "brand": {"$nin": [None, ""]},
+                        "is_deleted": {"$exists": False},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$brand",
+                        "older_products": {
+                            "$sum": {
+                                "$cond": [{"$gte": ["$created_at", cutoff]}, 0, 1]
+                            }
+                        },
+                    }
+                },
+                {"$match": {"older_products": 0}},
+            ]
+        )
+        names = {row["_id"] for row in rows}
+        _new_brands_cache.update({"at": now, "value": names})
+        return names
+    except Exception as e:
+        # A brand badge is not worth failing the brand list over.
+        print(f"Error computing new brands: {e}")
+        return set()
+
+
 @router.get("/brands")
 def get_all_brands(response: Response):
     """
@@ -140,6 +198,7 @@ def get_all_brands(response: Response):
             "brand",
             {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
         )
+        new_brands = get_new_brand_names()
         brands = []
         for brand_name in brand_names:
             if brand_name != "":
@@ -157,6 +216,7 @@ def get_all_brands(response: Response):
                         "secondary_image_url": brand_doc.get("secondary_image_url"),
                         "description": brand_doc.get("description"),
                         "color": brand_doc.get("color"),
+                        "is_new": brand_name in new_brands,
                     }
                 else:
                     brand = {
@@ -165,6 +225,7 @@ def get_all_brands(response: Response):
                         "secondary_image_url": None,
                         "description": '',
                         "color": None,
+                        "is_new": brand_name in new_brands,
                     }
 
                 brands.append(brand)
@@ -975,6 +1036,7 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
                 "brand",
                 {"stock": {"$gt": 0}, "status": "active", "is_deleted": {"$exists": False}},
             )
+            new_brands = get_new_brand_names()
             result = []
             hidden_brands = {
                 doc["name"]
@@ -994,9 +1056,10 @@ def get_catalogue_init(response: Response, brand: Optional[str] = Query(None, de
                         "secondary_image_url": brand_doc.get("secondary_image_url"),
                         "description": brand_doc.get("description"),
                         "color": brand_doc.get("color"),
+                        "is_new": brand_name in new_brands,
                     })
                 else:
-                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": "", "color": None})
+                    result.append({"brand": brand_name, "image": None, "secondary_image_url": None, "description": "", "color": None, "is_new": brand_name in new_brands})
             return result
 
         def fetch_counts():
