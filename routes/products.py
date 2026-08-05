@@ -302,6 +302,144 @@ def extract_base_name(product_name: str) -> str:
     return base_name
 
 
+# The default product sort groups variants together by "colour" — the last word
+# of the name before any bracket. That heuristic misfires on names that end in a
+# pack size ("Jolly Pawps Codfish Sushi + Salmon - 80g"), where the trailing word
+# is the weight: the 80g SKU sorts into its own bucket, away from the 85g
+# siblings it belongs next to. For those names we group on the name with the pack
+# size stripped, so every size of a product stays together and products order by
+# name. Names without a pack size keep the colour+size behaviour unchanged.
+_PACK_SIZE_REGEX = r"(\d+(?:\.\d+)?)\s*(kgs?|gms?|g|ml|ltrs?|lbs?|oz)$"
+_SIZE_TOKEN_REGEX = r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b"
+_BULK_PACK_UNITS = ["kg", "kgs", "ltr", "ltrs"]
+
+
+def name_sort_stages() -> list:
+    """
+    $addFields stages computing the keys the default product sort relies on:
+    `name_group` (colour, or the pack-size-stripped name), `pack_size_order`
+    (the pack size in grams/ml so 80g < 400g < 1kg numerically) and
+    `size_order`. Shared by GET /products and GET /products/catalogue/all_products
+    so both endpoints order products identically.
+    """
+    return [
+        # Name with any bracketed suffix removed — the basis for every key below.
+        {
+            "$addFields": {
+                "name_base": {
+                    "$trim": {
+                        "input": {
+                            "$arrayElemAt": [{"$split": ["$name", "("]}, 0]
+                        }
+                    }
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "pack_size_match": {
+                    "$regexFind": {
+                        "input": "$name_base",
+                        "regex": _PACK_SIZE_REGEX,
+                        "options": "i",
+                    }
+                },
+                # Colour = last word before the bracket.
+                "extracted_color": {
+                    "$arrayElemAt": [{"$split": ["$name_base", " "]}, -1]
+                },
+                "extracted_size": {
+                    "$regexFind": {"input": "$name", "regex": _SIZE_TOKEN_REGEX}
+                },
+            }
+        },
+        {
+            "$addFields": {
+                "name_group": {
+                    "$cond": [
+                        {"$ne": ["$pack_size_match", None]},
+                        {
+                            "$trim": {
+                                "input": {
+                                    "$substrCP": [
+                                        "$name_base",
+                                        0,
+                                        {"$ifNull": ["$pack_size_match.idx", 0]},
+                                    ]
+                                },
+                                "chars": " -–—|,.",
+                            }
+                        },
+                        "$extracted_color",
+                    ]
+                },
+                # Normalise to grams / ml so 80g sorts before 1kg.
+                "pack_size_order": {
+                    "$cond": [
+                        {"$ne": ["$pack_size_match", None]},
+                        {
+                            "$multiply": [
+                                {
+                                    "$toDouble": {
+                                        "$arrayElemAt": [
+                                            "$pack_size_match.captures",
+                                            0,
+                                        ]
+                                    }
+                                },
+                                {
+                                    "$cond": [
+                                        {
+                                            "$in": [
+                                                {
+                                                    "$toLower": {
+                                                        "$arrayElemAt": [
+                                                            "$pack_size_match.captures",
+                                                            1,
+                                                        ]
+                                                    }
+                                                },
+                                                _BULK_PACK_UNITS,
+                                            ]
+                                        },
+                                        1000,
+                                        1,
+                                    ]
+                                },
+                            ]
+                        },
+                        0,
+                    ]
+                },
+                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
+            }
+        },
+        {
+            "$addFields": {
+                "size_order": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
+                            {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
+                            {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
+                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
+                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
+                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
+                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
+                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
+                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
+                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
+                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
+                        ],
+                        "default": 99,
+                    }
+                },
+            }
+        },
+        {"$unset": ["name_base", "pack_size_match"]},
+    ]
+
+
 @router.get("")
 def get_products(
     role: str = "salesperson",
@@ -399,88 +537,7 @@ def get_products(
             query["catalogue_order"] = {"$exists": True, "$ne": None}
         sort_stage = {"catalogue_order": ASCENDING}
     else:
-        # Stage 1: Extract color and size
-        pipeline.append(
-            {
-                "$addFields": {
-                    # Extract color (last word before parenthesis or end)
-                    "extracted_color": {
-                        "$arrayElemAt": [
-                            {
-                                "$split": [
-                                    {
-                                        "$trim": {
-                                            "input": {
-                                                "$arrayElemAt": [
-                                                    {"$split": ["$name", "("]},
-                                                    0,
-                                                ]
-                                            }
-                                        }
-                                    },
-                                    " ",
-                                ]
-                            },
-                            -1,
-                        ]
-                    },
-                    # Extract size - match XS, S, M, L, XL, XXL, XXXL, XXXXL with word boundaries
-                    "extracted_size": {
-                        "$regexFind": {
-                            "input": "$name",
-                            "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",  # XXXXL must come before XXXL before XXL and XL
-                        }
-                    },
-                }
-            }
-        )
-
-        # Stage 2: Create size_for_sort from extracted_size
-        pipeline.append(
-            {
-                "$addFields": {
-                    "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
-                }
-            }
-        )
-
-        # Stage 3: Create size_order from size_for_sort
-        pipeline.append(
-            {
-                "$addFields": {
-                    "size_order": {
-                        "$switch": {
-                            "branches": [
-                                {
-                                    "case": {"$eq": ["$size_for_sort", "XXXXS"]},
-                                    "then": 1,
-                                },
-                                {
-                                    "case": {"$eq": ["$size_for_sort", "XXXS"]},
-                                    "then": 2,
-                                },
-                                {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
-                                {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
-                                {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
-                                {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
-                                {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
-                                {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
-                                {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
-                                {
-                                    "case": {"$eq": ["$size_for_sort", "XXXL"]},
-                                    "then": 10,
-                                },
-                                {
-                                    "case": {"$eq": ["$size_for_sort", "XXXXL"]},
-                                    "then": 11,
-                                },
-                            ],
-                            "default": 99,
-                        }
-                    },
-                }
-            }
-        )
+        pipeline.extend(name_sort_stages())
 
         sort_stage = {
             "brand": ASCENDING,
@@ -488,8 +545,9 @@ def get_products(
             "category": ASCENDING,
             "sub_category": ASCENDING,
             "series": ASCENDING,
-            "extracted_color": ASCENDING,  # COLOR FIRST - groups colors together
-            "size_order": ASCENDING,  # SIZE SECOND - sorts sizes within each color
+            "name_group": ASCENDING,  # colour, or the pack-size-stripped name
+            "pack_size_order": ASCENDING,  # 80g before 400g before 1kg
+            "size_order": ASCENDING,  # sizes within each group
             "rate": ASCENDING,
             "name": ASCENDING,
         }
@@ -783,83 +841,16 @@ def get_all_products_catalogue(
     if new_only:
         pipeline.append({"$match": {"created_at": {"$gte": three_months_ago}}})
 
-    # Add default sorting (same as main products route)
-    # Stage 1: Extract color and size
-    pipeline.append(
-        {
-            "$addFields": {
-                "extracted_color": {
-                    "$arrayElemAt": [
-                        {
-                            "$split": [
-                                {
-                                    "$trim": {
-                                        "input": {
-                                            "$arrayElemAt": [
-                                                {"$split": ["$name", "("]},
-                                                0,
-                                            ]
-                                        }
-                                    }
-                                },
-                                " ",
-                            ]
-                        },
-                        -1,
-                    ]
-                },
-                "extracted_size": {
-                    "$regexFind": {
-                        "input": "$name",
-                        "regex": r"\b(XXXXL|XXXL|XXL|XL|XXXXS|XXXS|XXS|XS|S|M|L)\b",
-                    }
-                },
-            }
-        }
-    )
+    # Same default sort as the main products route.
+    pipeline.extend(name_sort_stages())
 
-    # Stage 2: Create size_for_sort from extracted_size
-    pipeline.append(
-        {
-            "$addFields": {
-                "size_for_sort": {"$ifNull": ["$extracted_size.match", "ZZZ"]},
-            }
-        }
-    )
-
-    # Stage 3: Create size_order from size_for_sort
-    pipeline.append(
-        {
-            "$addFields": {
-                "size_order": {
-                    "$switch": {
-                        "branches": [
-                            {"case": {"$eq": ["$size_for_sort", "XXXXS"]}, "then": 1},
-                            {"case": {"$eq": ["$size_for_sort", "XXXS"]}, "then": 2},
-                            {"case": {"$eq": ["$size_for_sort", "XXS"]}, "then": 3},
-                            {"case": {"$eq": ["$size_for_sort", "XS"]}, "then": 4},
-                            {"case": {"$eq": ["$size_for_sort", "S"]}, "then": 5},
-                            {"case": {"$eq": ["$size_for_sort", "M"]}, "then": 6},
-                            {"case": {"$eq": ["$size_for_sort", "L"]}, "then": 7},
-                            {"case": {"$eq": ["$size_for_sort", "XL"]}, "then": 8},
-                            {"case": {"$eq": ["$size_for_sort", "XXL"]}, "then": 9},
-                            {"case": {"$eq": ["$size_for_sort", "XXXL"]}, "then": 10},
-                            {"case": {"$eq": ["$size_for_sort", "XXXXL"]}, "then": 11},
-                        ],
-                        "default": 99,
-                    }
-                },
-            }
-        }
-    )
-
-    # Use exact same sort as main products route (lines 373-383)
     sort_stage = {
         "brand": ASCENDING,
         "category": ASCENDING,
         "sub_category": ASCENDING,
         "series": ASCENDING,
-        "extracted_color": ASCENDING,
+        "name_group": ASCENDING,
+        "pack_size_order": ASCENDING,
         "size_order": ASCENDING,
         "rate": ASCENDING,
         "name": ASCENDING,
