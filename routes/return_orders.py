@@ -8,7 +8,11 @@ from typing import Optional, List
 from pydantic import BaseModel
 from ..config.whatsapp import send_whatsapp
 from .helpers import get_access_token, zoho_get
-from .notifications import create_notification
+from .notifications import (
+    create_notification,
+    get_subscriber_ids,
+    ADMIN_NOTIFICATION_EMAILS,
+)
 import os
 import boto3
 import io
@@ -180,6 +184,95 @@ def return_order_notification(params, created_by):
         # Don't raise exception - notification failure shouldn't fail the order creation
 
 
+def _admin_recipient_ids(notification_type: str) -> set:
+    """
+    Everyone who should hear about a return order on the admin side: the admin /
+    sales_admin roles, the fixed operational mailboxes, and anyone who explicitly
+    subscribed to this notification type.
+    """
+    recipient_ids = set()
+    try:
+        for u in db.users.find(
+            {"role": {"$in": ["admin", "sales_admin"]}, "status": "active"}, {"_id": 1}
+        ):
+            recipient_ids.add(str(u["_id"]))
+
+        fixed_queries = [
+            {"email": {"$in": ADMIN_NOTIFICATION_EMAILS}},
+            {"email": "barkbutleracc@gmail.com"},
+            {"designation": "Customer Care"},
+            {"email": "pupscribeoffcoordinator@gmail.com"},
+        ]
+        for query in fixed_queries:
+            for u in db.users.find(query, {"_id": 1}):
+                recipient_ids.add(str(u["_id"]))
+
+        recipient_ids.update(get_subscriber_ids(db, notification_type))
+    except Exception as e:
+        print(f"[notifications] Failed to resolve return order admins: {e}")
+    return recipient_ids
+
+
+def notify_return_order_created(return_order: dict, is_partial: bool = False):
+    """
+    In-app notification to the admin side when a salesperson creates a return
+    order. Partial return orders (no items yet) are flagged so admins know the
+    products are still to come.
+    """
+    try:
+        ro_id = str(return_order.get("_id", ""))
+        customer_name = return_order.get("customer_name", "")
+        total_quantity = sum(
+            item.get("quantity", 0) for item in return_order.get("items", []) or []
+        )
+
+        if is_partial:
+            title = f"Partial return order created – {customer_name}"
+            body = (
+                f"Reason: {return_order.get('return_reason', '')}. "
+                "Products have not been added yet."
+            )
+        else:
+            title = f"Return order created – {customer_name}"
+            body = (
+                f"Reason: {return_order.get('return_reason', '')}. "
+                f"Items: {total_quantity}."
+            )
+
+        # The id keeps the link unique so repeat returns for the same customer
+        # are not swallowed by create_notification's dedup check.
+        link = f"/admin/return_orders?return_order_id={ro_id}"
+
+        recipients = _admin_recipient_ids("return_order_created")
+        created_by = return_order.get("created_by")
+        if created_by:
+            recipients.add(str(created_by))
+
+        for uid in recipients:
+            create_notification(
+                db, uid, "return_order_created", title, body, link
+            )
+    except Exception as e:
+        print(f"[notifications] return_order_created error: {e}")
+
+
+def notify_return_order_items_added(return_order: dict):
+    """Tell the admin side that a partial return order now has its products."""
+    try:
+        ro_id = str(return_order.get("_id", ""))
+        total_quantity = sum(
+            item.get("quantity", 0) for item in return_order.get("items", []) or []
+        )
+        title = f"Return order items added – {return_order.get('customer_name', '')}"
+        body = f"Products were added to this return order. Items: {total_quantity}."
+        link = f"/admin/return_orders?return_order_id={ro_id}&items_added=1"
+
+        for uid in _admin_recipient_ids("return_order_created"):
+            create_notification(db, uid, "return_order_created", title, body, link)
+    except Exception as e:
+        print(f"[notifications] return_order_items_added error: {e}")
+
+
 @router.post("")
 async def create_return_order(return_order: ReturnOrderCreate):
     """
@@ -241,6 +334,8 @@ async def create_return_order(return_order: ReturnOrderCreate):
                 item.dict() if hasattr(item, "dict") else item
                 for item in order_dict["items"]
             ]
+        else:
+            order_dict["items"] = []
         for idx, item in enumerate(order_dict["items"]):
             try:
                 item["product_id"] = ObjectId(item["product_id"])
@@ -250,13 +345,22 @@ async def create_return_order(return_order: ReturnOrderCreate):
                     detail=f"Invalid product_id for item {idx}: {item.get('product_id')} - {str(e)}",
                 )
 
+        # Partial return order: the salesperson picked the customer now and will
+        # add the products later from the edit flow.
+        is_partial = len(order_dict["items"]) == 0
+        order_dict["is_partial"] = is_partial
+
         # Insert the document
         result = return_orders_collection.insert_one(order_dict)
 
         # Create the Zoho Books credit note right away (return order stays in
         # draft; admin approval later only changes the status).
         credit_note_warning = None
-        if create_credit_note:
+        if create_credit_note and is_partial:
+            credit_note_warning = (
+                "No products were added, so no credit note was created yet."
+            )
+        elif create_credit_note:
             try:
                 from .admin_return_orders import create_zoho_credit_note
 
@@ -305,27 +409,10 @@ async def create_return_order(return_order: ReturnOrderCreate):
             created_by=ObjectId(order_dict["created_by"]),
         )
 
-        # In-app notification for return order → same recipients as WhatsApp
-        try:
-            ro_id = str(result.inserted_id)
-            ro_title = f"Return order created – {order_dict.get('customer_name', '')}"
-            ro_body = f"Reason: {order_dict.get('return_reason', '')}. Items: {total_quantity}."
-            ro_link = f"/admin/return_orders"
-            _notify_ids = set()
-            for query in [
-                {"_id": ObjectId(order_dict["created_by"])},
-                {"email": "pupscribeinvoicee@gmail.com"},
-                {"email": "barkbutleracc@gmail.com"},
-                {"designation": "Customer Care"},
-                {"email": "pupscribeoffcoordinator@gmail.com"},
-            ]:
-                u = db.users.find_one(query, {"_id": 1})
-                if u:
-                    _notify_ids.add(str(u["_id"]))
-            for uid in _notify_ids:
-                create_notification(db, uid, "return_order_created", ro_title, ro_body, ro_link)
-        except Exception as _e:
-            print(f"[notifications] return_order error: {_e}")
+        # In-app notification for the admin side (plus the creator)
+        notify_return_order_created(
+            {**order_dict, "_id": result.inserted_id}, is_partial=is_partial
+        )
 
         if result.inserted_id:
             # Fetch and return the created document
@@ -474,11 +561,25 @@ async def update_return_order(return_order_id: str, update_data: ReturnOrderUpda
         update_dict["updated_at"] = datetime.now()
 
         # Convert items to dict format if provided
-        if "items" in update_dict and update_dict["items"]:
+        if "items" in update_dict:
             update_dict["items"] = [
                 item.dict() if hasattr(item, "dict") else item
-                for item in update_dict["items"]
+                for item in (update_dict["items"] or [])
             ]
+            for idx, item in enumerate(update_dict["items"]):
+                try:
+                    item["product_id"] = ObjectId(item["product_id"])
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid product_id for item {idx}: {item.get('product_id')} - {str(e)}",
+                    )
+            # Adding the products is what turns a partial return order into a
+            # complete one.
+            update_dict["is_partial"] = len(update_dict["items"]) == 0
+
+        existing_order = return_orders_collection.find_one({"_id": object_id})
+        was_partial = bool(existing_order.get("is_partial")) if existing_order else False
 
         # Update the document
         result = return_orders_collection.update_one(
@@ -523,6 +624,12 @@ async def update_return_order(return_order_id: str, update_data: ReturnOrderUpda
             params,
             created_by=ObjectId(data["created_by"]),
         )
+
+        # A partial return order that just received its products is news for the
+        # admin side.
+        if was_partial and not updated_order.get("is_partial", True):
+            notify_return_order_items_added(updated_order)
+
         return {
             "message": "Return order updated successfully",
             "return_order": serialized_order,

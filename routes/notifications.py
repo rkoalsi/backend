@@ -15,6 +15,7 @@ NOTIFICATION_TYPES = {
     "product_back_in_stock": "Product Back in Stock",
     # returns
     "return_order_created": "Return Order Created",
+    "return_order_status": "Return Order Status Updated",
     # customer creation requests
     "customer_request_submitted": "New Customer Request",
     "customer_request_status": "Customer Request Updated",
