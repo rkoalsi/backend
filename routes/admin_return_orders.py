@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from ..config.root import get_database, serialize_mongo_document
 from bson.objectid import ObjectId
 from .helpers import notify_all_salespeople, get_access_token
+from .notifications import create_notification
 from dotenv import load_dotenv
 import os, datetime, uuid, boto3, io, requests
 from typing import Optional
@@ -378,6 +379,32 @@ def update_zoho_credit_note(return_order: dict, creditnote_id: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def notify_salesperson_status_change(return_order: dict, new_status: str, old_status: str = ""):
+    """
+    Tell the salesperson who raised the return order that an admin moved its
+    status forward.
+    """
+    try:
+        created_by = return_order.get("created_by")
+        if not created_by:
+            return
+
+        ro_id = str(return_order.get("_id", ""))
+        customer_name = return_order.get("customer_name", "")
+        title = f"Return order {new_status.replace('_', ' ')} – {customer_name}"
+        body = (
+            f"Your return order for {customer_name} was moved from "
+            f"{(old_status or 'draft').replace('_', ' ')} to {new_status.replace('_', ' ')}."
+        )
+        link = f"/return_orders?return_order_id={ro_id}&status={new_status}"
+
+        create_notification(
+            db, str(created_by), "return_order_status", title, body, link
+        )
+    except Exception as e:
+        print(f"[notifications] return_order_status error: {e}")
+
+
 # Pydantic model for status update
 class StatusUpdateRequest(BaseModel):
     status: str
@@ -720,6 +747,9 @@ def update_return_order_status(
         cursor = return_orders_collection.aggregate(pipeline)
         updated_order = list(cursor)[0]
 
+        if new_status != old_status:
+            notify_salesperson_status_change(existing_order, new_status, old_status)
+
         return {
             "message": f"Return order status updated to {status_request.status}",
             "return_order": serialize_mongo_document(updated_order),
@@ -783,6 +813,12 @@ def update_return_order(return_order_id: str, update_data: dict):
 
         cursor = return_orders_collection.aggregate(pipeline)
         updated_order = list(cursor)[0]
+
+        new_status = update_data.get("status")
+        if new_status and new_status != existing_order.get("status"):
+            notify_salesperson_status_change(
+                existing_order, new_status, existing_order.get("status", "")
+            )
 
         return {
             "message": "Return order updated successfully",
