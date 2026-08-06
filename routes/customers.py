@@ -87,8 +87,15 @@ def get_salesperson_user_ids_for_customer(db, customer_doc: dict) -> list:
     if not codes:
         return []
 
+    # Role in `db.users` is `sales_person` (underscore) — `sales_admin` accounts
+    # also carry a `code` and own customers, so both are matched. `status` is
+    # absent on some legacy users, so exclude only explicit `inactive`.
     users = db.users.find(
-        {"role": "salesperson", "status": "active", "code": {"$in": list(codes)}},
+        {
+            "role": {"$in": ["sales_person", "sales_admin"]},
+            "status": {"$ne": "inactive"},
+            "code": {"$in": list(codes)},
+        },
         {"_id": 1},
     )
     return [str(u["_id"]) for u in users]
