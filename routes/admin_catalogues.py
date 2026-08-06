@@ -1,5 +1,6 @@
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
     Query,
     File,
@@ -7,7 +8,9 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from ..config.root import get_database, serialize_mongo_document
+from ..config.auth import get_current_user
 from bson.objectid import ObjectId
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 import boto3, uuid, os
 from .helpers import notify_all_salespeople
@@ -34,6 +37,48 @@ s3_client = boto3.client(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
 )
+
+
+def utcnow():
+    """
+    Current time as a *naive UTC* datetime, matching how every other timestamp
+    in this database is stored.
+
+    `datetime.now()` would be wrong here: on a dev machine it returns IST wall
+    clock and on the server it returns UTC, so the same field would mean two
+    different things depending on where the write happened. Anchoring to UTC
+    keeps the value unambiguous; the frontend converts it to IST for display.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def actor(token_payload: dict) -> str:
+    """Best-effort human name for the admin behind a change."""
+    user = (token_payload or {}).get("data") or {}
+    if isinstance(user, dict):
+        return user.get("name") or user.get("email") or "Unknown"
+    return "Unknown"
+
+
+def history_entry(action: str, user: dict, **extra) -> dict:
+    """One row of the audit trail kept on `catalogues.history`."""
+    return {"action": action, "at": utcnow(), "by": actor(user), **extra}
+
+
+def timestamp_stages():
+    """
+    Fill in `created_at` for catalogues written before timestamps existed.
+
+    An ObjectId embeds its creation time (in UTC), so legacy rows still get a
+    truthful "added on" date instead of a blank cell.
+    """
+    return [
+        {
+            "$addFields": {
+                "created_at": {"$ifNull": ["$created_at", {"$toDate": "$_id"}]},
+            }
+        }
+    ]
 
 
 def brand_lookup_stages():
@@ -91,6 +136,7 @@ def get_catalogues(
             {"$sort": {"name": 1}},
             {"$skip": page * limit},
             {"$limit": limit},
+            *timestamp_stages(),
             *brand_lookup_stages(),
         ]
         total_count = db.catalogues.count_documents(match_statement)
@@ -112,8 +158,69 @@ def get_catalogues(
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.get("/history")
+def get_catalogue_history(
+    limit: int = Query(200, ge=1, le=1000, description="Max events to return"),
+):
+    """
+    A single reverse-chronological timeline of every catalogue change.
+
+    Catalogues created before the audit trail existed have no `history` array,
+    so their ObjectId timestamp is synthesised into a "created" event — the
+    timeline then covers the whole collection rather than only recent activity.
+    """
+    try:
+        pipeline = [
+            {"$match": {"is_deleted": {"$ne": True}}},
+            {
+                "$addFields": {
+                    "history": {
+                        "$cond": [
+                            {"$gt": [{"$size": {"$ifNull": ["$history", []]}}, 0]},
+                            "$history",
+                            [
+                                {
+                                    "action": "created",
+                                    "at": {
+                                        "$ifNull": [
+                                            "$created_at",
+                                            {"$toDate": "$_id"},
+                                        ]
+                                    },
+                                    "by": None,
+                                }
+                            ],
+                        ]
+                    }
+                }
+            },
+            {"$unwind": "$history"},
+            {
+                "$project": {
+                    "_id": 0,
+                    "catalogue_id": {"$toString": "$_id"},
+                    "catalogue_name": "$name",
+                    "is_active": 1,
+                    "action": "$history.action",
+                    "at": "$history.at",
+                    "by": "$history.by",
+                    "fields": "$history.fields",
+                }
+            },
+            {"$sort": {"at": -1}},
+            {"$limit": limit},
+        ]
+        events = [
+            serialize_mongo_document(doc)
+            for doc in db.catalogues.aggregate(pipeline, allowDiskUse=True)
+        ]
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.delete("/{catalogue_id}")
-def delete_catalogue(catalogue_id: str):
+def delete_catalogue(catalogue_id: str, user: dict = Depends(get_current_user)):
     """
     Delete a catalogue by its ID.
     This example performs a hard delete.
@@ -121,9 +228,17 @@ def delete_catalogue(catalogue_id: str):
     """
     try:
         doc = db.catalogues.find_one({"_id": ObjectId(catalogue_id)})
+        new_state = not doc.get("is_active")
         result = db.catalogues.update_one(
             {"_id": ObjectId(catalogue_id)},
-            {"$set": {"is_active": not doc.get("is_active")}},
+            {
+                "$set": {"is_active": new_state, "updated_at": utcnow()},
+                "$push": {
+                    "history": history_entry(
+                        "activated" if new_state else "deactivated", user
+                    )
+                },
+            },
         )
         if result.modified_count == 1:
             return {"detail": "Catalogue deleted successfully (soft delete)"}
@@ -135,7 +250,7 @@ def delete_catalogue(catalogue_id: str):
 
 
 @router.delete("/{catalogue_id}/soft_delete")
-def soft_delete_catalogue(catalogue_id: str):
+def soft_delete_catalogue(catalogue_id: str, user: dict = Depends(get_current_user)):
     """
     Soft delete a catalogue by marking it as deleted.
     The document is retained in the database but excluded from listings.
@@ -143,7 +258,14 @@ def soft_delete_catalogue(catalogue_id: str):
     try:
         result = db.catalogues.update_one(
             {"_id": ObjectId(catalogue_id)},
-            {"$set": {"is_deleted": True, "is_active": False}},
+            {
+                "$set": {
+                    "is_deleted": True,
+                    "is_active": False,
+                    "updated_at": utcnow(),
+                },
+                "$push": {"history": history_entry("deleted", user)},
+            },
         )
         if result.matched_count == 1:
             return {"detail": "Catalogue deleted successfully"}
@@ -156,7 +278,7 @@ def soft_delete_catalogue(catalogue_id: str):
 
 
 @router.post("")
-def create_catalouge(catalogue: dict):
+def create_catalouge(catalogue: dict, user: dict = Depends(get_current_user)):
     """
     Update the catalogue with the provided fields.
     Only the fields sent in the request will be updated.
@@ -168,7 +290,15 @@ def create_catalouge(catalogue: dict):
             raise HTTPException(status_code=400, detail="No update data provided")
         update_data = normalise_brand_ids(update_data)
 
-        result = db.catalogues.insert_one({**update_data})
+        now = utcnow()
+        result = db.catalogues.insert_one(
+            {
+                **update_data,
+                "created_at": now,
+                "updated_at": now,
+                "history": [history_entry("created", user)],
+            }
+        )
 
         if result:
             # Fetch and return the updated document.
@@ -183,7 +313,9 @@ def create_catalouge(catalogue: dict):
 
 
 @router.put("/{catalogue_id}")
-def update_catalogue(catalogue_id: str, catalogue: dict):
+def update_catalogue(
+    catalogue_id: str, catalogue: dict, user: dict = Depends(get_current_user)
+):
     """
     Update the catalogue with the provided fields.
     Only the fields sent in the request will be updated.
@@ -195,8 +327,19 @@ def update_catalogue(catalogue_id: str, catalogue: dict):
             raise HTTPException(status_code=400, detail="No update data provided")
         update_data = normalise_brand_ids(update_data)
 
+        # Only the fields that actually moved go into the timeline — a save with
+        # no edits shouldn't read as a change in the history tab.
+        existing = db.catalogues.find_one({"_id": ObjectId(catalogue_id)}) or {}
+        changed = [k for k, v in update_data.items() if existing.get(k) != v]
+
         result = db.catalogues.update_one(
-            {"_id": ObjectId(catalogue_id)}, {"$set": update_data}
+            {"_id": ObjectId(catalogue_id)},
+            {
+                "$set": {**update_data, "updated_at": utcnow()},
+                "$push": {
+                    "history": history_entry("updated", user, fields=changed)
+                },
+            },
         )
 
         if result.matched_count == 1:
