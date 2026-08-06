@@ -21,6 +21,17 @@ def get_catalogues():
                 [
                     {"$match": {"is_active": True, "is_deleted": {"$ne": True}}},
                     {"$sort": {"name": 1}},
+                    # Catalogues predating the timestamp fields fall back to the
+                    # ObjectId's embedded (UTC) creation time so the card always
+                    # has a date to show.
+                    {
+                        "$addFields": {
+                            "created_at": {
+                                "$ifNull": ["$created_at", {"$toDate": "$_id"}]
+                            }
+                        }
+                    },
+                    {"$project": {"history": 0}},
                     {
                         "$lookup": {
                             "from": "brands",
